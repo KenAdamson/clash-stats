@@ -1,0 +1,23 @@
+FROM python:3.11-alpine
+
+WORKDIR /app
+
+# Install dependencies first (layer caching)
+COPY pyproject.toml .
+RUN pip install --no-cache-dir .
+
+# Copy application code
+COPY src/tracker/cr_tracker.py .
+COPY src/cycle_sim/cr_cycle_sim.py .
+
+# Create data directory for SQLite volume mount
+RUN mkdir -p /app/data
+
+# Cron schedule — Alpine's crond is built into BusyBox, already present
+COPY crontab /etc/crontabs/root
+
+COPY entrypoint.sh /app/entrypoint.sh
+
+VOLUME ["/app/data"]
+
+ENTRYPOINT ["/app/entrypoint.sh"]

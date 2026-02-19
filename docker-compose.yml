@@ -1,0 +1,14 @@
+services:
+  cr-tracker:
+    build: .
+    container_name: cr-tracker
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - FETCH_INTERVAL=14400  # 4 hours in seconds
+    volumes:
+      - ./data:/app/data
+    # Port reserved for future web dashboard
+    # ports:
+    #   - "8078:8078"

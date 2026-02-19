@@ -1,0 +1,2 @@
+# Fetch battles every 4 hours — plenty for 1-2 games/day with a 25-game API window
+0 */4 * * * /app/fetch.sh >> /proc/1/fd/1 2>> /proc/1/fd/2

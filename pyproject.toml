@@ -1,0 +1,15 @@
+[project]
+name = "clash-stats"
+version = "0.1.0"
+description = "Clash Royale analytics suite — battle tracker and push sequence simulator"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["src"]
+python_files = ["test_*.py"]
