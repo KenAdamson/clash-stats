@@ -3,13 +3,21 @@
 import os
 from pathlib import Path
 
-from flask import Flask, jsonify, render_template
+from flask import Flask, jsonify, render_template, request
 
 from tracker import analytics
 from tracker.database import get_engine, get_session, init_db
 
 TEMPLATE_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
+
+
+def _ladder_only() -> bool:
+    """Check if the request should filter to ladder-only battles.
+
+    Default is ladder-only. Pass ?mode=all to include everything.
+    """
+    return request.args.get("mode", "ladder") != "all"
 
 
 def create_app(db_path: str | None = None) -> Flask:
@@ -44,7 +52,8 @@ def create_app(db_path: str | None = None) -> Flask:
     def api_overview():
         session = get_session(engine)
         try:
-            stats = analytics.get_overall_stats(session)
+            lo = _ladder_only()
+            stats = analytics.get_overall_stats(session, ladder_only=lo)
             api_stats = analytics.get_all_time_api_stats(session)
             diff = analytics.get_snapshot_diff(session)
             return jsonify({
@@ -59,7 +68,7 @@ def create_app(db_path: str | None = None) -> Flask:
     def api_trophy_history():
         session = get_session(engine)
         try:
-            history = analytics.get_trophy_history(session)
+            history = analytics.get_trophy_history(session, ladder_only=_ladder_only())
             return jsonify(history)
         finally:
             session.close()
@@ -68,8 +77,9 @@ def create_app(db_path: str | None = None) -> Flask:
     def api_matchups():
         session = get_session(engine)
         try:
-            card_matchups = analytics.get_card_matchup_stats(session, min_battles=3)
-            archetypes = analytics.get_archetype_stats(session, min_battles=3)
+            lo = _ladder_only()
+            card_matchups = analytics.get_card_matchup_stats(session, min_battles=3, ladder_only=lo)
+            archetypes = analytics.get_archetype_stats(session, min_battles=3, ladder_only=lo)
             return jsonify({
                 "card_matchups": card_matchups,
                 "archetypes": archetypes,
@@ -81,7 +91,7 @@ def create_app(db_path: str | None = None) -> Flask:
     def api_recent():
         session = get_session(engine)
         try:
-            battles = analytics.get_recent_battles(session, limit=25)
+            battles = analytics.get_recent_battles(session, limit=25, ladder_only=_ladder_only())
             return jsonify(battles)
         finally:
             session.close()
@@ -90,11 +100,12 @@ def create_app(db_path: str | None = None) -> Flask:
     def api_streaks():
         session = get_session(engine)
         try:
-            streaks = analytics.get_streaks(session)
-            rolling_35 = analytics.get_rolling_stats(session, 35)
-            rolling_10 = analytics.get_rolling_stats(session, 10)
-            crowns = analytics.get_crown_distribution(session)
-            time_of_day = analytics.get_time_of_day_stats(session)
+            lo = _ladder_only()
+            streaks = analytics.get_streaks(session, ladder_only=lo)
+            rolling_35 = analytics.get_rolling_stats(session, 35, ladder_only=lo)
+            rolling_10 = analytics.get_rolling_stats(session, 10, ladder_only=lo)
+            crowns = analytics.get_crown_distribution(session, ladder_only=lo)
+            time_of_day = analytics.get_time_of_day_stats(session, ladder_only=lo)
             return jsonify({
                 "streaks": streaks,
                 "rolling_35": rolling_35,

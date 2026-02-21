@@ -10,6 +10,16 @@ from sqlalchemy.orm import Session
 from tracker.archetypes import classify_archetype
 from tracker.models import Battle, DeckCard, PlayerSnapshot
 
+# Battle types considered "ladder" (competitive, with trophy stakes)
+LADDER_TYPES = ("PvP",)
+
+
+def _apply_ladder_filter(stmt, ladder_only: bool):
+    """Add a WHERE clause to restrict to ladder battles if requested."""
+    if ladder_only:
+        return stmt.where(Battle.battle_type.in_(LADDER_TYPES))
+    return stmt
+
 
 def generate_battle_id(battle: dict) -> str:
     """Generate unique ID for deduplication.
@@ -199,7 +209,7 @@ def get_total_battles(session: Session) -> int:
     return session.scalar(select(func.count()).select_from(Battle)) or 0
 
 
-def get_overall_stats(session: Session) -> dict:
+def get_overall_stats(session: Session, ladder_only: bool = False) -> dict:
     """Get aggregated stats across all battles."""
     stmt = select(
         func.count().label("total"),
@@ -214,6 +224,7 @@ def get_overall_stats(session: Session) -> dict:
         func.min(Battle.battle_time).label("first_battle"),
         func.max(Battle.battle_time).label("last_battle"),
     )
+    stmt = _apply_ladder_filter(stmt, ladder_only)
     row = session.execute(stmt).first()
     if not row:
         return {}
@@ -273,7 +284,7 @@ def get_deck_stats(session: Session, min_battles: int = 3) -> list[dict]:
     return results
 
 
-def get_crown_distribution(session: Session) -> dict:
+def get_crown_distribution(session: Session, ladder_only: bool = False) -> dict:
     """Get crown distribution by result type."""
     stmt = (
         select(
@@ -285,13 +296,14 @@ def get_crown_distribution(session: Session) -> dict:
         .group_by(Battle.result, Battle.player_crowns)
         .order_by(Battle.result, Battle.player_crowns)
     )
+    stmt = _apply_ladder_filter(stmt, ladder_only)
     distribution: dict = {"win": {}, "loss": {}}
     for row in session.execute(stmt).all():
         distribution[row.result][row.player_crowns] = row.count
     return distribution
 
 
-def get_card_matchup_stats(session: Session, min_battles: int = 3) -> list[dict]:
+def get_card_matchup_stats(session: Session, min_battles: int = 3, ladder_only: bool = False) -> list[dict]:
     """Get win rate vs opponent cards."""
     wins_case = func.sum(case((Battle.result == "win", 1), else_=0))
     distinct_battles = func.count(func.distinct(Battle.battle_id))
@@ -309,10 +321,11 @@ def get_card_matchup_stats(session: Session, min_battles: int = 3) -> list[dict]
         .having(distinct_battles >= min_battles)
         .order_by(distinct_battles.desc())
     )
+    stmt = _apply_ladder_filter(stmt, ladder_only)
     return [row._asdict() for row in session.execute(stmt).all()]
 
 
-def get_recent_battles(session: Session, limit: int = 10) -> list[dict]:
+def get_recent_battles(session: Session, limit: int = 10, ladder_only: bool = False) -> list[dict]:
     """Get last N battles with details."""
     stmt = (
         select(
@@ -329,8 +342,9 @@ def get_recent_battles(session: Session, limit: int = 10) -> list[dict]:
             Battle.opponent_deck,
         )
         .order_by(Battle.battle_time.desc())
-        .limit(limit)
     )
+    stmt = _apply_ladder_filter(stmt, ladder_only)
+    stmt = stmt.limit(limit)
     results = []
     for row in session.execute(stmt).all():
         d = row._asdict()
@@ -349,7 +363,7 @@ def get_recent_battles(session: Session, limit: int = 10) -> list[dict]:
     return results
 
 
-def get_time_of_day_stats(session: Session) -> list[dict]:
+def get_time_of_day_stats(session: Session, ladder_only: bool = False) -> list[dict]:
     """Get win rate by hour of day."""
     hour_expr = cast(func.substr(Battle.battle_time, 10, 2), Integer)
     wins_case = func.sum(case((Battle.result == "win", 1), else_=0))
@@ -364,10 +378,11 @@ def get_time_of_day_stats(session: Session) -> list[dict]:
         .group_by(hour_expr)
         .order_by(hour_expr)
     )
+    stmt = _apply_ladder_filter(stmt, ladder_only)
     return [row._asdict() for row in session.execute(stmt).all()]
 
 
-def get_streaks(session: Session) -> dict:
+def get_streaks(session: Session, ladder_only: bool = False) -> dict:
     """Detect win/loss streaks from battle history.
 
     Returns:
@@ -384,6 +399,7 @@ def get_streaks(session: Session) -> dict:
         .where(Battle.result.in_(["win", "loss"]))
         .order_by(Battle.battle_time.asc())
     )
+    stmt = _apply_ladder_filter(stmt, ladder_only)
     rows = [row._asdict() for row in session.execute(stmt).all()]
 
     if not rows:
@@ -446,12 +462,13 @@ def get_streaks(session: Session) -> dict:
     }
 
 
-def get_rolling_stats(session: Session, window: int = 35) -> dict:
+def get_rolling_stats(session: Session, window: int = 35, ladder_only: bool = False) -> dict:
     """Get win rate over the last N games.
 
     Args:
         session: SQLAlchemy session.
         window: Number of recent games to analyze.
+        ladder_only: If True, only include ladder (PvP) battles.
 
     Returns:
         Dict with total, wins, losses, draws, win_rate, three_crowns,
@@ -468,8 +485,9 @@ def get_rolling_stats(session: Session, window: int = 35) -> dict:
             Battle.battle_type,
         )
         .order_by(Battle.battle_time.desc())
-        .limit(window)
     )
+    stmt = _apply_ladder_filter(stmt, ladder_only)
+    stmt = stmt.limit(window)
     rows = [row._asdict() for row in session.execute(stmt).all()]
 
     if not rows:
@@ -499,7 +517,7 @@ def get_rolling_stats(session: Session, window: int = 35) -> dict:
     }
 
 
-def get_trophy_history(session: Session) -> list[dict]:
+def get_trophy_history(session: Session, ladder_only: bool = False) -> list[dict]:
     """Get trophy progression over time from battle data.
 
     Returns:
@@ -516,6 +534,7 @@ def get_trophy_history(session: Session) -> list[dict]:
         .where(Battle.player_starting_trophies.isnot(None))
         .order_by(Battle.battle_time.asc())
     )
+    stmt = _apply_ladder_filter(stmt, ladder_only)
     results = []
     for row in session.execute(stmt).all():
         d = row._asdict()
@@ -525,12 +544,13 @@ def get_trophy_history(session: Session) -> list[dict]:
     return results
 
 
-def get_archetype_stats(session: Session, min_battles: int = 3) -> list[dict]:
+def get_archetype_stats(session: Session, min_battles: int = 3, ladder_only: bool = False) -> list[dict]:
     """Cluster opponent decks into archetypes and show win rates.
 
     Args:
         session: SQLAlchemy session.
         min_battles: Minimum battles to include an archetype.
+        ladder_only: If True, only include ladder (PvP) battles.
 
     Returns:
         List of dicts with archetype, total, wins, losses, win_rate.
@@ -538,6 +558,7 @@ def get_archetype_stats(session: Session, min_battles: int = 3) -> list[dict]:
     stmt = select(Battle.opponent_deck, Battle.result).where(
         Battle.opponent_deck.isnot(None)
     )
+    stmt = _apply_ladder_filter(stmt, ladder_only)
 
     archetype_data: dict[str, dict] = {}
     for row in session.execute(stmt).all():
