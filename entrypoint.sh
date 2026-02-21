@@ -35,13 +35,24 @@ clash-stats --fetch --db ${DB_PATH}
 EOF
 chmod +x /app/fetch.sh
 
+# Build publish wrapper with baked-in env vars for crond
+cat > /app/publish_wrapper.sh << EOF
+#!/bin/sh
+export STATS_REPO_URL="${STATS_REPO_URL}"
+export STATS_BRANCH="${STATS_BRANCH:-stats}"
+export STATS_REMOTE="${STATS_REMOTE:-origin}"
+/app/publish_stats.sh
+EOF
+chmod +x /app/publish_wrapper.sh
+
+PUSH_DEST="${STATS_REPO_URL:-origin}/${STATS_BRANCH:-stats}"
 echo "=== cr-tracker starting ==="
 echo "  Player tag: #${CR_PLAYER_TAG}"
 echo "  API:        ${CR_API_URL:-https://api.clashroyale.com/v1}"
 echo "  Schedule:   every minute (crond)"
 echo "  Database:   ${DB_PATH}"
 echo "  Dashboard:  http://0.0.0.0:8078"
-echo "  Stats push: every 5 min → origin/stats"
+echo "  Stats push: every 5 min → ${PUSH_DEST}"
 
 # Initial fetch on startup
 /app/fetch.sh

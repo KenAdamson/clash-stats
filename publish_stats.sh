@@ -5,9 +5,12 @@
 set -e
 
 REPO_DIR="${REPO_DIR:-/app}"
-BRANCH="stats"
-REMOTE="origin"
+BRANCH="${STATS_BRANCH:-stats}"
+REMOTE="${STATS_REMOTE:-origin}"
 API_BASE="http://localhost:8078"
+
+# If STATS_REPO_URL is set, use it as the push target instead of the named remote
+PUSH_TARGET="${STATS_REPO_URL:-$REMOTE}"
 
 cd "$REPO_DIR"
 
@@ -41,6 +44,6 @@ COMMIT=$(echo "stats snapshot $(date -u +%Y-%m-%dT%H:%M:%SZ)" | git commit-tree 
 
 # Point the branch at this orphan commit and force-push
 git update-ref "refs/heads/$BRANCH" "$COMMIT"
-git push --force "$REMOTE" "$BRANCH" 2>&1
+git push --force "$PUSH_TARGET" "$BRANCH" 2>&1
 
-echo "publish_stats: pushed to $BRANCH at $(date -u +%H:%M:%SZ)"
+echo "publish_stats: pushed to $PUSH_TARGET $BRANCH at $(date -u +%H:%M:%SZ)"
