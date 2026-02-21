@@ -8,7 +8,6 @@ RUN pip install --no-cache-dir .
 
 # Copy application code
 COPY src/tracker/cr_tracker.py .
-COPY src/cycle_sim/cr_cycle_sim.py .
 
 # Create data directory for SQLite volume mount
 RUN mkdir -p /app/data
