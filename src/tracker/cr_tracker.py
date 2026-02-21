@@ -20,13 +20,22 @@ Usage:
     python cr_tracker.py --crowns         # Crown distribution analysis
     python cr_tracker.py --matchups       # Card matchup analysis
     python cr_tracker.py --recent N       # Show last N battles
+    python cr_tracker.py --streaks        # Win/loss streak analysis
+    python cr_tracker.py --rolling N      # Rolling window stats (last N games)
+    python cr_tracker.py --trophy-history # Trophy progression over time
+    python cr_tracker.py --archetypes     # Opponent archetype analysis
+    python cr_tracker.py --export csv     # Export data as CSV or JSON
 """
 
 import argparse
+import csv
 import hashlib
+import io
 import json
 import os
+import shutil
 import sqlite3
+import sys
 from datetime import datetime
 from typing import List, Tuple
 import urllib.request
@@ -39,6 +48,33 @@ import urllib.parse
 
 DEFAULT_API_URL = "https://api.clashroyale.com/v1"
 DB_FILE = "clash_royale_history.db"
+
+# Win-condition cards → archetype classification for opponent decks
+ARCHETYPES: dict[str, list[str]] = {
+    "Golem Beatdown": ["Golem"],
+    "Lava Hound": ["Lava Hound"],
+    "Giant Beatdown": ["Giant"],
+    "Royal Giant": ["Royal Giant"],
+    "Hog Cycle": ["Hog Rider"],
+    "X-Bow Siege": ["X-Bow"],
+    "Mortar Siege": ["Mortar"],
+    "Bridge Spam": ["Ram Rider", "Battle Ram"],
+    "Graveyard Control": ["Graveyard"],
+    "Miner Control": ["Miner"],
+    "Three Musketeers": ["Three Musketeers"],
+    "Sparky": ["Sparky"],
+    "Balloon": ["Balloon"],
+    "Elite Barbarians": ["Elite Barbarians"],
+    "P.E.K.K.A Control": ["P.E.K.K.A"],
+    "Mega Knight": ["Mega Knight"],
+    "Goblin Barrel Bait": ["Goblin Barrel"],
+    "Skeleton King": ["Skeleton King"],
+    "Monk": ["Monk"],
+    "Archer Queen": ["Archer Queen"],
+    "Goblin Giant": ["Goblin Giant"],
+    "Electro Giant": ["Electro Giant"],
+    "Egiant": ["Elixir Golem"],
+}
 
 # =============================================================================
 # DATABASE SCHEMA
@@ -185,8 +221,118 @@ class BattleDatabase:
         self._init_schema()
     
     def _init_schema(self):
+        """Create tables and run any pending migrations."""
         self.conn.executescript(SCHEMA)
         self.conn.commit()
+        self._run_migrations()
+
+    def _get_schema_version(self) -> int:
+        """Get current schema version, creating the table if needed."""
+        try:
+            cursor = self.conn.execute("SELECT MAX(version) FROM schema_version")
+            row = cursor.fetchone()
+            return row[0] if row[0] is not None else 0
+        except sqlite3.OperationalError:
+            self.conn.execute(
+                "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)"
+            )
+            self.conn.commit()
+            return 0
+
+    def _run_migrations(self):
+        """Run all pending schema migrations."""
+        current = self._get_schema_version()
+
+        if current < 1:
+            self._migrate_v1()
+            self.conn.execute("INSERT INTO schema_version (version) VALUES (1)")
+            self.conn.commit()
+
+    def _migrate_v1(self):
+        """Add evo/star tracking, elixir leak, battle duration columns. Backfill from raw_json."""
+        alter_statements = [
+            "ALTER TABLE deck_cards ADD COLUMN evolution_level INTEGER DEFAULT 0",
+            "ALTER TABLE deck_cards ADD COLUMN star_level INTEGER DEFAULT 0",
+            "ALTER TABLE battles ADD COLUMN player_elixir_leaked REAL",
+            "ALTER TABLE battles ADD COLUMN opponent_elixir_leaked REAL",
+            "ALTER TABLE battles ADD COLUMN battle_duration INTEGER",
+        ]
+        for sql in alter_statements:
+            try:
+                self.conn.execute(sql)
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+
+        self._backfill_from_raw_json()
+        self._backfill_deck_hashes()
+        self.conn.commit()
+
+    def _backfill_from_raw_json(self):
+        """Backfill new columns from raw_json for existing battles."""
+        cursor = self.conn.execute(
+            "SELECT id, battle_id, raw_json FROM battles "
+            "WHERE player_elixir_leaked IS NULL AND raw_json IS NOT NULL"
+        )
+        for row in cursor.fetchall():
+            try:
+                battle = json.loads(row["raw_json"])
+                team = battle.get("team", [{}])[0]
+                opponent = battle.get("opponent", [{}])[0]
+                self.conn.execute(
+                    "UPDATE battles SET player_elixir_leaked=?, opponent_elixir_leaked=?, "
+                    "battle_duration=? WHERE id=?",
+                    (
+                        team.get("elixirLeaked"),
+                        opponent.get("elixirLeaked"),
+                        battle.get("battleDuration"),
+                        row["id"],
+                    ),
+                )
+                # Backfill deck_cards evolution_level and star_level
+                for card in team.get("cards", []):
+                    self.conn.execute(
+                        "UPDATE deck_cards SET evolution_level=?, star_level=? "
+                        "WHERE battle_id=? AND card_name=? AND is_player_deck=1",
+                        (
+                            card.get("evolutionLevel", 0),
+                            card.get("starLevel", 0),
+                            row["battle_id"],
+                            card.get("name"),
+                        ),
+                    )
+                for card in opponent.get("cards", []):
+                    self.conn.execute(
+                        "UPDATE deck_cards SET evolution_level=?, star_level=? "
+                        "WHERE battle_id=? AND card_name=? AND is_player_deck=0",
+                        (
+                            card.get("evolutionLevel", 0),
+                            card.get("starLevel", 0),
+                            row["battle_id"],
+                            card.get("name"),
+                        ),
+                    )
+            except (json.JSONDecodeError, KeyError, IndexError) as e:
+                print(f"Warning: Could not backfill battle {row['battle_id']}: {e}")
+
+    def _backfill_deck_hashes(self):
+        """Recompute deck hashes to include evolution level."""
+        cursor = self.conn.execute(
+            "SELECT id, player_deck, opponent_deck FROM battles"
+        )
+        for row in cursor.fetchall():
+            try:
+                player_deck = json.loads(row["player_deck"]) if row["player_deck"] else []
+                opponent_deck = json.loads(row["opponent_deck"]) if row["opponent_deck"] else []
+                self.conn.execute(
+                    "UPDATE battles SET player_deck_hash=?, opponent_deck_hash=? WHERE id=?",
+                    (
+                        self._generate_deck_hash(player_deck),
+                        self._generate_deck_hash(opponent_deck),
+                        row["id"],
+                    ),
+                )
+            except (json.JSONDecodeError, KeyError) as e:
+                print(f"Warning: Could not recompute deck hash for battle id={row['id']}: {e}")
     
     def close(self):
         self.conn.close()
@@ -201,9 +347,12 @@ class BattleDatabase:
         return hashlib.sha256(key_data.encode()).hexdigest()[:32]
     
     def _generate_deck_hash(self, deck: list) -> str:
-        """Generate hash for deck (ignoring levels)."""
-        card_names = sorted([card.get('name', '') for card in deck])
-        return hashlib.md5('|'.join(card_names).encode()).hexdigest()[:16]
+        """Generate hash for deck (ignoring levels, but including evo status)."""
+        card_keys = sorted([
+            f"{card.get('name', '')}:evo{card.get('evolutionLevel', 0)}"
+            for card in deck
+        ])
+        return hashlib.md5('|'.join(card_keys).encode()).hexdigest()[:16]
     
     def battle_exists(self, battle_id: str) -> bool:
         cursor = self.conn.execute("SELECT 1 FROM battles WHERE battle_id = ?", (battle_id,))
@@ -275,8 +424,9 @@ class BattleDatabase:
                 opponent_tag, opponent_name, opponent_starting_trophies,
                 opponent_trophy_change, opponent_crowns, opponent_king_tower_hp,
                 opponent_princess_tower_hp, opponent_deck, opponent_deck_hash,
-                result, crown_differential, raw_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                result, crown_differential, raw_json,
+                player_elixir_leaked, opponent_elixir_leaked, battle_duration
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             battle_id,
             battle.get('battleTime'),
@@ -304,21 +454,28 @@ class BattleDatabase:
             self._generate_deck_hash(opponent_deck),
             result,
             player_crowns - opponent_crowns,
-            json.dumps(battle)
+            json.dumps(battle),
+            team.get('elixirLeaked'),
+            opponent.get('elixirLeaked'),
+            battle.get('battleDuration'),
         ))
         
         # Store individual cards for matchup analysis
         for card in player_deck:
             self.conn.execute("""
-                INSERT INTO deck_cards (battle_id, card_name, card_level, card_max_level, card_elixir, is_player_deck)
-                VALUES (?, ?, ?, ?, ?, 1)
-            """, (battle_id, card.get('name'), card.get('level'), card.get('maxLevel'), card.get('elixirCost')))
-        
+                INSERT INTO deck_cards (battle_id, card_name, card_level, card_max_level,
+                    card_elixir, is_player_deck, evolution_level, star_level)
+                VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+            """, (battle_id, card.get('name'), card.get('level'), card.get('maxLevel'),
+                  card.get('elixirCost'), card.get('evolutionLevel', 0), card.get('starLevel', 0)))
+
         for card in opponent_deck:
             self.conn.execute("""
-                INSERT INTO deck_cards (battle_id, card_name, card_level, card_max_level, card_elixir, is_player_deck)
-                VALUES (?, ?, ?, ?, ?, 0)
-            """, (battle_id, card.get('name'), card.get('level'), card.get('maxLevel'), card.get('elixirCost')))
+                INSERT INTO deck_cards (battle_id, card_name, card_level, card_max_level,
+                    card_elixir, is_player_deck, evolution_level, star_level)
+                VALUES (?, ?, ?, ?, ?, 0, ?, ?)
+            """, (battle_id, card.get('name'), card.get('level'), card.get('maxLevel'),
+                  card.get('elixirCost'), card.get('evolutionLevel', 0), card.get('starLevel', 0)))
         
         self.conn.commit()
         return battle_id, True
@@ -452,7 +609,7 @@ class BattleDatabase:
     def get_time_of_day_stats(self) -> List[dict]:
         """Win rate by hour of day."""
         cursor = self.conn.execute("""
-            SELECT 
+            SELECT
                 CAST(SUBSTR(battle_time, 10, 2) AS INTEGER) as hour,
                 COUNT(*) as total,
                 SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) as wins,
@@ -463,6 +620,220 @@ class BattleDatabase:
             ORDER BY hour
         """)
         return [dict(row) for row in cursor.fetchall()]
+
+    def get_streaks(self) -> dict:
+        """Detect win/loss streaks from battle history.
+
+        Returns:
+            Dict with 'current_streak', 'longest_win_streak',
+            'longest_loss_streak', and 'streaks' list.
+        """
+        cursor = self.conn.execute("""
+            SELECT battle_time, result, player_starting_trophies, player_trophy_change
+            FROM battles
+            WHERE result IN ('win', 'loss')
+            ORDER BY battle_time ASC
+        """)
+        rows = [dict(r) for r in cursor.fetchall()]
+
+        if not rows:
+            return {
+                "current_streak": None,
+                "longest_win_streak": None,
+                "longest_loss_streak": None,
+                "streaks": [],
+            }
+
+        streaks: list[dict] = []
+        current_type = rows[0]["result"]
+        current_start = rows[0]
+        current_length = 1
+        current_end = rows[0]
+
+        def _finish_streak(stype: str, length: int, start: dict, end: dict) -> dict:
+            start_trophies = start.get("player_starting_trophies") or 0
+            end_trophies = (end.get("player_starting_trophies") or 0) + (end.get("player_trophy_change") or 0)
+            return {
+                "type": stype,
+                "length": length,
+                "start_trophies": start_trophies,
+                "end_trophies": end_trophies,
+                "start_date": (start.get("battle_time") or "")[:8],
+                "end_date": (end.get("battle_time") or "")[:8],
+            }
+
+        for row in rows[1:]:
+            if row["result"] == current_type:
+                current_length += 1
+                current_end = row
+            else:
+                streaks.append(_finish_streak(current_type, current_length, current_start, current_end))
+                current_type = row["result"]
+                current_start = row
+                current_end = row
+                current_length = 1
+
+        streaks.append(_finish_streak(current_type, current_length, current_start, current_end))
+
+        win_streaks = [s for s in streaks if s["type"] == "win"]
+        loss_streaks = [s for s in streaks if s["type"] == "loss"]
+
+        return {
+            "current_streak": streaks[-1] if streaks else None,
+            "longest_win_streak": max(win_streaks, key=lambda s: s["length"]) if win_streaks else None,
+            "longest_loss_streak": max(loss_streaks, key=lambda s: s["length"]) if loss_streaks else None,
+            "streaks": streaks,
+        }
+
+    def get_rolling_stats(self, window: int = 35) -> dict:
+        """Get win rate over the last N games.
+
+        Args:
+            window: Number of recent games to analyze.
+
+        Returns:
+            Dict with total, wins, losses, draws, win_rate, three_crowns,
+            avg_crowns, trophy_change, and per-game details.
+        """
+        cursor = self.conn.execute("""
+            SELECT result, player_crowns, opponent_crowns, player_trophy_change,
+                   player_starting_trophies, battle_time, battle_type
+            FROM battles
+            ORDER BY battle_time DESC
+            LIMIT ?
+        """, (window,))
+        rows = [dict(r) for r in cursor.fetchall()]
+
+        if not rows:
+            return {"total": 0, "wins": 0, "losses": 0, "draws": 0,
+                    "win_rate": 0.0, "three_crowns": 0, "avg_crowns": 0.0,
+                    "trophy_change": 0}
+
+        total = len(rows)
+        wins = sum(1 for r in rows if r["result"] == "win")
+        losses = sum(1 for r in rows if r["result"] == "loss")
+        draws = sum(1 for r in rows if r["result"] == "draw")
+        three_crowns = sum(1 for r in rows if r["player_crowns"] == 3)
+        total_crowns = sum(r["player_crowns"] or 0 for r in rows)
+        trophy_change = sum(r["player_trophy_change"] or 0 for r in rows)
+
+        return {
+            "total": total,
+            "wins": wins,
+            "losses": losses,
+            "draws": draws,
+            "win_rate": round(wins / total * 100, 1) if total > 0 else 0.0,
+            "three_crowns": three_crowns,
+            "avg_crowns": round(total_crowns / total, 2) if total > 0 else 0.0,
+            "trophy_change": trophy_change,
+        }
+
+    def get_trophy_history(self) -> List[dict]:
+        """Get trophy progression over time from battle data.
+
+        Returns:
+            List of dicts with battle_time, trophies (after battle), result,
+            player_trophy_change, ordered chronologically.
+        """
+        cursor = self.conn.execute("""
+            SELECT battle_time, player_starting_trophies, player_trophy_change, result
+            FROM battles
+            WHERE player_starting_trophies IS NOT NULL
+            ORDER BY battle_time ASC
+        """)
+        results = []
+        for row in cursor.fetchall():
+            d = dict(row)
+            change = d["player_trophy_change"] or 0
+            d["trophies"] = (d["player_starting_trophies"] or 0) + change
+            results.append(d)
+        return results
+
+    @staticmethod
+    def classify_archetype(deck: list[dict]) -> str:
+        """Classify an opponent deck into an archetype based on win condition cards.
+
+        Args:
+            deck: List of card dicts from the API.
+
+        Returns:
+            Archetype name string, or "Unknown" if no match.
+        """
+        card_names = {card.get("name", "") for card in deck}
+        for archetype, win_conditions in ARCHETYPES.items():
+            if any(wc in card_names for wc in win_conditions):
+                return archetype
+        return "Unknown"
+
+    def get_archetype_stats(self, min_battles: int = 3) -> List[dict]:
+        """Cluster opponent decks into archetypes and show win rates.
+
+        Args:
+            min_battles: Minimum battles to include an archetype.
+
+        Returns:
+            List of dicts with archetype, total, wins, losses, win_rate.
+        """
+        cursor = self.conn.execute("""
+            SELECT opponent_deck, result FROM battles
+            WHERE opponent_deck IS NOT NULL
+        """)
+
+        archetype_data: dict[str, dict] = {}
+        for row in cursor.fetchall():
+            try:
+                deck = json.loads(row["opponent_deck"])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            archetype = self.classify_archetype(deck)
+            if archetype not in archetype_data:
+                archetype_data[archetype] = {"wins": 0, "losses": 0, "draws": 0}
+            entry = archetype_data[archetype]
+            if row["result"] == "win":
+                entry["wins"] += 1
+            elif row["result"] == "loss":
+                entry["losses"] += 1
+            else:
+                entry["draws"] += 1
+
+        results = []
+        for archetype, data in archetype_data.items():
+            total = data["wins"] + data["losses"] + data["draws"]
+            if total >= min_battles:
+                results.append({
+                    "archetype": archetype,
+                    "total": total,
+                    "wins": data["wins"],
+                    "losses": data["losses"],
+                    "win_rate": round(data["wins"] / total * 100, 1) if total > 0 else 0.0,
+                })
+        return sorted(results, key=lambda x: x["total"], reverse=True)
+
+    def get_snapshot_diff(self) -> dict | None:
+        """Compare the two most recent player snapshots.
+
+        Returns:
+            Dict with field-level diffs, or None if fewer than 2 snapshots.
+        """
+        cursor = self.conn.execute("""
+            SELECT * FROM player_snapshots
+            ORDER BY id DESC LIMIT 2
+        """)
+        rows = cursor.fetchall()
+        if len(rows) < 2:
+            return None
+
+        current, previous = dict(rows[0]), dict(rows[1])
+        diff_fields = [
+            "trophies", "best_trophies", "wins", "losses", "battle_count",
+            "three_crown_wins", "war_day_wins", "total_donations",
+        ]
+        diff: dict = {}
+        for field in diff_fields:
+            old_val = previous.get(field) or 0
+            new_val = current.get(field) or 0
+            diff[field] = new_val - old_val
+        return diff
 
 
 # =============================================================================
@@ -629,24 +1000,216 @@ def print_matchup_stats(db: BattleDatabase):
 
 def print_recent_battles(db: BattleDatabase, limit: int = 10):
     battles = db.get_recent_battles(limit)
-    
+
     print()
     print("=" * 70)
     print(f"LAST {len(battles)} BATTLES")
     print("=" * 70)
     print()
-    
+
     if not battles:
         print("  No battles tracked yet.")
         return
-    
+
     for b in battles:
         result_icon = "✓" if b['result'] == 'win' else ("✗" if b['result'] == 'loss' else "—")
         trophy_change = b['player_trophy_change'] or 0
         trophy_str = f"+{trophy_change}" if trophy_change >= 0 else str(trophy_change)
-        
+
         print(f"  {result_icon} {b['player_crowns']}-{b['opponent_crowns']} vs {b['opponent_name']:15} | {trophy_str:>4} | {b['battle_type']}")
     print()
+
+
+def print_streaks(db: BattleDatabase):
+    """Print win/loss streak analysis."""
+    data = db.get_streaks()
+
+    print()
+    print("=" * 70)
+    print("STREAK ANALYSIS")
+    print("=" * 70)
+    print()
+
+    if not data["current_streak"]:
+        print("  No battles tracked yet.")
+        return
+
+    cs = data["current_streak"]
+    icon = "🔥" if cs["type"] == "win" else "❄️"
+    print(f"  Current:       {icon} {cs['length']} {cs['type']}{'s' if cs['length'] != 1 else ''} ({cs['start_trophies']} → {cs['end_trophies']})")
+
+    if data["longest_win_streak"]:
+        ws = data["longest_win_streak"]
+        print(f"  Best Win Run:  {ws['length']} wins ({ws['start_trophies']} → {ws['end_trophies']})")
+
+    if data["longest_loss_streak"]:
+        ls = data["longest_loss_streak"]
+        print(f"  Worst Tilt:    {ls['length']} losses ({ls['start_trophies']} → {ls['end_trophies']})")
+
+    # Show streak summary
+    streaks = data["streaks"]
+    win_streaks = sorted([s for s in streaks if s["type"] == "win"], key=lambda s: -s["length"])
+    loss_streaks = sorted([s for s in streaks if s["type"] == "loss"], key=lambda s: -s["length"])
+
+    if len(win_streaks) > 1:
+        print()
+        print("  TOP WIN STREAKS:")
+        for s in win_streaks[:5]:
+            print(f"    {s['length']} wins  {s['start_trophies']} → {s['end_trophies']}")
+
+    if len(loss_streaks) > 1:
+        print()
+        print("  WORST LOSS STREAKS:")
+        for s in loss_streaks[:5]:
+            print(f"    {s['length']} losses  {s['start_trophies']} → {s['end_trophies']}")
+    print()
+
+
+def print_rolling_stats(db: BattleDatabase, window: int = 35):
+    """Print rolling window stats for last N games."""
+    stats = db.get_rolling_stats(window)
+
+    print()
+    print("=" * 70)
+    print(f"LAST {stats['total']} GAMES (rolling window: {window})")
+    print("=" * 70)
+    print()
+
+    if stats["total"] == 0:
+        print("  No battles tracked yet.")
+        return
+
+    wins = stats["wins"]
+    losses = stats["losses"]
+    draws = stats["draws"]
+    total = stats["total"]
+    three_crowns = stats["three_crowns"]
+
+    three_crown_rate = (three_crowns / wins * 100) if wins > 0 else 0
+
+    print(f"  Wins:          {wins} ({stats['win_rate']:.1f}%)")
+    print(f"  Losses:        {losses} ({losses / total * 100:.1f}%)")
+    if draws:
+        print(f"  Draws:         {draws}")
+    print(f"  3-Crown Wins:  {three_crowns} ({three_crown_rate:.1f}% of wins)")
+    print(f"  Avg Crowns:    {stats['avg_crowns']:.2f}")
+
+    trophy_change = stats["trophy_change"]
+    trophy_str = f"+{trophy_change}" if trophy_change >= 0 else str(trophy_change)
+    print(f"  Trophy Change: {trophy_str}")
+
+    # Compare to overall
+    overall = db.get_overall_stats()
+    overall_total = overall.get("total", 0)
+    if overall_total > 0:
+        overall_wins = overall.get("wins", 0)
+        overall_wr = round(overall_wins / overall_total * 100, 1)
+        diff = stats["win_rate"] - overall_wr
+        direction = "above" if diff > 0 else "below"
+        print(f"  vs Overall:    {abs(diff):.1f}pp {direction} ({overall_wr:.1f}% overall)")
+    print()
+
+
+def print_trophy_history(db: BattleDatabase):
+    """Print trophy progression as an ASCII chart."""
+    history = db.get_trophy_history()
+
+    print()
+    print("=" * 70)
+    print("TROPHY PROGRESSION")
+    print("=" * 70)
+    print()
+
+    if not history:
+        print("  No trophy data tracked yet.")
+        return
+
+    trophies = [h["trophies"] for h in history]
+    min_t = min(trophies)
+    max_t = max(trophies)
+
+    try:
+        term_width = shutil.get_terminal_size().columns
+    except (AttributeError, ValueError):
+        term_width = 80
+    chart_width = max(20, term_width - 40)
+
+    # Show start, end, and range
+    print(f"  Range: {min_t:,} - {max_t:,} ({max_t - min_t:+,} spread)")
+    print(f"  Games: {len(history)}")
+    print()
+
+    # If many games, sample evenly for display
+    max_rows = 30
+    if len(history) > max_rows:
+        step = len(history) / max_rows
+        indices = [int(i * step) for i in range(max_rows)]
+        indices[-1] = len(history) - 1  # Always include last
+        display = [history[i] for i in indices]
+    else:
+        display = history
+
+    span = max_t - min_t if max_t != min_t else 1
+    for h in display:
+        date = (h.get("battle_time") or "")[:8]
+        result_icon = "W" if h["result"] == "win" else ("L" if h["result"] == "loss" else "D")
+        bar_len = int((h["trophies"] - min_t) / span * chart_width)
+        bar = "█" * bar_len
+        print(f"  {date} {result_icon} {h['trophies']:>6,} |{bar}")
+    print()
+
+
+def print_archetype_stats(db: BattleDatabase):
+    """Print opponent archetype analysis."""
+    stats = db.get_archetype_stats(min_battles=3)
+
+    print()
+    print("=" * 70)
+    print("OPPONENT ARCHETYPE ANALYSIS (min 3 games)")
+    print("=" * 70)
+    print()
+
+    if not stats:
+        print("  Not enough data yet.")
+        return
+
+    for a in stats:
+        print(f"  {a['archetype']:28} {a['total']:4} games  {a['win_rate']:5.1f}% WR  ({a['wins']}W-{a['losses']}L)")
+    print()
+
+
+def export_data(data: list[dict] | dict, fmt: str, output: str | None = None):
+    """Export data as CSV or JSON.
+
+    Args:
+        data: List of dicts (or single dict) to export.
+        fmt: 'csv' or 'json'.
+        output: File path, or None for stdout.
+    """
+    if isinstance(data, dict):
+        data = [data]
+
+    if fmt == "json":
+        text = json.dumps(data, indent=2, default=str)
+    elif fmt == "csv":
+        if not data:
+            text = ""
+        else:
+            buf = io.StringIO()
+            writer = csv.DictWriter(buf, fieldnames=data[0].keys())
+            writer.writeheader()
+            writer.writerows(data)
+            text = buf.getvalue()
+    else:
+        print(f"Error: Unknown export format '{fmt}'")
+        return
+
+    if output:
+        with open(output, "w") as f:
+            f.write(text)
+        print(f"Exported {len(data)} records to {output}")
+    else:
+        sys.stdout.write(text)
 
 
 # =============================================================================
@@ -665,6 +1228,19 @@ def fetch_and_store(api_key: str, player_tag: str, db: BattleDatabase,
         db.store_player_snapshot(player)
         print(f"  ✓ Profile: {player.get('name')} | {player.get('trophies'):,} trophies")
         print(f"  ✓ All-time: {player.get('wins'):,}W / {player.get('losses'):,}L / {player.get('threeCrownWins'):,} 3-crowns")
+
+        diff = db.get_snapshot_diff()
+        if diff:
+            parts = []
+            if diff["trophies"]:
+                sign = "+" if diff["trophies"] > 0 else ""
+                parts.append(f"{sign}{diff['trophies']} trophies")
+            if diff["wins"]:
+                parts.append(f"+{diff['wins']} wins")
+            if diff["losses"]:
+                parts.append(f"+{diff['losses']} losses")
+            if parts:
+                print(f"  ✓ Since last fetch: {', '.join(parts)}")
     except Exception as e:
         print(f"  ✗ Error fetching player: {e}")
         return
@@ -708,6 +1284,12 @@ Environment variables:
     parser.add_argument("--crowns", action="store_true", help="Show crown distribution")
     parser.add_argument("--matchups", action="store_true", help="Show card matchup analysis")
     parser.add_argument("--recent", type=int, metavar="N", help="Show last N battles")
+    parser.add_argument("--streaks", action="store_true", help="Win/loss streak analysis")
+    parser.add_argument("--rolling", type=int, metavar="N", help="Rolling window stats (last N games)")
+    parser.add_argument("--trophy-history", action="store_true", help="Trophy progression over time")
+    parser.add_argument("--archetypes", action="store_true", help="Opponent archetype analysis")
+    parser.add_argument("--export", choices=["csv", "json"], help="Export data as CSV or JSON")
+    parser.add_argument("--output", type=str, metavar="FILE", help="Export output file (default: stdout)")
     parser.add_argument("--api-key", type=str, help="CR API key")
     parser.add_argument("--player-tag", type=str, help="Player tag (without #)")
     parser.add_argument("--api-url", type=str, help="API base URL (default: https://api.clashroyale.com/v1)")
@@ -729,23 +1311,70 @@ Environment variables:
                 return 1
             fetch_and_store(api_key, player_tag.replace("#", ""), db, api_url=api_url)
         
+        # Map analytics commands to (data_fn, print_fn) pairs for export support
+        export_fmt = args.export
+        export_out = args.output
+
         if args.stats:
-            print_overall_stats(db)
-        
+            if export_fmt:
+                data = db.get_overall_stats()
+                export_data(data, export_fmt, export_out)
+            else:
+                print_overall_stats(db)
+
         if args.deck_stats:
-            print_deck_stats(db)
-        
+            if export_fmt:
+                export_data(db.get_deck_stats(min_battles=1), export_fmt, export_out)
+            else:
+                print_deck_stats(db)
+
         if args.crowns:
-            print_crown_distribution(db)
-        
+            if export_fmt:
+                export_data(db.get_crown_distribution(), export_fmt, export_out)
+            else:
+                print_crown_distribution(db)
+
         if args.matchups:
-            print_matchup_stats(db)
-        
+            if export_fmt:
+                export_data(db.get_card_matchup_stats(min_battles=1), export_fmt, export_out)
+            else:
+                print_matchup_stats(db)
+
         if args.recent:
-            print_recent_battles(db, args.recent)
-        
+            if export_fmt:
+                export_data(db.get_recent_battles(args.recent), export_fmt, export_out)
+            else:
+                print_recent_battles(db, args.recent)
+
+        if args.streaks:
+            if export_fmt:
+                export_data(db.get_streaks(), export_fmt, export_out)
+            else:
+                print_streaks(db)
+
+        if args.rolling:
+            if export_fmt:
+                export_data(db.get_rolling_stats(args.rolling), export_fmt, export_out)
+            else:
+                print_rolling_stats(db, args.rolling)
+
+        if args.trophy_history:
+            if export_fmt:
+                export_data(db.get_trophy_history(), export_fmt, export_out)
+            else:
+                print_trophy_history(db)
+
+        if args.archetypes:
+            if export_fmt:
+                export_data(db.get_archetype_stats(min_battles=1), export_fmt, export_out)
+            else:
+                print_archetype_stats(db)
+
         # Default: show help + db status
-        if not any([args.fetch, args.stats, args.deck_stats, args.crowns, args.matchups, args.recent]):
+        has_action = any([args.fetch, args.stats, args.deck_stats, args.crowns,
+                         args.matchups, args.recent, args.streaks, args.rolling,
+                         args.trophy_history, args.archetypes])
+        if not has_action:
             parser.print_help()
             print()
             print(f"Database: {args.db}")

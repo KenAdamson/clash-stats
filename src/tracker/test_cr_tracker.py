@@ -635,3 +635,420 @@ class TestFetchAndStore:
             cr_tracker.fetch_and_store("fake-key", "L90009GPP", db)
         assert "Error fetching player" in capsys.readouterr().out
         assert db.get_total_battles() == 0
+
+
+# =============================================================================
+# SCHEMA MIGRATIONS
+# =============================================================================
+
+class TestMigrations:
+    def test_new_columns_exist(self, db):
+        """Migration v1 adds evolution_level, star_level, elixir leaked, duration."""
+        cursor = db.conn.execute("PRAGMA table_info(deck_cards)")
+        columns = {row["name"] for row in cursor.fetchall()}
+        assert "evolution_level" in columns
+        assert "star_level" in columns
+
+        cursor = db.conn.execute("PRAGMA table_info(battles)")
+        columns = {row["name"] for row in cursor.fetchall()}
+        assert "player_elixir_leaked" in columns
+        assert "opponent_elixir_leaked" in columns
+        assert "battle_duration" in columns
+
+    def test_schema_version_set(self, db):
+        version = db._get_schema_version()
+        assert version >= 1
+
+    def test_migration_idempotent(self, db):
+        """Running migrations multiple times doesn't error."""
+        db._run_migrations()
+        db._run_migrations()
+        assert db._get_schema_version() >= 1
+
+
+# =============================================================================
+# DECK HASH WITH EVO
+# =============================================================================
+
+class TestDeckHashEvo:
+    def test_different_for_different_evolutions(self, db):
+        d1 = [make_card("Witch", evolution_level=0), make_card("P.E.K.K.A")]
+        d2 = [make_card("Witch", evolution_level=1), make_card("P.E.K.K.A")]
+        assert db._generate_deck_hash(d1) != db._generate_deck_hash(d2)
+
+    def test_no_evo_key_matches_zero(self, db):
+        """Card without evolutionLevel key should hash same as evo=0."""
+        d1 = [{"name": "Witch"}, {"name": "P.E.K.K.A"}]
+        d2 = [make_card("Witch", evolution_level=0), make_card("P.E.K.K.A", evolution_level=0)]
+        assert db._generate_deck_hash(d1) == db._generate_deck_hash(d2)
+
+    def test_still_ignores_level(self, db):
+        d1 = [make_card("Witch", level=14, evolution_level=1)]
+        d2 = [make_card("Witch", level=16, evolution_level=1)]
+        assert db._generate_deck_hash(d1) == db._generate_deck_hash(d2)
+
+
+# =============================================================================
+# NEW FIELD STORAGE
+# =============================================================================
+
+class TestNewFieldStorage:
+    def test_elixir_leaked_stored(self, db):
+        db.store_battle(make_battle(), "#L90009GPP")
+        row = db.conn.execute(
+            "SELECT player_elixir_leaked, opponent_elixir_leaked FROM battles"
+        ).fetchone()
+        assert row["player_elixir_leaked"] == pytest.approx(0.5)
+        assert row["opponent_elixir_leaked"] == pytest.approx(1.3)
+
+    def test_elixir_leaked_missing(self, db):
+        battle = make_battle()
+        del battle["team"][0]["elixirLeaked"]
+        del battle["opponent"][0]["elixirLeaked"]
+        db.store_battle(battle, "#L90009GPP")
+        row = db.conn.execute(
+            "SELECT player_elixir_leaked FROM battles"
+        ).fetchone()
+        assert row["player_elixir_leaked"] is None
+
+    def test_battle_duration_stored(self, db):
+        battle = make_battle()
+        battle["battleDuration"] = 180
+        db.store_battle(battle, "#L90009GPP")
+        row = db.conn.execute("SELECT battle_duration FROM battles").fetchone()
+        assert row["battle_duration"] == 180
+
+    def test_evolution_level_in_deck_cards(self, db):
+        db.store_battle(make_battle(), "#L90009GPP")
+        row = db.conn.execute(
+            "SELECT evolution_level FROM deck_cards WHERE card_name='Witch' AND is_player_deck=1"
+        ).fetchone()
+        assert row["evolution_level"] == 1
+
+    def test_star_level_default_zero(self, db):
+        db.store_battle(make_battle(), "#L90009GPP")
+        row = db.conn.execute(
+            "SELECT star_level FROM deck_cards WHERE card_name='P.E.K.K.A' AND is_player_deck=1"
+        ).fetchone()
+        assert row["star_level"] == 0
+
+
+# =============================================================================
+# STREAKS
+# =============================================================================
+
+class TestStreaks:
+    def test_empty_db(self, db):
+        data = db.get_streaks()
+        assert data["current_streak"] is None
+        assert data["streaks"] == []
+
+    def test_single_win(self, db):
+        seed_battles(db, [{"player_crowns": 3, "opponent_crowns": 1}])
+        data = db.get_streaks()
+        assert data["current_streak"]["type"] == "win"
+        assert data["current_streak"]["length"] == 1
+
+    def test_win_streak(self, db):
+        seed_battles(db, [
+            {"player_crowns": 3, "opponent_crowns": 1, "trophy_change": 30},
+            {"player_crowns": 3, "opponent_crowns": 0, "trophy_change": 31},
+            {"player_crowns": 2, "opponent_crowns": 1, "trophy_change": 29},
+        ])
+        data = db.get_streaks()
+        assert data["longest_win_streak"]["length"] == 3
+        assert data["current_streak"]["type"] == "win"
+
+    def test_alternating(self, db):
+        seed_battles(db, [
+            {"player_crowns": 3, "opponent_crowns": 1, "trophy_change": 30},
+            {"player_crowns": 1, "opponent_crowns": 3, "trophy_change": -30},
+            {"player_crowns": 3, "opponent_crowns": 0, "trophy_change": 31},
+        ])
+        data = db.get_streaks()
+        assert all(s["length"] == 1 for s in data["streaks"])
+        assert len(data["streaks"]) == 3
+
+    def test_loss_streak_trophies(self, db):
+        seed_battles(db, [
+            {"player_crowns": 1, "opponent_crowns": 3, "trophy_change": -30},
+            {"player_crowns": 0, "opponent_crowns": 3, "trophy_change": -31},
+        ])
+        data = db.get_streaks()
+        ls = data["longest_loss_streak"]
+        assert ls["length"] == 2
+        assert ls["start_trophies"] == 10900
+        # End trophies = starting + change of last battle
+        assert ls["end_trophies"] == 10900 + (-31)
+
+
+# =============================================================================
+# ROLLING WINDOW
+# =============================================================================
+
+class TestRollingStats:
+    def test_empty_db(self, db):
+        stats = db.get_rolling_stats(35)
+        assert stats["total"] == 0
+        assert stats["win_rate"] == 0.0
+
+    def test_window_limits_results(self, db):
+        seed_battles(db, [
+            {"player_crowns": 3, "opponent_crowns": 1, "trophy_change": 30},
+            {"player_crowns": 3, "opponent_crowns": 0, "trophy_change": 31},
+            {"player_crowns": 1, "opponent_crowns": 3, "trophy_change": -30},
+            {"player_crowns": 3, "opponent_crowns": 1, "trophy_change": 30},
+            {"player_crowns": 1, "opponent_crowns": 3, "trophy_change": -30},
+        ])
+        stats = db.get_rolling_stats(3)
+        assert stats["total"] == 3
+
+    def test_larger_window_than_db(self, db):
+        seed_battles(db, [
+            {"player_crowns": 3, "opponent_crowns": 1, "trophy_change": 30},
+            {"player_crowns": 3, "opponent_crowns": 0, "trophy_change": 31},
+        ])
+        stats = db.get_rolling_stats(100)
+        assert stats["total"] == 2
+        assert stats["wins"] == 2
+        assert stats["win_rate"] == 100.0
+
+    def test_trophy_change_sum(self, db):
+        seed_battles(db, [
+            {"player_crowns": 3, "opponent_crowns": 1, "trophy_change": 30},
+            {"player_crowns": 1, "opponent_crowns": 3, "trophy_change": -30},
+        ])
+        stats = db.get_rolling_stats(10)
+        assert stats["trophy_change"] == 0
+
+
+# =============================================================================
+# TROPHY HISTORY
+# =============================================================================
+
+class TestTrophyHistory:
+    def test_empty_db(self, db):
+        assert db.get_trophy_history() == []
+
+    def test_chronological_order(self, db):
+        seed_battles(db, [
+            {"battle_time": "20260214T180000.000Z", "trophy_change": 30},
+            {"battle_time": "20260214T200000.000Z", "trophy_change": -30},
+            {"battle_time": "20260214T190000.000Z", "trophy_change": 31},
+        ])
+        history = db.get_trophy_history()
+        times = [h["battle_time"] for h in history]
+        assert times == sorted(times)
+
+    def test_trophies_calculated(self, db):
+        seed_battles(db, [{"trophy_change": 30}])
+        history = db.get_trophy_history()
+        assert history[0]["trophies"] == 10900 + 30
+
+
+# =============================================================================
+# ARCHETYPE CLASSIFICATION
+# =============================================================================
+
+class TestArchetypes:
+    def test_hog_classified(self, db):
+        assert cr_tracker.BattleDatabase.classify_archetype(OPPONENT_DECK) == "Hog Cycle"
+
+    def test_unknown_deck(self, db):
+        unknown_deck = [
+            make_card("Arrows"), make_card("Fireball"),
+            make_card("The Log"), make_card("Zap"),
+            make_card("Tornado"), make_card("Rocket"),
+            make_card("Lightning"), make_card("Freeze"),
+        ]
+        assert cr_tracker.BattleDatabase.classify_archetype(unknown_deck) == "Unknown"
+
+    def test_archetype_stats_aggregation(self, db):
+        seed_battles(db, [
+            {"player_crowns": 3, "opponent_crowns": 1, "trophy_change": 30},
+            {"player_crowns": 3, "opponent_crowns": 0, "trophy_change": 31},
+            {"player_crowns": 1, "opponent_crowns": 3, "trophy_change": -30},
+        ])
+        stats = db.get_archetype_stats(min_battles=1)
+        # All 3 battles use OPPONENT_DECK which is Hog Cycle
+        hog = [s for s in stats if s["archetype"] == "Hog Cycle"]
+        assert len(hog) == 1
+        assert hog[0]["total"] == 3
+        assert hog[0]["wins"] == 2
+
+    def test_archetype_stats_empty_db(self, db):
+        assert db.get_archetype_stats() == []
+
+
+# =============================================================================
+# SNAPSHOT DIFFING
+# =============================================================================
+
+class TestSnapshotDiff:
+    def test_single_snapshot_returns_none(self, db):
+        db.store_player_snapshot(make_player_profile(trophies=10900))
+        assert db.get_snapshot_diff() is None
+
+    def test_two_snapshots_diff(self, db):
+        p1 = make_player_profile(trophies=10900)
+        p1["wins"] = 1500
+        p1["losses"] = 1343
+        db.store_player_snapshot(p1)
+
+        p2 = make_player_profile(trophies=10947)
+        p2["wins"] = 1503
+        p2["losses"] = 1344
+        db.store_player_snapshot(p2)
+
+        diff = db.get_snapshot_diff()
+        assert diff is not None
+        assert diff["trophies"] == 47
+        assert diff["wins"] == 3
+        assert diff["losses"] == 1
+
+    def test_no_change(self, db):
+        profile = make_player_profile()
+        db.store_player_snapshot(profile)
+        db.store_player_snapshot(profile)
+        diff = db.get_snapshot_diff()
+        assert diff["trophies"] == 0
+        assert diff["wins"] == 0
+
+    def test_snapshot_diff_shown_in_fetch(self, db, capsys):
+        p1 = make_player_profile(trophies=10900)
+        p1["wins"] = 1500
+        db.store_player_snapshot(p1)
+
+        p2 = make_player_profile(trophies=10930)
+        p2["wins"] = 1502
+        battles = [make_battle()]
+        with patch.object(cr_tracker.ClashRoyaleAPI, "get_player", return_value=p2):
+            with patch.object(cr_tracker.ClashRoyaleAPI, "get_battle_log", return_value=battles):
+                cr_tracker.fetch_and_store("fake-key", "L90009GPP", db)
+        output = capsys.readouterr().out
+        assert "Since last fetch" in output
+        assert "+30 trophies" in output
+
+
+# =============================================================================
+# EXPORT
+# =============================================================================
+
+class TestExport:
+    def test_export_json(self, db, tmp_path):
+        seed_battles(db, [
+            {"player_crowns": 3, "opponent_crowns": 1, "trophy_change": 30},
+            {"player_crowns": 1, "opponent_crowns": 3, "trophy_change": -30},
+        ])
+        out_file = str(tmp_path / "export.json")
+        data = db.get_card_matchup_stats(min_battles=1)
+        cr_tracker.export_data(data, "json", out_file)
+
+        with open(out_file) as f:
+            loaded = json.load(f)
+        assert isinstance(loaded, list)
+        assert len(loaded) > 0
+        assert "card_name" in loaded[0]
+
+    def test_export_csv(self, db, tmp_path):
+        seed_battles(db, [
+            {"player_crowns": 3, "opponent_crowns": 1, "trophy_change": 30},
+            {"player_crowns": 1, "opponent_crowns": 3, "trophy_change": -30},
+        ])
+        out_file = str(tmp_path / "export.csv")
+        data = db.get_card_matchup_stats(min_battles=1)
+        cr_tracker.export_data(data, "csv", out_file)
+
+        with open(out_file) as f:
+            lines = f.readlines()
+        assert len(lines) > 1  # header + data rows
+        assert "card_name" in lines[0]
+
+    def test_export_json_to_stdout(self, db, capsys):
+        seed_battles(db, [
+            {"player_crowns": 3, "opponent_crowns": 1, "trophy_change": 30},
+        ])
+        data = db.get_rolling_stats(10)
+        cr_tracker.export_data(data, "json")
+        output = capsys.readouterr().out
+        loaded = json.loads(output)
+        assert isinstance(loaded, list)
+
+    def test_export_empty_data(self, db, tmp_path):
+        out_file = str(tmp_path / "empty.csv")
+        cr_tracker.export_data([], "csv", out_file)
+        with open(out_file) as f:
+            assert f.read() == ""
+
+
+# =============================================================================
+# NEW REPORTING SMOKE TESTS
+# =============================================================================
+
+class TestNewReporting:
+    def test_print_streaks(self, db, capsys):
+        _seed_reporting_db(db)
+        cr_tracker.print_streaks(db)
+        assert "STREAK ANALYSIS" in capsys.readouterr().out
+
+    def test_print_streaks_empty(self, db, capsys):
+        cr_tracker.print_streaks(db)
+        assert "No battles tracked" in capsys.readouterr().out
+
+    def test_print_rolling_stats(self, db, capsys):
+        _seed_reporting_db(db)
+        cr_tracker.print_rolling_stats(db, 35)
+        output = capsys.readouterr().out
+        assert "rolling window" in output
+
+    def test_print_rolling_stats_empty(self, db, capsys):
+        cr_tracker.print_rolling_stats(db, 35)
+        assert "No battles tracked" in capsys.readouterr().out
+
+    def test_print_trophy_history(self, db, capsys):
+        _seed_reporting_db(db)
+        cr_tracker.print_trophy_history(db)
+        assert "TROPHY PROGRESSION" in capsys.readouterr().out
+
+    def test_print_trophy_history_empty(self, db, capsys):
+        cr_tracker.print_trophy_history(db)
+        assert "No trophy data" in capsys.readouterr().out
+
+    def test_print_archetype_stats(self, db, capsys):
+        _seed_reporting_db(db)
+        cr_tracker.print_archetype_stats(db)
+        assert "ARCHETYPE" in capsys.readouterr().out
+
+    def test_print_archetype_stats_empty(self, db, capsys):
+        cr_tracker.print_archetype_stats(db)
+        assert "Not enough data" in capsys.readouterr().out
+
+
+# =============================================================================
+# NEW CLI FLAGS
+# =============================================================================
+
+class TestNewCLI:
+    def test_streaks_flag(self, db_path):
+        with patch("sys.argv", ["cr_tracker.py", "--streaks", "--db", db_path]):
+            assert cr_tracker.main() == 0
+
+    def test_rolling_flag(self, db_path):
+        with patch("sys.argv", ["cr_tracker.py", "--rolling", "20", "--db", db_path]):
+            assert cr_tracker.main() == 0
+
+    def test_trophy_history_flag(self, db_path):
+        with patch("sys.argv", ["cr_tracker.py", "--trophy-history", "--db", db_path]):
+            assert cr_tracker.main() == 0
+
+    def test_archetypes_flag(self, db_path):
+        with patch("sys.argv", ["cr_tracker.py", "--archetypes", "--db", db_path]):
+            assert cr_tracker.main() == 0
+
+    def test_export_json_flag(self, db_path):
+        with patch("sys.argv", ["cr_tracker.py", "--stats", "--export", "json", "--db", db_path]):
+            assert cr_tracker.main() == 0
+
+    def test_export_csv_flag(self, db_path):
+        with patch("sys.argv", ["cr_tracker.py", "--matchups", "--export", "csv", "--db", db_path]):
+            assert cr_tracker.main() == 0

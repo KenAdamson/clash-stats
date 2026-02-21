@@ -18,9 +18,9 @@ Deck composition and strategy details are intentionally excluded from this publi
 
 The tracker is designed to work with any 8-card deck. Deck data is pulled from the API at runtime.
 
-### Evo Tracking (Important for Analytics)
+### Evo Tracking
 
-Only two Evo slots are available. The tracker's `_generate_deck_hash()` currently sorts card names with MD5 but **does not include evolution level**, meaning different Evo configurations hash to the same deck. This needs to be fixed to track Evo swap impact over time.
+Only two Evo slots are available. The tracker's `_generate_deck_hash()` includes `evolutionLevel` in the hash, so different Evo configurations produce distinct deck hashes. The `deck_cards` table also stores `evolution_level` and `star_level` per card.
 
 ## Architecture Decisions
 
@@ -33,29 +33,24 @@ Single-file database, portable, zero-config. The `raw_json` column in the battle
 ### Deduplication via content hashing
 The API returns overlapping windows (last 25 battles). The SHA-256 hash on `battleTime + tags + crowns` handles dedup cleanly. Don't switch to timestamp-only dedup — the current approach is more robust.
 
-## Known Issues and Improvements
+## Implemented Features
 
-### cr_tracker.py
+All original known issues have been resolved:
 
-1. **Deck hash doesn't include Evo status.** The `_generate_deck_hash()` method only hashes card names. It needs to incorporate evolution level so different Evo configurations show as distinct decks in `--deck-stats`. This is the highest-priority fix.
+1. **Deck hash includes Evo status.** `_generate_deck_hash()` now includes `evolutionLevel` — different Evo configurations produce distinct hashes. Existing data is backfilled on migration.
+2. **Evo/star tracking in deck_cards.** `evolution_level` and `star_level` columns added, populated from API data. Schema migration backfills from `raw_json`.
+3. **Trophy progression** — `--trophy-history` shows an ASCII chart of trophy movement over time.
+4. **Streak detection** — `--streaks` shows current streak, longest win/loss runs with trophy ranges.
+5. **Rolling window stats** — `--rolling N` shows win rate over the last N games with comparison to overall.
+6. **Opponent archetype clustering** — `--archetypes` classifies opponent decks by win condition (Golem, Hog, etc.) and shows per-archetype win rates.
+7. **Elixir leak tracking** — `player_elixir_leaked` and `opponent_elixir_leaked` stored per battle.
+8. **Battle duration tracking** — `battle_duration` stored when available from the API.
+9. **Snapshot diffing** — Each `--fetch` now prints changes since last fetch (trophy/win/loss deltas).
+10. **Export capability** — `--export csv` or `--export json` with optional `--output FILE`. Works with any analytics command.
 
-2. **No Evo/Hero tracking in deck_cards table.** The `deck_cards` table stores `card_name`, `card_level`, `card_max_level`, `card_elixir`, but not `evolution_level`, `star_level`, or Hero status. The raw JSON has this data — the schema should capture it.
+### Schema Migration System
 
-3. **No trophy progression tracking.** We have `player_starting_trophies` and `player_trophy_change` per battle, but no dedicated view for trophy over time. A `--trophy-history` command showing the climb/fall graph (even ASCII) would be valuable.
-
-4. **No streak detection.** Win streaks and loss streaks are invisible in the current analytics. Detect and report streaks, including start/end trophies and duration.
-
-5. **No rolling window stats.** RoyaleAPI shows a 35-game rolling window. The tracker should support `--rolling N` to show win rate over the last N games, mimicking and extending what RoyaleAPI provides.
-
-6. **No opponent archetype clustering.** The `--matchups` command shows individual card win rates, but doesn't cluster opponent decks into archetypes (Golem beatdown, Hog cycle, bridge spam, etc.). Even a simple heuristic based on win condition cards would help.
-
-7. **Elixir leak data isn't captured.** The API returns `elixirLeaked` for both players — a strong signal of gameplay efficiency. The battles table should store this.
-
-8. **No game duration tracking.** Battle time (start to finish) isn't captured. The API's `battleTime` is a timestamp, not duration, but duration can be inferred from tower HP states and crown counts, or from the raw JSON if the API includes it.
-
-9. **Player snapshot diffing.** The `player_snapshots` table captures profile state over time but there's no command to diff snapshots (e.g., "gained 47 trophies, 3 wins, 1 loss since last fetch"). This would make each `--fetch` more informative.
-
-10. **No export capability.** Add `--export csv` and `--export json` for feeding data into external tools or spreadsheets.
+The database uses a versioned migration system (`schema_version` table). New columns are added via `ALTER TABLE` with automatic backfill from `raw_json`. Migrations are idempotent — safe to run multiple times.
 
 ## Coding Standards
 
