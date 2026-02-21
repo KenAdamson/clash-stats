@@ -1,10 +1,6 @@
 # CLAUDE.md — Clash Royale Analytics Suite
 
-## Project Owner
-
-Ken (KrylarPrime, tag #L90009GPP). Software engineer at Stoke Space. Polyglot developer — fluent across languages with C# as first love, Python as a strong favorite, and deep experience across the stack. Windows Server administration, home server infrastructure (TrueNAS, Plex, Docker, UniFi), embedded systems (ESP8266), and COM interop by day. Expects professional-grade solutions even in personal projects. Doesn't cut corners.
-
-## What This Is
+## Project Overview
 
 Two Python tools for analyzing Clash Royale gameplay at a level the community ecosystem doesn't support. These aren't hobbyist scripts — they're the analytics backend for a player who has climbed to 10,900+ trophies with a deck that literally zero other humans play, in ~2,800 lifetime games while peers at the same trophy range have 10,000-15,000+.
 
@@ -14,11 +10,11 @@ The existing community tools (RoyaleAPI, StatsRoyale, Deckshop) are built for me
 
 The CR API only exposes the last 25 battles. No pagination, no historical queries. Community sites only capture games if they happen to poll your tag during the window. This tool polls the API on a schedule, deduplicates via SHA-256 hashing, and archives every battle into SQLite with full card-level data for long-term analysis.
 
-**Intended deployment:** Ken's Plex server (192.168.7.58), which already runs his full media stack via Docker. This should be containerized — Python image, SQLite volume mount for persistent data, cron or scheduler inside the container. Third-party packages are welcome — use the best tool for the job (e.g., `requests` for HTTP, `rich` for terminal output, `pytest` for testing). The RoyaleAPI proxy (proxy.royaleapi.dev) is used to handle dynamic residential IP issues with API key whitelisting.
+**Intended deployment:** Docker container on a home server alongside an existing media stack. Third-party packages are welcome — use the best tool for the job (e.g., `requests` for HTTP, `rich` for terminal output, `pytest` for testing).
 
 ### `cr_cycle_sim.py` — Push Sequence Monte Carlo Simulator
 
-Models the probability of executing Ken's specific multi-phase push doctrine from any random starting hand. This is NOT a generic cycle calculator — it simulates the actual decision tree of Ken's playstyle across six phases, tracking card positions, cycle costs, and sequence readiness.
+Models the probability of executing a specific multi-phase push doctrine from any random starting hand. This is NOT a generic cycle calculator — it simulates the actual decision tree across six phases, tracking card positions, cycle costs, and sequence readiness.
 
 ## The Deck
 
@@ -43,7 +39,7 @@ This is not a meta deck. It's an 8-year-old core composition that has been conti
 
 ### Evo Slot History (Important for Analytics)
 
-Only two Evo slots are available. Ken recently swapped from Evo Pekka + Evo Witch to **Evo Executioner + Evo Witch**. This swap is backed by data:
+Only two Evo slots are available. Recent swap from Evo Pekka + Evo Witch to **Evo Executioner + Evo Witch**. This swap is backed by data:
 
 - **Evo Pekka era:** 9W-11L (45.0%) over 20 ladder games
 - **Evo Executioner era:** 4W-1L (80.0%) over 5 ladder games (and climbing)
@@ -91,13 +87,13 @@ The API returns overlapping windows (last 25 battles). The SHA-256 hash on `batt
 
 3. **No trophy progression tracking.** We have `player_starting_trophies` and `player_trophy_change` per battle, but no dedicated view for trophy over time. A `--trophy-history` command showing the climb/fall graph (even ASCII) would be valuable.
 
-4. **No streak detection.** Win streaks and loss streaks (especially tilt sessions like the Feb 14 disaster: 15 games, 6-9, -86 trophies) are invisible in the current analytics. Detect and report streaks, including start/end trophies and duration.
+4. **No streak detection.** Win streaks and loss streaks are invisible in the current analytics. Detect and report streaks, including start/end trophies and duration.
 
 5. **No rolling window stats.** RoyaleAPI shows a 35-game rolling window. The tracker should support `--rolling N` to show win rate over the last N games, mimicking and extending what RoyaleAPI provides.
 
 6. **No opponent archetype clustering.** The `--matchups` command shows individual card win rates, but doesn't cluster opponent decks into archetypes (Golem beatdown, Hog cycle, bridge spam, etc.). Even a simple heuristic based on win condition cards would help.
 
-7. **Elixir leak data isn't captured.** The API returns `elixirLeaked` for both players — a strong signal of gameplay efficiency. The battles table should store this. Ken's avg leak in wins is 0.51 vs 1.36 in losses.
+7. **Elixir leak data isn't captured.** The API returns `elixirLeaked` for both players — a strong signal of gameplay efficiency. The battles table should store this.
 
 8. **No game duration tracking.** Battle time (start to finish) isn't captured. The API's `battleTime` is a timestamp, not duration, but duration can be inferred from tower HP states and crown counts, or from the raw JSON if the API includes it.
 
@@ -121,10 +117,10 @@ The API returns overlapping windows (last 25 battles). The SHA-256 hash on `batt
 
 ## Coding Standards
 
-- **Python 3.8+ compatible.** Although the Docker image will use 3.11, keep backward compat reasonable. Don't use 3.10+ features (match statements, etc.) without justification.
+- **Python 3.11+.** Target the Docker image runtime.
 - **Type hints everywhere.** Type hints aren't optional — they're documentation that the interpreter can validate.
 - **Docstrings on all public methods.** Google style.
-- **No silent failures.** If an API call fails or data is malformed, log it clearly. Ken runs this unattended in Docker — he needs to know when something breaks via `docker logs`.
+- **No silent failures.** If an API call fails or data is malformed, log it clearly. This runs unattended in Docker — failures must be visible in `docker logs`.
 - **Conservative error handling.** Better to skip a malformed battle and log a warning than crash the whole fetch cycle.
 - **Tests welcome.** Especially for the sim's probability calculations — Monte Carlo results should be validated against analytical solutions where possible (e.g., the 21.4% both-in-starting-hand probability is C(6,2)/C(8,4) = 15/70 = 21.43%, and the sim correctly produces ~21.3%).
 
@@ -132,18 +128,16 @@ The API returns overlapping windows (last 25 battles). The SHA-256 hash on `batt
 
 These data points inform what analytics matter:
 
-- **Trophy range:** 10,900+ current, 10,954 PB, targeting 11,500 for ranked mode unlock
-- **Play style:** 1-2 games/day surgical precision, NOT volume grinding. 1.35 games/day lifetime average.
-- **Efficiency:** ~2,843 games to 10,900 trophies. Peers at same range: 10,000-15,000+ games.
-- **Three-crown rate:** 72.9% lifetime (overwhelmingly wins by destruction, not chip)
-- **Problem matchups:** Elite Barbarians (60% opponent win rate), Golem+E-Barbs combo
-- **Perfect counters:** Sparky (0% opponent win rate, 0/5), Tesla (0/4), Evo Dart Goblin (0/3)
-- **Tilt pattern:** Rare but devastating. Feb 14: 15 games in one session, 6-9, dropped 86 trophies. Not wired for volume — wired for precision.
-- **Clan War:** Used as zero-risk experimentation lab. Off-deck experiments go 1-4. Only Miner-based experiment won (muscle memory). Ken is a beatdown player, not a cycle player.
+- **Play style:** 1-2 games/day surgical precision, NOT volume grinding. ~1.35 games/day lifetime average.
+- **Efficiency:** ~2,800 games to 10,900+ trophies. Peers at same range: 10,000-15,000+ games.
+- **Three-crown rate:** ~73% lifetime (overwhelmingly wins by destruction, not chip)
+- **Problem matchups:** Elite Barbarians, Golem+E-Barbs combo
+- **Perfect counters:** Sparky, Tesla, Evo Dart Goblin
+- **Tilt pattern:** Rare but devastating. Not wired for volume — wired for precision.
 
 ## API Reference
 
-**Base URL:** `https://proxy.royaleapi.dev/v1` (via RoyaleAPI proxy) or `https://api.clashroyale.com/v1` (direct)
+**Base URL:** `https://api.clashroyale.com/v1` (direct) or `https://proxy.royaleapi.dev/v1` (via RoyaleAPI proxy, configurable with `CR_API_URL`)
 
 **Key endpoints:**
 - `GET /players/{tag}` — Player profile (all-time stats, current trophies, clan)
@@ -158,7 +152,7 @@ These data points inform what analytics matter:
 
 ## Future Vision
 
-The endgame is a unified analytics platform where the tracker feeds historical data into the sim, the sim's probability model informs strategy decisions, and the whole thing runs as a Docker container on Ken's Plex server with a lightweight web dashboard. Think personal Moneyball for Clash Royale — data-driven competitive advantage for a player who's already proving that precision beats volume.
+The endgame is a unified analytics platform where the tracker feeds historical data into the sim, the sim's probability model informs strategy decisions, and the whole thing runs as a Docker container with a lightweight web dashboard. Data-driven competitive advantage for a player who's already proving that precision beats volume.
 
 Priorities:
 1. Fix the Evo tracking gap in the tracker (deck hash + schema)
@@ -169,45 +163,39 @@ Priorities:
 
 ## Deployment
 
-**Target host:** 192.168.7.58 (Ken's Plex server, Ubuntu-based, Docker already running full media stack)
+Docker container designed to run alongside an existing media/services stack.
 
 ### Docker Container Design
 
 ```
-cr-tracker/
+clash-stats/
 ├── Dockerfile
 ├── docker-compose.yml
-├── cr_tracker.py
-├── cr_cycle_sim.py
-├── data/                  ← Volume mount, persists SQLite DB
+├── pyproject.toml
+├── src/
+│   ├── tracker/
+│   │   ├── cr_tracker.py
+│   │   └── test_cr_tracker.py
+│   └── cycle_sim/
+│       └── cr_cycle_sim.py
+├── data/                  <- Volume mount, persists SQLite DB
 │   └── clash_royale_history.db
-└── .env                   ← CR_API_KEY, CR_PLAYER_TAG (not committed)
+└── .env                   <- CR_API_KEY, CR_PLAYER_TAG (not committed)
 ```
 
 **Container requirements:**
-- Base image: `python:3.11-slim`
-- Dependencies managed via `pyproject.toml`, installed with `pip install .` or `pip install -e .[dev]` in the Dockerfile
+- Base image: `python:3.11-alpine`
+- Dependencies managed via `pyproject.toml`, installed with `pip install .` in the Dockerfile
 - SQLite database lives on a Docker volume mount (`./data:/app/data`) so it survives container rebuilds
-- Environment variables via `.env` file: `CR_API_KEY`, `CR_PLAYER_TAG=L90009GPP`
-- Cron schedule inside container: poll every 3-4 hours (Ken plays 1-2 games/day, 25-game API window means zero risk of missing games at that interval)
-- Container should run `--fetch` on the schedule and keep the DB accessible for ad-hoc `--stats`, `--matchups`, etc. via `docker exec`
+- Environment variables via `.env` file: `CR_API_KEY`, `CR_PLAYER_TAG`
+- BusyBox crond schedule: poll every 4 hours (1-2 games/day play rate, 25-game API window means zero risk of missing games)
+- Container runs `--fetch` on schedule and keeps the DB accessible for ad-hoc analytics via `docker exec`
 - Logging to stdout so Docker's log driver captures it
 
 **Health/monitoring:**
 - Log each fetch cycle with timestamp, new battle count, and current trophy count
-- If the API returns errors for 3+ consecutive fetches, log a clear warning (don't just silently fail — Ken runs this unattended)
-- Consider a simple healthcheck endpoint if a web dashboard is added later
+- If the API returns errors for 3+ consecutive fetches, log a clear warning (don't silently fail — this runs unattended)
 
 **Network:**
-- Container needs outbound HTTPS to `proxy.royaleapi.dev` (port 443)
-- If the web dashboard is built, expose on a high port (e.g., 8078) — Ken's network is already managing port assignments across his media stack
-
-**Fits alongside existing stack:** This is a tiny container — sub-50MB image, negligible CPU/RAM, writes a few KB to SQLite per fetch. It won't compete with Plex for resources.
-
-## Files
-
-```
-cr_tracker.py      — Battle history archiver + analytics CLI
-cr_cycle_sim.py    — Push sequence Monte Carlo simulator
-CLAUDE.md          — This file (project specification for Claude Code)
-```
+- Container needs outbound HTTPS (port 443) to the configured API URL
+- Port 8078 reserved for future web dashboard
