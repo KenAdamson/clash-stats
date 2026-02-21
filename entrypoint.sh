@@ -9,6 +9,7 @@ cat > /app/fetch.sh << EOF
 #!/bin/sh
 export CR_API_KEY="${CR_API_KEY}"
 export CR_PLAYER_TAG="${CR_PLAYER_TAG}"
+export CR_API_URL="${CR_API_URL:-}"
 export PYTHONUNBUFFERED=1
 python /app/cr_tracker.py --fetch --db ${DB_PATH}
 EOF
@@ -16,6 +17,7 @@ chmod +x /app/fetch.sh
 
 echo "=== cr-tracker starting ==="
 echo "  Player tag: #${CR_PLAYER_TAG}"
+echo "  API:        ${CR_API_URL:-https://api.clashroyale.com/v1}"
 echo "  Schedule:   every 4 hours (crond)"
 echo "  Database:   ${DB_PATH}"
 

@@ -37,11 +37,7 @@ import urllib.parse
 # CONFIGURATION
 # =============================================================================
 
-# Use RoyaleAPI proxy to handle dynamic IPs
-# When creating your key at developer.clashroyale.com, whitelist IP: 45.79.218.79
-USE_PROXY = True
-API_BASE_URL = "https://proxy.royaleapi.dev/v1" if USE_PROXY else "https://api.clashroyale.com/v1"
-
+DEFAULT_API_URL = "https://api.clashroyale.com/v1"
 DB_FILE = "clash_royale_history.db"
 
 # =============================================================================
@@ -143,9 +139,9 @@ CREATE INDEX IF NOT EXISTS idx_deck_cards_battle_id ON deck_cards(battle_id);
 class ClashRoyaleAPI:
     """Simple CR API client using stdlib only."""
     
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, base_url: str = DEFAULT_API_URL):
         self.api_key = api_key
-        self.base_url = API_BASE_URL
+        self.base_url = base_url
     
     def _request(self, endpoint: str) -> dict:
         """Make authenticated API request."""
@@ -657,9 +653,10 @@ def print_recent_battles(db: BattleDatabase, limit: int = 10):
 # MAIN
 # =============================================================================
 
-def fetch_and_store(api_key: str, player_tag: str, db: BattleDatabase):
+def fetch_and_store(api_key: str, player_tag: str, db: BattleDatabase,
+                    api_url: str = DEFAULT_API_URL):
     """Fetch latest battles and store new ones."""
-    api = ClashRoyaleAPI(api_key)
+    api = ClashRoyaleAPI(api_key, base_url=api_url)
     
     print(f"\n🔄 Fetching data for #{player_tag}...")
     
@@ -702,6 +699,7 @@ Examples:
 Environment variables:
   CR_API_KEY     - Your API key from developer.clashroyale.com
   CR_PLAYER_TAG  - Your player tag (without #)
+  CR_API_URL     - API base URL (default: https://api.clashroyale.com/v1)
         """
     )
     parser.add_argument("--fetch", action="store_true", help="Fetch and store new battles")
@@ -712,12 +710,14 @@ Environment variables:
     parser.add_argument("--recent", type=int, metavar="N", help="Show last N battles")
     parser.add_argument("--api-key", type=str, help="CR API key")
     parser.add_argument("--player-tag", type=str, help="Player tag (without #)")
+    parser.add_argument("--api-url", type=str, help="API base URL (default: https://api.clashroyale.com/v1)")
     parser.add_argument("--db", type=str, default=DB_FILE, help=f"Database file (default: {DB_FILE})")
     
     args = parser.parse_args()
     
     api_key = args.api_key or os.environ.get("CR_API_KEY")
     player_tag = args.player_tag or os.environ.get("CR_PLAYER_TAG")
+    api_url = args.api_url or os.environ.get("CR_API_URL", DEFAULT_API_URL)
     
     db = BattleDatabase(args.db)
     
@@ -727,7 +727,7 @@ Environment variables:
                 print("Error: --api-key and --player-tag required for fetching")
                 print("       Or set CR_API_KEY and CR_PLAYER_TAG environment variables")
                 return 1
-            fetch_and_store(api_key, player_tag.replace("#", ""), db)
+            fetch_and_store(api_key, player_tag.replace("#", ""), db, api_url=api_url)
         
         if args.stats:
             print_overall_stats(db)
