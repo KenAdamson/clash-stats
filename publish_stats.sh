@@ -14,12 +14,13 @@ PUSH_TARGET="${STATS_REPO_URL:-$REMOTE}"
 
 cd "$REPO_DIR"
 
-# Fetch all endpoints
-overview=$(curl -sf "$API_BASE/api/overview")
-trophy_history=$(curl -sf "$API_BASE/api/trophy-history")
-matchups=$(curl -sf "$API_BASE/api/matchups")
-recent=$(curl -sf "$API_BASE/api/recent")
-streaks=$(curl -sf "$API_BASE/api/streaks")
+# Fetch all endpoints (mode=ladder filters out war/boat games)
+MODE="?mode=ladder"
+overview=$(curl -sf "$API_BASE/api/overview$MODE")
+trophy_history=$(curl -sf "$API_BASE/api/trophy-history$MODE")
+matchups=$(curl -sf "$API_BASE/api/matchups$MODE")
+recent=$(curl -sf "$API_BASE/api/recent$MODE")
+streaks=$(curl -sf "$API_BASE/api/streaks$MODE")
 
 if [ -z "$overview" ]; then
     echo "publish_stats: API not responding, skipping"
