@@ -16,52 +16,15 @@ The CR API only exposes the last 25 battles. No pagination, no historical querie
 
 Models the probability of executing a specific multi-phase push doctrine from any random starting hand. This is NOT a generic cycle calculator — it simulates the actual decision tree across six phases, tracking card positions, cycle costs, and sequence readiness.
 
-## The Deck
+## Deck & Strategy
 
-```
-Card            Elixir  Level   Evo Status
-─────────────────────────────────────────────
-P.E.K.K.A       7       16      Base (was Evo, swapped out)
-Witch            5       16      Evo
-Executioner      5       15      Evo (recently swapped IN)
-Graveyard        5       15      Base
-Miner            3       15      Base
-Arrows           3       14      Base
-Goblin Curse     2       14      Base
-Bats             2       15      Base
-─────────────────────────────────────────────
-Average Elixir: 4.0
-```
+Deck composition, push doctrine, and sim parameters are intentionally excluded from this public repo. The deck has zero community usage on RoyaleAPI — that invisibility is a competitive advantage.
 
-**Community data on RoyaleAPI: "Community: 0 — No one else plays."**
+The tracker and sim are designed to work with any 8-card deck. Deck data is pulled from the API at runtime, and the sim's deck definition lives in `cr_cycle_sim.py`.
 
-This is not a meta deck. It's an 8-year-old core composition that has been continuously refined. The zero community footprint is a strategic asset — opponents at 10,900 have never seen it, can't scout it, and no counter guides exist.
+### Evo Tracking (Important for Analytics)
 
-### Evo Slot History (Important for Analytics)
-
-Only two Evo slots are available. Recent swap from Evo Pekka + Evo Witch to **Evo Executioner + Evo Witch**. This swap is backed by data:
-
-- **Evo Pekka era:** 9W-11L (45.0%) over 20 ladder games
-- **Evo Executioner era:** 4W-1L (80.0%) over 5 ladder games (and climbing)
-
-The tracker's `_generate_deck_hash()` currently sorts card names with MD5 but **does not include evolution level**, meaning both eras hash to the same deck. This needs to be fixed to track the Evo swap impact over time.
-
-## The Push Doctrine (What the Sim Models)
-
-```
-Phase 1: Cycle to Pekka + Witch both in hand (≤5 elixir budget)
-Phase 2: Deploy Pekka (7 elixir) — tank initiates push
-Phase 3: Deploy Witch (5 elixir) — skeleton screen + splash
-Phase 4: Miner + Goblin Curse follow-up — off-lane pressure + conversion
-Phase 5: Bats + Graveyard second wave — finisher
-Phase 6: Pekka + Witch cycling back — sustain pressure
-```
-
-Key Monte Carlo findings (100K trials):
-- 49% chance of getting Pekka+Witch ready within 5-elixir budget
-- Graveyard is in hand 100% of the time after Phase 4 (deck architecture guarantees finisher)
-- 25.4% "smooth sequence" rate (all phases chain with minimal cycling)
-- Bats and Goblin Curse are the primary cycle cards (37% each)
+Only two Evo slots are available. The tracker's `_generate_deck_hash()` currently sorts card names with MD5 but **does not include evolution level**, meaning different Evo configurations hash to the same deck. This needs to be fixed to track Evo swap impact over time.
 
 ## Architecture Decisions
 
@@ -81,7 +44,7 @@ The API returns overlapping windows (last 25 battles). The SHA-256 hash on `batt
 
 ### cr_tracker.py
 
-1. **Deck hash doesn't include Evo status.** The `_generate_deck_hash()` method only hashes card names. It needs to incorporate evolution level so the Evo Pekka and Evo Executioner eras show as distinct decks in `--deck-stats`. This is the highest-priority fix.
+1. **Deck hash doesn't include Evo status.** The `_generate_deck_hash()` method only hashes card names. It needs to incorporate evolution level so different Evo configurations show as distinct decks in `--deck-stats`. This is the highest-priority fix.
 
 2. **No Evo/Hero tracking in deck_cards table.** The `deck_cards` table stores `card_name`, `card_level`, `card_max_level`, `card_elixir`, but not `evolution_level`, `star_level`, or Hero status. The raw JSON has this data — the schema should capture it.
 
@@ -103,17 +66,17 @@ The API returns overlapping windows (last 25 battles). The SHA-256 hash on `batt
 
 ### cr_cycle_sim.py
 
-1. **Doesn't model Evo Executioner's tactical impact.** The sim treats all cards as elixir costs and positions. The Evo Executioner swap fundamentally changes push dynamics — 780 damage + knockback means threats that previously reached Pekka now don't. This could be modeled as a "push survival probability" modifier per phase.
+1. **Doesn't model Evo tactical impact.** The sim treats all cards as elixir costs and positions. Evo abilities fundamentally change push dynamics — this could be modeled as a "push survival probability" modifier per phase.
 
-2. **Arrows elixir cost is wrong in the DECK dict.** The deck definition has `'Arrows': 3` but Arrows costs 3 elixir in-game so this is actually correct. Verify against current game data if card costs have changed.
+2. **Verify card costs.** The deck definition should be validated against current game data if card costs have changed.
 
-3. **No opponent interaction model.** The sim models your cycle in a vacuum. A more advanced version could model common opponent responses (e.g., "opponent drops E-Barbs at bridge during Phase 2") and calculate how the sequence adapts. This is a big lift but would be the ultimate tool.
+3. **No opponent interaction model.** The sim models your cycle in a vacuum. A more advanced version could model common opponent responses and calculate how the sequence adapts. This is a big lift but would be the ultimate tool.
 
 4. **No integration with tracker data.** The sim uses hardcoded deck composition. It could read the actual deck from the tracker's SQLite database to stay current if cards are swapped.
 
 5. **Single-push analysis only.** The sim models one push sequence. In practice, games involve 2-3 pushes minimum. Modeling the full-game cycle (first push, defend, second push) would give more realistic win probability estimates.
 
-6. **No "what if" mode.** Can't easily test alternate deck compositions (e.g., "what if I swap Arrows for Zap?") without editing the DECK dict. A CLI `--deck` parameter or interactive mode would help with theory-crafting.
+6. **No "what if" mode.** Can't easily test alternate deck compositions without editing the DECK dict. A CLI `--deck` parameter or interactive mode would help with theory-crafting.
 
 ## Coding Standards
 
@@ -131,8 +94,7 @@ These data points inform what analytics matter:
 - **Play style:** 1-2 games/day surgical precision, NOT volume grinding. ~1.35 games/day lifetime average.
 - **Efficiency:** ~2,800 games to 10,900+ trophies. Peers at same range: 10,000-15,000+ games.
 - **Three-crown rate:** ~73% lifetime (overwhelmingly wins by destruction, not chip)
-- **Problem matchups:** Elite Barbarians, Golem+E-Barbs combo
-- **Perfect counters:** Sparky, Tesla, Evo Dart Goblin
+- **Matchup data matters.** Both problem matchups and hard counters exist — the tracker should surface these from real battle data rather than relying on assumptions.
 - **Tilt pattern:** Rare but devastating. Not wired for volume — wired for precision.
 
 ## API Reference
