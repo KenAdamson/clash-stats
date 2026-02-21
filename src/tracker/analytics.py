@@ -326,6 +326,7 @@ def get_recent_battles(session: Session, limit: int = 10) -> list[dict]:
             Battle.player_starting_trophies,
             Battle.opponent_name,
             Battle.player_deck,
+            Battle.opponent_deck,
         )
         .order_by(Battle.battle_time.desc())
         .limit(limit)
@@ -335,6 +336,15 @@ def get_recent_battles(session: Session, limit: int = 10) -> list[dict]:
         d = row._asdict()
         deck_json = json.loads(d["player_deck"])
         d["deck_cards"] = [c.get("name", "Unknown") for c in deck_json]
+        opp_json = json.loads(d["opponent_deck"]) if d.get("opponent_deck") else []
+        d["opponent_cards"] = [
+            {
+                "name": c.get("name", "Unknown"),
+                "elixir": c.get("elixirCost"),
+                "evo": bool(c.get("evolutionLevel")),
+            }
+            for c in opp_json
+        ]
         results.append(d)
     return results
 

@@ -1,5 +1,7 @@
 FROM python:3.11-alpine
 
+RUN apk add --no-cache git openssh-client curl
+
 WORKDIR /app
 
 # Copy source and install in one step
@@ -14,6 +16,7 @@ RUN mkdir -p /app/data
 COPY crontab /etc/crontabs/root
 
 COPY entrypoint.sh /app/entrypoint.sh
+COPY publish_stats.sh /app/publish_stats.sh
 
 VOLUME ["/app/data"]
 

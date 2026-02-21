@@ -9,6 +9,8 @@ services:
       - FETCH_INTERVAL=14400  # 4 hours in seconds
     volumes:
       - ./data:/app/data
+      - ./.git:/app/.git:rw
+      - ~/.ssh/id_ed25519:/root/.ssh/id_ed25519:ro
     network_mode: bridge
     ports:
       - "8078:8078"
