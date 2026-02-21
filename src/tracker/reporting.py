@@ -205,7 +205,10 @@ def print_streaks(session: Session) -> None:
 
     cs = data["current_streak"]
     icon = "🔥" if cs["type"] == "win" else "❄️"
-    print(f"  Current:       {icon} {cs['length']} {cs['type']}{'s' if cs['length'] != 1 else ''} ({cs['start_trophies']} → {cs['end_trophies']})")
+    label = f"{cs['type']}es" if cs["type"] == "loss" else f"{cs['type']}s"
+    if cs["length"] == 1:
+        label = cs["type"]
+    print(f"  Current:       {icon} {cs['length']} {label} ({cs['start_trophies']} → {cs['end_trophies']})")
 
     if data["longest_win_streak"]:
         ws = data["longest_win_streak"]
