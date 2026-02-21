@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Clash Royale Analytics</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+</head>
+<body>
+    <!-- Header -->
+    <header id="header">
+        <div class="header-left">
+            <h1 id="player-name">Loading...</h1>
+            <span class="badge" id="clan-name"></span>
+        </div>
+        <div class="header-right">
+            <div class="stat-pill">
+                <span class="label">Trophies</span>
+                <span class="value" id="trophies">--</span>
+            </div>
+            <div class="stat-pill">
+                <span class="label">Tracked</span>
+                <span class="value" id="tracked-total">--</span>
+            </div>
+            <div class="stat-pill">
+                <span class="label">Win Rate</span>
+                <span class="value" id="win-rate">--</span>
+            </div>
+            <div class="stat-pill" id="diff-pill" style="display:none">
+                <span class="label">Since Last Fetch</span>
+                <span class="value" id="diff-summary"></span>
+            </div>
+            <div class="last-updated">
+                Updated <span id="last-updated">--</span>
+            </div>
+        </div>
+    </header>
+
+    <!-- Trophy Progression -->
+    <section class="card full-width">
+        <h2>Trophy Progression</h2>
+        <div class="chart-container trophy-chart">
+            <canvas id="trophyChart"></canvas>
+        </div>
+    </section>
+
+    <!-- Matchups & Archetypes -->
+    <section class="card full-width">
+        <h2>Matchups & Archetypes</h2>
+        <div class="split-layout">
+            <div class="split-left">
+                <h3>Archetype Win Rates</h3>
+                <div class="chart-container">
+                    <canvas id="archetypeChart"></canvas>
+                </div>
+            </div>
+            <div class="split-right">
+                <h3>Best Matchups</h3>
+                <table id="best-matchups" class="matchup-table">
+                    <thead><tr><th>Card</th><th>Faced</th><th>WR</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+                <h3>Worst Matchups</h3>
+                <table id="worst-matchups" class="matchup-table">
+                    <thead><tr><th>Card</th><th>Faced</th><th>WR</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+    </section>
+
+    <!-- Recent Battles -->
+    <section class="card full-width">
+        <h2>Recent Battles</h2>
+        <div class="battle-feed" id="battle-feed"></div>
+    </section>
+
+    <!-- Streaks & Rolling Stats -->
+    <section class="card full-width">
+        <h2>Streaks & Rolling Stats</h2>
+        <div class="stats-grid">
+            <div class="streak-cards" id="streak-cards"></div>
+            <div class="rolling-stats">
+                <div class="rolling-col">
+                    <h3>Last 35</h3>
+                    <div id="rolling-35"></div>
+                </div>
+                <div class="rolling-col">
+                    <h3>Last 10</h3>
+                    <div id="rolling-10"></div>
+                </div>
+            </div>
+            <div class="split-layout">
+                <div class="split-left">
+                    <h3>Crown Distribution</h3>
+                    <div class="chart-container small-chart">
+                        <canvas id="crownChart"></canvas>
+                    </div>
+                </div>
+                <div class="split-right">
+                    <h3>Win Rate by Hour (UTC)</h3>
+                    <div class="chart-container small-chart">
+                        <canvas id="timeChart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <script src="/static/dashboard.js"></script>
+</body>
+</html>

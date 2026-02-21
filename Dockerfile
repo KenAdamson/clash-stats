@@ -2,14 +2,9 @@ FROM python:3.11-alpine
 
 WORKDIR /app
 
-# Install dependencies first (layer caching)
+# Copy source and install in one step
 COPY pyproject.toml .
-RUN pip install --no-cache-dir .
-
-# Copy application code
 COPY src/ /app/src/
-
-# Install the package itself
 RUN pip install --no-cache-dir .
 
 # Create data directory for SQLite volume mount

@@ -10,6 +10,5 @@ services:
     volumes:
       - ./data:/app/data
     network_mode: bridge
-    # Port reserved for future web dashboard
-    # ports:
-    #   - "8078:8078"
+    ports:
+      - "8078:8078"

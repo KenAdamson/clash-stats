@@ -5,13 +5,20 @@ from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from tracker.models import Base
 
 ALEMBIC_DIR = Path(__file__).parent / "alembic"
+
+
+def _set_sqlite_wal_mode(dbapi_conn, connection_record):
+    """Enable WAL mode for concurrent read/write access."""
+    cursor = dbapi_conn.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.close()
 
 
 def get_engine(db_path: str) -> Engine:
@@ -23,7 +30,9 @@ def get_engine(db_path: str) -> Engine:
     Returns:
         SQLAlchemy Engine instance.
     """
-    return create_engine(f"sqlite:///{db_path}", echo=False)
+    engine = create_engine(f"sqlite:///{db_path}", echo=False)
+    event.listen(engine, "connect", _set_sqlite_wal_mode)
+    return engine
 
 
 def get_session(engine: Engine) -> Session:

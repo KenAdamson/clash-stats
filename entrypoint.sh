@@ -20,9 +20,16 @@ echo "  Player tag: #${CR_PLAYER_TAG}"
 echo "  API:        ${CR_API_URL:-https://api.clashroyale.com/v1}"
 echo "  Schedule:   every 4 hours (crond)"
 echo "  Database:   ${DB_PATH}"
+echo "  Dashboard:  http://0.0.0.0:8078"
 
 # Initial fetch on startup
 /app/fetch.sh
+
+# Start Flask dashboard in background
+export CR_DB_PATH="${DB_PATH}"
+python -m tracker.dashboard &
+FLASK_PID=$!
+trap "kill ${FLASK_PID} 2>/dev/null; exit 0" TERM INT
 
 # Start BusyBox crond in foreground, log to stderr
 echo "=== crond active ==="

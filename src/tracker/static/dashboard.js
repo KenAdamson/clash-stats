@@ -1,0 +1,389 @@
+/* Clash Royale Analytics Dashboard — Chart.js + vanilla fetch */
+
+const POLL_INTERVAL = 3 * 60 * 1000; // 3 minutes
+
+// Chart.js global defaults for dark theme
+Chart.defaults.color = "#8b8fa3";
+Chart.defaults.borderColor = "rgba(42, 45, 58, 0.8)";
+Chart.defaults.font.family = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
+
+let trophyChart = null;
+let archetypeChart = null;
+let crownChart = null;
+let timeChart = null;
+
+// ─── Helpers ────────────────────────────────────────────────────
+
+function wrClass(wr) {
+    if (wr >= 55) return "wr-good";
+    if (wr >= 45) return "wr-mid";
+    return "wr-bad";
+}
+
+function formatBattleTime(bt) {
+    if (!bt || bt.length < 15) return bt || "";
+    // "20260214T180000.000Z" → "Feb 14 18:00"
+    const y = bt.slice(0, 4), m = bt.slice(4, 6), d = bt.slice(6, 8);
+    const h = bt.slice(9, 11), mn = bt.slice(11, 13);
+    const date = new Date(`${y}-${m}-${d}T${h}:${mn}:00Z`);
+    return date.toLocaleDateString("en-US", { month: "short", day: "numeric" }) +
+        " " + date.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false });
+}
+
+function formatShortDate(bt) {
+    if (!bt || bt.length < 8) return bt || "";
+    const m = bt.slice(4, 6), d = bt.slice(6, 8);
+    return `${parseInt(m)}/${parseInt(d)}`;
+}
+
+// ─── Data fetching ──────────────────────────────────────────────
+
+async function fetchAll() {
+    const [overview, trophyHistory, matchups, recent, streaks] = await Promise.all([
+        fetch("/api/overview").then(r => r.json()),
+        fetch("/api/trophy-history").then(r => r.json()),
+        fetch("/api/matchups").then(r => r.json()),
+        fetch("/api/recent").then(r => r.json()),
+        fetch("/api/streaks").then(r => r.json()),
+    ]);
+    renderOverview(overview);
+    renderTrophyChart(trophyHistory);
+    renderMatchups(matchups);
+    renderRecentBattles(recent);
+    renderStreaks(streaks);
+    document.getElementById("last-updated").textContent = new Date().toLocaleTimeString();
+}
+
+// ─── Overview header ────────────────────────────────────────────
+
+function renderOverview(data) {
+    const api = data.api_stats || {};
+    const tracked = data.tracked || {};
+    const diff = data.snapshot_diff;
+
+    document.getElementById("player-name").textContent = api.name || "Clash Royale";
+    const clanEl = document.getElementById("clan-name");
+    if (api.clan_name) {
+        clanEl.textContent = api.clan_name;
+        clanEl.style.display = "";
+    } else {
+        clanEl.style.display = "none";
+    }
+
+    document.getElementById("trophies").textContent =
+        api.trophies != null ? api.trophies.toLocaleString() : "--";
+    document.getElementById("tracked-total").textContent =
+        tracked.total != null ? tracked.total.toLocaleString() : "--";
+
+    const total = tracked.total || 0;
+    const wins = tracked.wins || 0;
+    const wr = total > 0 ? (wins / total * 100).toFixed(1) + "%" : "--";
+    document.getElementById("win-rate").textContent = wr;
+
+    const diffPill = document.getElementById("diff-pill");
+    if (diff && (diff.trophies || diff.wins || diff.losses)) {
+        const parts = [];
+        if (diff.trophies) parts.push((diff.trophies > 0 ? "+" : "") + diff.trophies + " tr");
+        if (diff.wins) parts.push("+" + diff.wins + "W");
+        if (diff.losses) parts.push("+" + diff.losses + "L");
+        document.getElementById("diff-summary").textContent = parts.join("  ");
+        diffPill.style.display = "";
+    } else {
+        diffPill.style.display = "none";
+    }
+}
+
+// ─── Trophy chart ───────────────────────────────────────────────
+
+function renderTrophyChart(history) {
+    const ctx = document.getElementById("trophyChart").getContext("2d");
+
+    const labels = history.map(h => formatShortDate(h.battle_time));
+    const dataPoints = history.map(h => h.trophies);
+    const colors = history.map(h =>
+        h.result === "win" ? "#34d399" : h.result === "loss" ? "#f87171" : "#8b8fa3"
+    );
+
+    if (trophyChart) trophyChart.destroy();
+    trophyChart = new Chart(ctx, {
+        type: "line",
+        data: {
+            labels,
+            datasets: [{
+                label: "Trophies",
+                data: dataPoints,
+                borderColor: "#4f8cff",
+                borderWidth: 2,
+                pointBackgroundColor: colors,
+                pointRadius: history.length > 100 ? 1 : 3,
+                pointHoverRadius: 5,
+                fill: {
+                    target: "origin",
+                    above: "rgba(79, 140, 255, 0.08)",
+                },
+                tension: 0.2,
+            }],
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    callbacks: {
+                        title: (items) => {
+                            const i = items[0].dataIndex;
+                            return formatBattleTime(history[i].battle_time);
+                        },
+                        afterLabel: (item) => {
+                            const h = history[item.dataIndex];
+                            const change = h.player_trophy_change || 0;
+                            return (h.result === "win" ? "Win" : h.result === "loss" ? "Loss" : "Draw") +
+                                "  (" + (change >= 0 ? "+" : "") + change + ")";
+                        },
+                    },
+                },
+            },
+            scales: {
+                x: {
+                    ticks: { maxTicksLimit: 15 },
+                },
+                y: {
+                    beginAtZero: false,
+                },
+            },
+        },
+    });
+}
+
+// ─── Matchups ───────────────────────────────────────────────────
+
+function renderMatchups(data) {
+    // Archetype chart
+    const archetypes = data.archetypes || [];
+    const ctx = document.getElementById("archetypeChart").getContext("2d");
+
+    if (archetypeChart) archetypeChart.destroy();
+    archetypeChart = new Chart(ctx, {
+        type: "bar",
+        data: {
+            labels: archetypes.map(a => a.archetype),
+            datasets: [{
+                label: "Win Rate %",
+                data: archetypes.map(a => a.win_rate),
+                backgroundColor: archetypes.map(a =>
+                    a.win_rate >= 55 ? "rgba(52, 211, 153, 0.7)" :
+                    a.win_rate >= 45 ? "rgba(251, 191, 36, 0.7)" :
+                    "rgba(248, 113, 113, 0.7)"
+                ),
+                borderRadius: 4,
+            }, {
+                label: "Games",
+                data: archetypes.map(a => a.total),
+                type: "line",
+                borderColor: "#4f8cff",
+                pointRadius: 3,
+                yAxisID: "y1",
+            }],
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            indexAxis: "y",
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    callbacks: {
+                        afterLabel: (item) => {
+                            const a = archetypes[item.dataIndex];
+                            return `${a.wins}W-${a.losses}L (${a.total} games)`;
+                        },
+                    },
+                },
+            },
+            scales: {
+                x: { beginAtZero: true, max: 100, title: { display: true, text: "Win Rate %" } },
+                y1: { position: "right", display: false },
+            },
+        },
+    });
+
+    // Card matchup tables
+    const matchups = data.card_matchups || [];
+    const sorted = [...matchups].sort((a, b) => b.win_rate - a.win_rate);
+    const best = sorted.slice(0, 8);
+    const worst = sorted.slice(-8).reverse();
+
+    fillMatchupTable("best-matchups", best);
+    fillMatchupTable("worst-matchups", worst);
+}
+
+function fillMatchupTable(id, rows) {
+    const tbody = document.querySelector(`#${id} tbody`);
+    tbody.innerHTML = rows.map(r =>
+        `<tr>
+            <td>${r.card_name}</td>
+            <td>${r.times_faced}</td>
+            <td class="${wrClass(r.win_rate)}">${r.win_rate}%</td>
+        </tr>`
+    ).join("");
+}
+
+// ─── Recent battles ─────────────────────────────────────────────
+
+function renderRecentBattles(battles) {
+    const feed = document.getElementById("battle-feed");
+    feed.innerHTML = battles.map(b => {
+        const icon = b.result === "win" ? "\u2714" : b.result === "loss" ? "\u2718" : "\u2014";
+        const resultClass = "result-" + b.result;
+        const change = b.player_trophy_change || 0;
+        const changeStr = change >= 0 ? "+" + change : "" + change;
+        const changeClass = change >= 0 ? "trophy-pos" : "trophy-neg";
+        return `<div class="battle-row">
+            <span class="result-icon ${resultClass}">${icon}</span>
+            <span class="score">${b.player_crowns}-${b.opponent_crowns}</span>
+            <span class="opponent">${b.opponent_name || "Unknown"}</span>
+            <span class="trophy-change ${changeClass}">${changeStr}</span>
+            <span class="battle-time">${formatBattleTime(b.battle_time)}</span>
+        </div>`;
+    }).join("");
+}
+
+// ─── Streaks & rolling ──────────────────────────────────────────
+
+function renderStreaks(data) {
+    const streakData = data.streaks || {};
+    const cardsEl = document.getElementById("streak-cards");
+
+    const cards = [];
+    const cs = streakData.current_streak;
+    if (cs) {
+        const icon = cs.type === "win" ? "\uD83D\uDD25" : "\u2744\uFE0F";
+        const label = cs.length === 1 ? cs.type : cs.type === "win" ? "wins" : "losses";
+        cards.push({ label: "Current Streak", value: `${icon} ${cs.length} ${label}`, detail: `${cs.start_trophies} \u2192 ${cs.end_trophies}` });
+    }
+    const ws = streakData.longest_win_streak;
+    if (ws) {
+        cards.push({ label: "Best Win Run", value: `${ws.length} wins`, detail: `${ws.start_trophies} \u2192 ${ws.end_trophies}` });
+    }
+    const ls = streakData.longest_loss_streak;
+    if (ls) {
+        cards.push({ label: "Worst Tilt", value: `${ls.length} losses`, detail: `${ls.start_trophies} \u2192 ${ls.end_trophies}` });
+    }
+
+    cardsEl.innerHTML = cards.map(c =>
+        `<div class="streak-card">
+            <div class="streak-label">${c.label}</div>
+            <div class="streak-value">${c.value}</div>
+            <div class="streak-detail">${c.detail}</div>
+        </div>`
+    ).join("");
+
+    // Rolling stats
+    renderRollingCol("rolling-35", data.rolling_35);
+    renderRollingCol("rolling-10", data.rolling_10);
+
+    // Crown distribution doughnut
+    renderCrownChart(data.crown_distribution);
+
+    // Time of day chart
+    renderTimeChart(data.time_of_day);
+}
+
+function renderRollingCol(id, stats) {
+    if (!stats || stats.total === 0) {
+        document.getElementById(id).innerHTML = "<em>No data</em>";
+        return;
+    }
+    const rows = [
+        ["Win Rate", `${stats.win_rate}%`],
+        ["Record", `${stats.wins}W-${stats.losses}L${stats.draws ? "-" + stats.draws + "D" : ""}`],
+        ["3-Crowns", `${stats.three_crowns}`],
+        ["Avg Crowns", `${stats.avg_crowns}`],
+        ["Trophy \u0394", `${stats.trophy_change >= 0 ? "+" : ""}${stats.trophy_change}`],
+    ];
+    document.getElementById(id).innerHTML = rows.map(([l, v]) =>
+        `<div class="rolling-stat-row"><span class="rs-label">${l}</span><span class="rs-value">${v}</span></div>`
+    ).join("");
+}
+
+function renderCrownChart(dist) {
+    if (!dist) return;
+    const ctx = document.getElementById("crownChart").getContext("2d");
+
+    const winCrowns = [dist.win?.["1"] || 0, dist.win?.["2"] || 0, dist.win?.["3"] || 0];
+    const lossCrowns = [dist.loss?.["0"] || 0, dist.loss?.["1"] || 0, dist.loss?.["2"] || 0];
+
+    if (crownChart) crownChart.destroy();
+    crownChart = new Chart(ctx, {
+        type: "doughnut",
+        data: {
+            labels: ["1-crown W", "2-crown W", "3-crown W", "0-crown L", "1-crown L", "2-crown L"],
+            datasets: [{
+                data: [...winCrowns, ...lossCrowns],
+                backgroundColor: [
+                    "rgba(52, 211, 153, 0.5)",
+                    "rgba(52, 211, 153, 0.7)",
+                    "rgba(52, 211, 153, 0.9)",
+                    "rgba(248, 113, 113, 0.5)",
+                    "rgba(248, 113, 113, 0.7)",
+                    "rgba(248, 113, 113, 0.9)",
+                ],
+                borderWidth: 0,
+            }],
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { position: "right", labels: { boxWidth: 12, padding: 8, font: { size: 11 } } },
+            },
+        },
+    });
+}
+
+function renderTimeChart(timeData) {
+    if (!timeData || timeData.length === 0) return;
+    const ctx = document.getElementById("timeChart").getContext("2d");
+
+    if (timeChart) timeChart.destroy();
+    timeChart = new Chart(ctx, {
+        type: "bar",
+        data: {
+            labels: timeData.map(t => `${String(t.hour).padStart(2, "0")}:00`),
+            datasets: [{
+                label: "Win Rate %",
+                data: timeData.map(t => t.win_rate),
+                backgroundColor: timeData.map(t =>
+                    t.win_rate >= 55 ? "rgba(52, 211, 153, 0.7)" :
+                    t.win_rate >= 45 ? "rgba(251, 191, 36, 0.7)" :
+                    "rgba(248, 113, 113, 0.7)"
+                ),
+                borderRadius: 4,
+            }],
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    callbacks: {
+                        afterLabel: (item) => {
+                            const t = timeData[item.dataIndex];
+                            return `${t.wins}W / ${t.total} games`;
+                        },
+                    },
+                },
+            },
+            scales: {
+                y: { beginAtZero: true, max: 100, title: { display: true, text: "WR %" } },
+            },
+        },
+    });
+}
+
+// ─── Init & poll ────────────────────────────────────────────────
+
+fetchAll();
+setInterval(fetchAll, POLL_INTERVAL);
