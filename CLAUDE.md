@@ -27,6 +27,9 @@ Only two Evo slots are available. The tracker's `_generate_deck_hash()` includes
 ### Use the best packages available
 Third-party dependencies are fine everywhere — tracker, analytics, dashboard. Use `requests` over `urllib`, `rich` for terminal output, `pytest` for testing, `pandas` for data analysis, etc. The Docker image handles `pip install`. Pick the best tool for the job.
 
+### SQLAlchemy + Alembic
+ORM models in `models.py`, versioned migrations via Alembic. The `database.py` module handles engine/session creation and runs migrations automatically on startup. For existing pre-Alembic databases, the migration runner stamps the initial revision without re-creating tables. Installed as a proper package with `pip install .` and a `clash-stats` CLI entrypoint.
+
 ### SQLite as the data store
 Single-file database, portable, zero-config. The `raw_json` column in the battles table preserves the complete API response so no data is lost even if the schema evolves. This is the right call — don't change it.
 
@@ -48,9 +51,9 @@ All original known issues have been resolved:
 9. **Snapshot diffing** — Each `--fetch` now prints changes since last fetch (trophy/win/loss deltas).
 10. **Export capability** — `--export csv` or `--export json` with optional `--output FILE`. Works with any analytics command.
 
-### Schema Migration System
+### Schema Migrations (Alembic)
 
-The database uses a versioned migration system (`schema_version` table). New columns are added via `ALTER TABLE` with automatic backfill from `raw_json`. Migrations are idempotent — safe to run multiple times.
+Database migrations are managed by Alembic. The `database.py` module auto-detects pre-Alembic databases and stamps the initial revision. New migrations go in `src/tracker/alembic/versions/`. Run `alembic upgrade head` programmatically on startup via `init_db()`.
 
 ## Coding Standards
 
@@ -109,8 +112,25 @@ clash-stats/
 ├── pyproject.toml
 ├── src/
 │   └── tracker/
-│       ├── cr_tracker.py
-│       └── test_cr_tracker.py
+│       ├── __init__.py
+│       ├── __main__.py          ← python -m tracker
+│       ├── models.py            ← SQLAlchemy ORM (Battle, PlayerSnapshot, DeckCard)
+│       ├── database.py          ← Engine/session setup, Alembic migration runner
+│       ├── api.py               ← ClashRoyaleAPI client
+│       ├── analytics.py         ← All query/storage functions
+│       ├── reporting.py         ← Terminal output formatting
+│       ├── export.py            ← CSV/JSON export
+│       ├── archetypes.py        ← Opponent deck classification
+│       ├── cli.py               ← argparse + main() dispatch
+│       ├── alembic/             ← Alembic migration config + versions
+│       └── tests/
+│           ├── conftest.py      ← Shared fixtures
+│           ├── test_models.py
+│           ├── test_analytics.py
+│           ├── test_api.py
+│           ├── test_reporting.py
+│           ├── test_cli.py
+│           └── test_export.py
 ├── data/                  <- Volume mount, persists SQLite DB
 │   └── clash_royale_history.db
 └── .env                   <- CR_API_KEY, CR_PLAYER_TAG (not committed)

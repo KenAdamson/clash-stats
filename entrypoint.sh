@@ -11,7 +11,7 @@ export CR_API_KEY="${CR_API_KEY}"
 export CR_PLAYER_TAG="${CR_PLAYER_TAG}"
 [ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
 export PYTHONUNBUFFERED=1
-python /app/cr_tracker.py --fetch --db ${DB_PATH}
+clash-stats --fetch --db ${DB_PATH}
 EOF
 chmod +x /app/fetch.sh
 

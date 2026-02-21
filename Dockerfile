@@ -7,7 +7,10 @@ COPY pyproject.toml .
 RUN pip install --no-cache-dir .
 
 # Copy application code
-COPY src/tracker/cr_tracker.py .
+COPY src/ /app/src/
+
+# Install the package itself
+RUN pip install --no-cache-dir .
 
 # Create data directory for SQLite volume mount
 RUN mkdir -p /app/data
