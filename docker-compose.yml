@@ -9,6 +9,7 @@ services:
       - FETCH_INTERVAL=14400  # 4 hours in seconds
     volumes:
       - ./data:/app/data
+    network_mode: bridge
     # Port reserved for future web dashboard
     # ports:
     #   - "8078:8078"

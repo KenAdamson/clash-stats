@@ -2,9 +2,9 @@
 
 ## Project Overview
 
-Two Python tools for analyzing Clash Royale gameplay at a level the community ecosystem doesn't support. These aren't hobbyist scripts — they're the analytics backend for a player who has climbed to 10,900+ trophies with a deck that literally zero other humans play, in ~2,800 lifetime games while peers at the same trophy range have 10,000-15,000+.
+A Python tool for analyzing Clash Royale gameplay at a level the community ecosystem doesn't support. This isn't a hobbyist script — it's the analytics backend for a player who has climbed to 10,900+ trophies with a deck that literally zero other humans play, in ~2,800 lifetime games while peers at the same trophy range have 10,000-15,000+.
 
-The existing community tools (RoyaleAPI, StatsRoyale, Deckshop) are built for meta players running popular decks. They show aggregate stats, not individualized probabilistic analysis. These tools fill that gap.
+The existing community tools (RoyaleAPI, StatsRoyale, Deckshop) are built for meta players running popular decks. They show aggregate stats, not individualized probabilistic analysis. This tool fills that gap.
 
 ### `cr_tracker.py` — Battle History Archiver
 
@@ -12,15 +12,11 @@ The CR API only exposes the last 25 battles. No pagination, no historical querie
 
 **Intended deployment:** Docker container on a home server alongside an existing media stack. Third-party packages are welcome — use the best tool for the job (e.g., `requests` for HTTP, `rich` for terminal output, `pytest` for testing).
 
-### `cr_cycle_sim.py` — Push Sequence Monte Carlo Simulator
-
-Models the probability of executing a specific multi-phase push doctrine from any random starting hand. This is NOT a generic cycle calculator — it simulates the actual decision tree across six phases, tracking card positions, cycle costs, and sequence readiness.
-
 ## Deck & Strategy
 
-Deck composition, push doctrine, and sim parameters are intentionally excluded from this public repo. The deck has zero community usage on RoyaleAPI — that invisibility is a competitive advantage.
+Deck composition and strategy details are intentionally excluded from this public repo. The deck has zero community usage on RoyaleAPI — that invisibility is a competitive advantage.
 
-The tracker and sim are designed to work with any 8-card deck. Deck data is pulled from the API at runtime, and the sim's deck definition lives in `cr_cycle_sim.py`.
+The tracker is designed to work with any 8-card deck. Deck data is pulled from the API at runtime.
 
 ### Evo Tracking (Important for Analytics)
 
@@ -29,16 +25,13 @@ Only two Evo slots are available. The tracker's `_generate_deck_hash()` currentl
 ## Architecture Decisions
 
 ### Use the best packages available
-Third-party dependencies are fine everywhere — tracker, sim, analytics, dashboard. Use `requests` over `urllib`, `rich` for terminal output, `pytest` for testing, `pandas` for data analysis, etc. The Docker image handles `pip install`. Pick the best tool for the job.
+Third-party dependencies are fine everywhere — tracker, analytics, dashboard. Use `requests` over `urllib`, `rich` for terminal output, `pytest` for testing, `pandas` for data analysis, etc. The Docker image handles `pip install`. Pick the best tool for the job.
 
 ### SQLite as the data store
 Single-file database, portable, zero-config. The `raw_json` column in the battles table preserves the complete API response so no data is lost even if the schema evolves. This is the right call — don't change it.
 
 ### Deduplication via content hashing
 The API returns overlapping windows (last 25 battles). The SHA-256 hash on `battleTime + tags + crowns` handles dedup cleanly. Don't switch to timestamp-only dedup — the current approach is more robust.
-
-### The sim is pure computation
-`cr_cycle_sim.py` has zero I/O dependencies. It's a self-contained Monte Carlo engine. Keep it that way. If we add data-driven features (e.g., weight starting hands by actual battle data), feed the data in via function parameters, don't bolt a database connection onto the sim.
 
 ## Known Issues and Improvements
 
@@ -64,20 +57,6 @@ The API returns overlapping windows (last 25 battles). The SHA-256 hash on `batt
 
 10. **No export capability.** Add `--export csv` and `--export json` for feeding data into external tools or spreadsheets.
 
-### cr_cycle_sim.py
-
-1. **Doesn't model Evo tactical impact.** The sim treats all cards as elixir costs and positions. Evo abilities fundamentally change push dynamics — this could be modeled as a "push survival probability" modifier per phase.
-
-2. **Verify card costs.** The deck definition should be validated against current game data if card costs have changed.
-
-3. **No opponent interaction model.** The sim models your cycle in a vacuum. A more advanced version could model common opponent responses and calculate how the sequence adapts. This is a big lift but would be the ultimate tool.
-
-4. **No integration with tracker data.** The sim uses hardcoded deck composition. It could read the actual deck from the tracker's SQLite database to stay current if cards are swapped.
-
-5. **Single-push analysis only.** The sim models one push sequence. In practice, games involve 2-3 pushes minimum. Modeling the full-game cycle (first push, defend, second push) would give more realistic win probability estimates.
-
-6. **No "what if" mode.** Can't easily test alternate deck compositions without editing the DECK dict. A CLI `--deck` parameter or interactive mode would help with theory-crafting.
-
 ## Coding Standards
 
 - **Python 3.11+.** Target the Docker image runtime.
@@ -85,7 +64,7 @@ The API returns overlapping windows (last 25 battles). The SHA-256 hash on `batt
 - **Docstrings on all public methods.** Google style.
 - **No silent failures.** If an API call fails or data is malformed, log it clearly. This runs unattended in Docker — failures must be visible in `docker logs`.
 - **Conservative error handling.** Better to skip a malformed battle and log a warning than crash the whole fetch cycle.
-- **Tests welcome.** Especially for the sim's probability calculations — Monte Carlo results should be validated against analytical solutions where possible (e.g., the 21.4% both-in-starting-hand probability is C(6,2)/C(8,4) = 15/70 = 21.43%, and the sim correctly produces ~21.3%).
+- **Tests welcome.**
 
 ## Player Context for Smart Analytics
 
@@ -114,14 +93,13 @@ These data points inform what analytics matter:
 
 ## Future Vision
 
-The endgame is a unified analytics platform where the tracker feeds historical data into the sim, the sim's probability model informs strategy decisions, and the whole thing runs as a Docker container with a lightweight web dashboard. Data-driven competitive advantage for a player who's already proving that precision beats volume.
+The endgame is a unified analytics platform that runs as a Docker container with a lightweight web dashboard. Data-driven competitive advantage for a player who's already proving that precision beats volume.
 
 Priorities:
 1. Fix the Evo tracking gap in the tracker (deck hash + schema)
 2. Add streak detection and rolling window stats
 3. Build a simple web dashboard (even Flask + Chart.js) for visualizing trophy progression and matchup data
-4. Integrate tracker data into the sim for data-driven starting hand analysis
-5. Add tilt detection — if the tracker sees 3+ consecutive losses, surface a "you're tilting" warning
+4. Add tilt detection — if the tracker sees 3+ consecutive losses, surface a "you're tilting" warning
 
 ## Deployment
 
@@ -135,11 +113,9 @@ clash-stats/
 ├── docker-compose.yml
 ├── pyproject.toml
 ├── src/
-│   ├── tracker/
-│   │   ├── cr_tracker.py
-│   │   └── test_cr_tracker.py
-│   └── cycle_sim/
-│       └── cr_cycle_sim.py
+│   └── tracker/
+│       ├── cr_tracker.py
+│       └── test_cr_tracker.py
 ├── data/                  <- Volume mount, persists SQLite DB
 │   └── clash_royale_history.db
 └── .env                   <- CR_API_KEY, CR_PLAYER_TAG (not committed)
