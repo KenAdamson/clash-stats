@@ -10,9 +10,87 @@ A game of Clash Royale is a trajectory through a high-dimensional state space. T
 
 ## Decision
 
-### 1. Architecture: Temporal Convolutional Network (TCN)
+### Phased Approach
 
-The game event sequence is an ordered time series of variable length (20-100+ events per game). We need a model that:
+The embedding system is built in two phases. Phase 0 (UMAP) runs immediately on current data with no training infrastructure. Phase 1 (TCN) upgrades to learned representations when the corpus reaches sufficient scale. Both phases produce embeddings that downstream models can consume — the interface is identical, only the embedding method changes.
+
+### 1. Phase 0: UMAP Dimensionality Reduction (Available Now)
+
+UMAP (Uniform Manifold Approximation and Projection) is not a visualization gimmick — it's a manifold learning algorithm grounded in Riemannian geometry. It constructs a weighted k-nearest-neighbor graph in high-dimensional space, models it as a fuzzy simplicial complex, and optimizes a low-dimensional projection that preserves the topological structure. Unlike t-SNE, UMAP embeddings are metrically meaningful: distances in the reduced space correspond to meaningful differences in the original data.
+
+**Why UMAP is the right Phase 0:**
+
+| Property | UMAP | Neural (TCN) |
+|----------|------|-------------|
+| Training data minimum | 50 games | 500+ games |
+| Training time | Seconds | Minutes to hours |
+| GPU required | No | No (but helps) |
+| Dependencies | `umap-learn`, `scikit-learn` | `torch` (500MB+ Docker image delta) |
+| Embedding quality at 200 games | Good — preserves local + global structure | Poor — insufficient training signal |
+| Supervised variant | Yes (`target_metric` parameter) | Yes (classification head) |
+| Incremental embedding of new games | `transform()` on fitted model | Forward pass through trained network |
+
+**Method:**
+
+1. Build the tabular feature vector per game from ADR-001: aggregate replay events into a fixed-width representation. Per game, this includes:
+   - Per-card play counts and average positions (8 cards × 3 features = 24 dims)
+   - Elixir economy features: total spent, leaked, troop/spell/building split ratios (10 dims)
+   - Tempo features: events per minute, average inter-event gap, play rate by game phase (8 dims)
+   - Outcome-adjacent features: crown differential, game duration, overtime flag (3 dims)
+   - Matchup context: opponent avg elixir, archetype encoding (5 dims)
+   - **Total: ~50-dimensional raw feature vector per game**
+
+2. Normalize features (StandardScaler — UMAP is sensitive to feature scale)
+
+3. UMAP reduction in two stages:
+   ```
+   Raw features (50-dim)
+     │
+     ▼
+   UMAP(n_components=15, metric='euclidean', n_neighbors=15, min_dist=0.1)
+     │
+     ▼
+   Analytical embedding (15-dim) — for downstream computation
+     │
+     ▼
+   UMAP(n_components=2, metric='euclidean')
+     │
+     ▼
+   Visualization embedding (2-dim) — for plotting
+   ```
+
+   The 15-dim analytical embedding is the workhorse. It feeds into similarity search, clustering, and the win probability model. The 2-dim projection is for human consumption only.
+
+4. **Supervised UMAP** for win/loss separation:
+   ```python
+   import umap
+   reducer = umap.UMAP(n_components=15, target_metric='categorical')
+   embedding = reducer.fit_transform(features, y=win_loss_labels)
+   ```
+   The `target_metric='categorical'` parameter informs the projection with win/loss labels, so the reduced space naturally separates wins from losses without a classification head. The manifold structure that emerges isn't imposed by the labels — it's the structure in the data that *correlates with* the labels. Subtle but critical distinction.
+
+5. **HDBSCAN clustering** on the 15-dim embedding:
+   ```python
+   import hdbscan
+   clusterer = hdbscan.HDBSCAN(min_cluster_size=10, min_samples=5)
+   labels = clusterer.fit_predict(embedding_15d)
+   ```
+   HDBSCAN over k-means because it finds clusters of varying density and identifies outliers (noise points = games that don't fit any pattern). The clusters that emerge are the natural "game types" at your trophy range.
+
+6. **Incremental embedding:** When new games come in, use `reducer.transform(new_features)` to project them into the existing embedding space without refitting the entire model. Periodic refitting (weekly or after 50 new games) updates the manifold structure.
+
+**What UMAP reveals immediately with 200 games:**
+
+- **Win/loss topology:** Do wins and losses occupy distinct regions, or are they interleaved? Distinct regions = matchup-determined outcomes. Interleaved = execution-determined outcomes. This answers the fundamental question: "Am I losing because of my deck or because of my play?"
+- **Failure mode clusters:** Losses that cluster together share structural features. "These 8 losses all cluster in the same region — what do they have in common?" Maybe they're all Inferno Dragon matchups. Maybe they're all games where you leaked 5+ elixir in the first minute. The clusters surface the pattern.
+- **Outlier games:** Games far from any cluster are anomalies. These are the ones worth manual review — either novel opponent strategies or your own unusual plays.
+- **Archetype neighborhoods:** Games against the same archetype should cluster. If they don't, the archetype classification from `archetypes.py` is too coarse — the UMAP embedding reveals sub-archetypes.
+
+### 2. Phase 1: Temporal Convolutional Network (TCN) — Neural Upgrade Path
+
+When the corpus reaches 500+ games with replay data (or immediately if the top-ladder pipeline from ADR-007 is active), the TCN replaces UMAP as the primary embedding method. The TCN operates on the raw event *sequence* rather than the aggregated tabular features, capturing temporal dynamics that UMAP on aggregated features cannot.
+
+The game event sequence is an ordered time series of variable length (20-100+ events per game). The TCN:
 - Handles variable-length sequences efficiently
 - Captures both local patterns (card-response pairs) and global patterns (game-level tempo)
 - Produces a fixed-size embedding regardless of game length
@@ -29,7 +107,9 @@ The game event sequence is an ordered time series of variable length (20-100+ ev
 
 The TCN uses dilated causal convolutions with exponentially increasing dilation factors (1, 2, 4, 8, 16, ...) so that with 6-7 layers, the receptive field covers the entire game sequence. Each layer sees a wider temporal context without losing resolution on local card interactions.
 
-### 2. Model Structure
+**UMAP → TCN transition:** When the TCN is trained, compute both UMAP and TCN embeddings in parallel for a validation period. Compare downstream task performance (clustering coherence, similarity search relevance, win prediction accuracy). Switch to TCN as primary when it demonstrably outperforms UMAP. Keep UMAP as a diagnostic — applying UMAP to TCN embeddings reveals whether the neural model has learned a better manifold than raw features.
+
+### 3. TCN Model Structure
 
 ```
 Input: (batch, seq_len, event_feature_dim)    # From ADR-001, dim ≈ 34
@@ -57,7 +137,7 @@ Game Embedding: 128-dimensional vector
 
 **Parameter count:** ~2M parameters. Trainable on CPU in minutes for datasets under 10K games.
 
-### 3. Training Objectives
+### 4. TCN Training Objectives
 
 Three training phases, applied sequentially or jointly:
 
@@ -82,7 +162,7 @@ Three training phases, applied sequentially or jointly:
 - These auxiliary signals force the embedding to capture richer game state information
 - Minimum data: 500+ games
 
-### 4. Embedding Applications
+### 5. Embedding Applications
 
 Once trained, the 128-dim embedding enables:
 
@@ -113,7 +193,7 @@ This answers: "I just lost a weird game — have I seen this pattern before? Wha
 - Games whose embeddings are far from any cluster centroid are "weird" games — unusual strategies, misplays, or novel opponent approaches
 - Surface these for manual replay review
 
-### 5. Embedding Storage
+### 6. Embedding Storage
 
 ```sql
 CREATE TABLE game_embeddings (
@@ -130,7 +210,7 @@ CREATE INDEX idx_game_embeddings_model ON game_embeddings(model_version);
 
 Embeddings are recomputed when the model is retrained. The `model_version` column tracks provenance.
 
-### 6. Manifold Geometry
+### 7. Manifold Geometry
 
 The 128-dim embedding space will not be uniformly occupied — game trajectories live on a lower-dimensional manifold within it. Understanding the manifold geometry is where Ken's experience with high-dimensional manifold generation becomes directly applicable:
 
@@ -139,50 +219,68 @@ The 128-dim embedding space will not be uniformly occupied — game trajectories
 - **Curvature analysis:** Regions of high curvature on the manifold correspond to decision boundaries — small changes in play lead to large changes in outcome. These are the critical moments in a game. Identifying high-curvature regions tells you *where* the game is most sensitive to player decisions.
 - **Density estimation:** Fit a normalizing flow or GMM to the embedding distribution. Low-density regions represent rare game types. If a particular matchup pushes games into low-density regions, that matchup is genuinely unusual and can't be modeled by interpolation from common patterns.
 
-### 7. Implementation
+### 8. Implementation
 
 ```
 src/tracker/
 ├── ml/
 │   ├── __init__.py
-│   ├── tcn.py              ← TCN architecture (PyTorch)
-│   ├── embeddings.py       ← Training loop, embedding extraction
+│   ├── umap_embeddings.py  ← Phase 0: UMAP feature aggregation, reduction, clustering
+│   ├── tcn.py              ← Phase 1: TCN architecture (PyTorch)
+│   ├── embeddings.py       ← Training loop, embedding extraction (both phases)
 │   ├── similarity.py       ← Nearest-neighbor search, clustering
-│   └── manifold.py         ← Dimensionality estimation, UMAP visualization
+│   └── manifold.py         ← Dimensionality estimation, visualization
 ```
 
-Dependencies: `torch`, `numpy`, `scikit-learn`, `umap-learn`
+Dependencies:
+- Phase 0: `umap-learn`, `hdbscan`, `scikit-learn`, `numpy` (lightweight, no PyTorch)
+- Phase 1: adds `torch`
 
 CLI additions:
 ```
-clash-stats --train-embeddings          # Train/retrain embedding model
-clash-stats --embed-all                 # Compute embeddings for all games with replay data
+# Phase 0 (available now)
+clash-stats --umap-embed                # Compute UMAP embeddings for all games with replay data
+clash-stats --umap-supervised           # Supervised UMAP with win/loss labels
 clash-stats --similar BATTLE_ID         # Find games similar to a specific battle
 clash-stats --clusters                  # Show game clusters with win rates
-clash-stats --manifold-viz              # Generate UMAP visualization
+clash-stats --manifold-viz              # Generate 2D UMAP visualization
+clash-stats --outliers                  # Surface anomalous games
+
+# Phase 1 (when corpus scale supports it)
+clash-stats --train-embeddings          # Train/retrain TCN embedding model
+clash-stats --embed-all                 # Compute TCN embeddings for all games
+clash-stats --compare-embeddings        # UMAP vs TCN quality comparison
 ```
 
 ## Consequences
 
 ### Positive
+- **Phase 0 is immediately actionable** — UMAP on 200 games produces meaningful embeddings today, no training infrastructure required
+- Supervised UMAP separates wins from losses using manifold structure that *correlates with* labels, not structure *imposed by* labels
+- HDBSCAN discovers natural game clusters without specifying cluster count — reveals structure you wouldn't think to look for
+- Phase 0 → Phase 1 transition is seamless — same embedding storage schema, same downstream interfaces
+- UMAP on TCN embeddings serves as a diagnostic for the neural model quality
 - Enables every downstream model (ADR-004, 005, 006) to operate on learned representations instead of hand-crafted features
 - Game similarity search is immediately useful for pattern recognition — "this loss looks like that loss"
 - Manifold analysis reveals the intrinsic complexity of the game at your trophy range
-- TCN architecture is small enough to train on CPU, retrain frequently as data accumulates
-- Shared card embedding layer amortizes representation learning across all models
+- Shared card embedding layer (Phase 1) amortizes representation learning across all models
 
 ### Negative
-- Requires PyTorch dependency (significant addition to the Docker image size)
-- Model quality is bounded by data volume until the top-ladder pipeline (ADR-007) is active
-- Embeddings must be recomputed when the model is retrained — stale embeddings from old model versions can mislead
-- Contrastive training needs careful pair construction to avoid class imbalance (more wins than losses or vice versa)
+- UMAP embeddings from aggregated features lose temporal ordering — "Pekka first then Miner" and "Miner first then Pekka" produce identical tabular features. This is the fundamental limitation that the TCN upgrade addresses.
+- UMAP's `transform()` for new points is approximate — the embedding of a new game depends slightly on the training set composition. Periodic refitting is necessary.
+- Phase 1 requires PyTorch dependency (significant addition to the Docker image size)
+- TCN model quality is bounded by data volume until the top-ladder pipeline (ADR-007) is active
+- Embeddings must be recomputed when models are retrained — stale embeddings from old model versions can mislead
+- Contrastive training (Phase 1) needs careful pair construction to avoid class imbalance
 
 ### Scale Requirements
 
-| Games with replay data | Training viability |
-|----------------------|-------------------|
-| < 100 | Insufficient — use Monte Carlo only (ADR-002) |
-| 100-500 | Supervised win/loss classification only, expect 65-70% accuracy |
-| 500-2,000 | Add contrastive learning, expect 75-80%, meaningful clusters emerge |
-| 2,000-10,000 | Multi-task training, 80-85%, manifold geometry becomes informative |
-| 10,000+ | Fine-grained sub-cluster analysis, per-card interaction embeddings, transfer to other models |
+| Games with replay data | Phase | Capability |
+|----------------------|-------|------------|
+| 50 | Phase 0 | UMAP with unsupervised clustering — discover game types |
+| 100 | Phase 0 | Supervised UMAP — win/loss separation, failure mode clusters |
+| 200 | Phase 0 | **Current scale.** Full UMAP pipeline: similarity search, archetype fingerprinting, anomaly detection, manifold visualization |
+| 500 | Phase 0→1 | TCN training viable — run both in parallel, compare quality |
+| 500-2,000 | Phase 1 | TCN with contrastive learning, expect 75-80% classification, meaningful sequence-aware clusters emerge |
+| 2,000-10,000 | Phase 1 | Multi-task TCN training, 80-85%, manifold geometry becomes informative |
+| 10,000+ | Phase 1 | Fine-grained sub-cluster analysis, per-card interaction embeddings, transfer to other models |
