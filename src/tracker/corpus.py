@@ -44,16 +44,15 @@ def update_top_ladder(
             continue
 
         existing = session.get(PlayerCorpus, f"#{tag}")
+        # Use eloRating (Path of Legend) or trophies, whichever is available
+        trophies = p.get("eloRating") or p.get("trophies", 0)
         if existing:
-            # Update trophy range and name
-            trophies = p.get("trophies", 0)
             existing.player_name = p.get("name")
             if existing.trophy_range_high is None or trophies > existing.trophy_range_high:
                 existing.trophy_range_high = trophies
             if existing.trophy_range_low is None or trophies < existing.trophy_range_low:
                 existing.trophy_range_low = trophies
         else:
-            trophies = p.get("trophies", 0)
             session.add(PlayerCorpus(
                 player_tag=f"#{tag}",
                 player_name=p.get("name"),

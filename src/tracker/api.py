@@ -71,7 +71,7 @@ class ClashRoyaleAPI:
         return self._request(f"/players/{encoded_tag}/battlelog")
 
     def get_top_players(self, location_id: str = "global", limit: int = 200) -> list:
-        """Get top-ranked players.
+        """Get top-ranked Path of Legend players.
 
         Args:
             location_id: Location ID or 'global' for global leaderboard.
@@ -81,6 +81,6 @@ class ClashRoyaleAPI:
             List of player ranking dicts from the API.
         """
         resp = self._request(
-            f"/locations/{location_id}/rankings/players?limit={limit}"
+            f"/locations/{location_id}/pathoflegend/players?limit={limit}"
         )
         return resp.get("items", []) if isinstance(resp, dict) else resp
