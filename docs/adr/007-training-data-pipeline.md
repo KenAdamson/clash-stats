@@ -1,6 +1,6 @@
 # ADR-007: Training Data Pipeline & Scale Strategy
 
-**Status:** Proposed
+**Status:** Implemented
 **Date:** 2026-02-22
 **Depends on:** Replay scraper (`replays.py`), ADR-001 (Feature Engineering)
 
