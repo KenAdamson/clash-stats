@@ -210,6 +210,24 @@ CREATE INDEX idx_game_embeddings_model ON game_embeddings(model_version);
 
 Embeddings are recomputed when the model is retrained. The `model_version` column tracks provenance.
 
+#### Vector Search Backend
+
+**Shortlisted:** pgvector (PostgreSQL extension) and Qdrant (standalone Rust vector DB). Decision pending based on whether the project migrates from SQLite to PostgreSQL.
+
+| Criteria | pgvector | Qdrant |
+|---|---|---|
+| Deployment | Zero marginal cost if already running Postgres | Single Docker container (~100-300 MB RAM) |
+| Multi-collection | Multiple tables, each with own `vector(N)` column | Named vectors — multiple embeddings per point with independent dimensions/metrics |
+| Distance metrics | L2, cosine, inner product | L2, cosine, dot product, Manhattan |
+| Filtered search | Full SQL (JOINs with battle data, trophy ranges, archetypes) | Payload filters (must/should/must_not, range, nested) — applied during HNSW traversal |
+| Exact KNN | Yes (no index = brute force) | Yes (`exact: true` parameter) |
+| Python integration | SQLAlchemy `Vector(N)` column type | `qdrant-client` with async support |
+| Best for | Unified data store — embeddings + battle data in one place | Dedicated vector workload — best filtering, named vectors for multi-embedding architecture |
+
+**Evaluated and rejected:** ChromaDB (filter operators too limited for analytical queries), Weaviate (32 GB RAM baseline for 100K vectors — consumes entire server), Milvus (3-container etcd/MinIO architecture, enterprise overkill), ApertureDB (visual data platform, 32 GB RAM recommended, wrong niche for game analytics).
+
+**Recommendation:** If migrating to PostgreSQL (likely), use pgvector — embeddings live alongside structured battle data with zero additional infrastructure. If staying on SQLite, use Qdrant as a dedicated sidecar. Decision point: when Phase 0 UMAP implementation begins.
+
 ### 7. Manifold Geometry
 
 The 128-dim embedding space will not be uniformly occupied — game trajectories live on a lower-dimensional manifold within it. Understanding the manifold geometry is where Ken's experience with high-dimensional manifold generation becomes directly applicable:
