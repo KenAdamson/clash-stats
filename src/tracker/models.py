@@ -93,6 +93,9 @@ class Battle(Base):
     opponent_elixir_leaked: Mapped[Optional[float]]
     battle_duration: Mapped[Optional[int]]
 
+    # Added in migration v2
+    replay_fetched: Mapped[int] = mapped_column(default=0)
+
     # Relationship
     deck_cards: Mapped[list["DeckCard"]] = relationship(
         back_populates="battle", cascade="all, delete-orphan"
@@ -122,3 +125,54 @@ class DeckCard(Base):
 
     # Relationship
     battle: Mapped["Battle"] = relationship(back_populates="deck_cards")
+
+
+class ReplayEvent(Base):
+    """Individual card placement event from a battle replay."""
+
+    __tablename__ = "replay_events"
+    __table_args__ = (
+        Index("idx_replay_events_battle_id", "battle_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    battle_id: Mapped[str] = mapped_column(
+        ForeignKey("battles.battle_id"), nullable=False
+    )
+    side: Mapped[str] = mapped_column(String, nullable=False)  # "team" or "opponent"
+    card_name: Mapped[str] = mapped_column(String, nullable=False)
+    game_tick: Mapped[int]
+    arena_x: Mapped[int]
+    arena_y: Mapped[int]
+    play_number: Mapped[int] = mapped_column(default=1)
+    ability_used: Mapped[int] = mapped_column(default=0)
+
+    battle: Mapped["Battle"] = relationship()
+
+
+class ReplaySummary(Base):
+    """Per-side elixir and card-type stats from a battle replay."""
+
+    __tablename__ = "replay_summaries"
+    __table_args__ = (
+        Index("idx_replay_summaries_battle_id", "battle_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    battle_id: Mapped[str] = mapped_column(
+        ForeignKey("battles.battle_id"), nullable=False
+    )
+    side: Mapped[str] = mapped_column(String, nullable=False)
+    total_plays: Mapped[Optional[int]]
+    total_elixir: Mapped[Optional[int]]
+    troop_plays: Mapped[Optional[int]]
+    troop_elixir: Mapped[Optional[int]]
+    spell_plays: Mapped[Optional[int]]
+    spell_elixir: Mapped[Optional[int]]
+    building_plays: Mapped[Optional[int]]
+    building_elixir: Mapped[Optional[int]]
+    ability_plays: Mapped[Optional[int]]
+    ability_elixir: Mapped[Optional[int]]
+    elixir_leaked: Mapped[Optional[float]]
+
+    battle: Mapped["Battle"] = relationship()

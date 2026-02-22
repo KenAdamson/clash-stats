@@ -96,6 +96,24 @@ def create_app(db_path: str | None = None) -> Flask:
         finally:
             session.close()
 
+    @app.route("/api/replay-auth/start", methods=["POST"])
+    def replay_auth_start():
+        try:
+            from tracker.replays import run_start_login
+            run_start_login()
+            return jsonify({"status": "navigated", "message": "Complete login via noVNC"})
+        except Exception as e:
+            return jsonify({"status": "error", "message": str(e)}), 500
+
+    @app.route("/api/replay-auth/status")
+    def replay_auth_status():
+        try:
+            from tracker.replays import run_check_login
+            authenticated = run_check_login()
+            return jsonify({"authenticated": authenticated})
+        except Exception as e:
+            return jsonify({"authenticated": False, "message": str(e)})
+
     @app.route("/api/streaks")
     def api_streaks():
         session = get_session(engine)

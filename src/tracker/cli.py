@@ -99,6 +99,12 @@ Environment variables:
     parser.add_argument("--archetypes", action="store_true", help="Opponent archetype analysis")
     parser.add_argument("--export", choices=["csv", "json"], help="Export data as CSV or JSON")
     parser.add_argument("--output", type=str, metavar="FILE", help="Export output file (default: stdout)")
+    parser.add_argument("--replay-login", action="store_true",
+                        help="Start RoyaleAPI login (complete via noVNC)")
+    parser.add_argument("--replay-check", action="store_true",
+                        help="Check if RoyaleAPI login is complete and save session")
+    parser.add_argument("--fetch-replays", action="store_true",
+                        help="Fetch replay data from RoyaleAPI for recent battles")
     parser.add_argument("--api-key", type=str, help="CR API key")
     parser.add_argument("--player-tag", type=str, help="Player tag (without #)")
     parser.add_argument("--api-url", type=str, help="API base URL (default: https://api.clashroyale.com/v1)")
@@ -178,11 +184,32 @@ Environment variables:
             else:
                 reporting.print_archetype_stats(session)
 
+        if args.replay_login:
+            from tracker.replays import run_start_login
+            print("Starting RoyaleAPI login... Complete via noVNC.")
+            run_start_login()
+
+        if args.replay_check:
+            from tracker.replays import run_check_login
+            if run_check_login():
+                print("RoyaleAPI session saved successfully.")
+            else:
+                print("Login not yet complete. Finish login via noVNC.")
+
+        if args.fetch_replays:
+            if not player_tag:
+                print("Error: --player-tag required for replay fetching")
+                return 1
+            from tracker.replays import run_fetch_replays
+            count = run_fetch_replays(session, player_tag.replace("#", ""))
+            print(f"  ✓ Fetched {count} replays")
+
         # Default: show help + db status
         has_action = any([
             args.fetch, args.stats, args.deck_stats, args.crowns,
             args.matchups, args.recent, args.streaks, args.rolling,
             args.trophy_history, args.archetypes,
+            args.replay_login, args.replay_check, args.fetch_replays,
         ])
         if not has_action:
             parser.print_help()

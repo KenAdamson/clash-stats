@@ -7,10 +7,23 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - FETCH_INTERVAL=14400  # 4 hours in seconds
+      - BROWSER_WS_URL=ws://cr-browser:3000
+      - ROYALEAPI_SESSION_PATH=/app/data/royaleapi_session.json
     volumes:
       - ./data:/app/data
       - ./.git:/app/.git:rw
       - ~/.ssh/id_ed25519:/root/.ssh/id_ed25519:ro
-    network_mode: bridge
+    depends_on:
+      - cr-browser
     ports:
       - "8078:8078"
+
+  cr-browser:
+    build: docker/browser
+    container_name: cr-browser
+    restart: unless-stopped
+    ports:
+      - "6080:6080"
+    shm_size: '1gb'
+    volumes:
+      - ./data:/app/data

@@ -45,6 +45,17 @@ export STATS_REMOTE="${STATS_REMOTE:-origin}"
 EOF
 chmod +x /app/publish_wrapper.sh
 
+# Build replay wrapper with baked-in env vars for crond
+cat > /app/replay_wrapper.sh << EOF
+#!/bin/sh
+export CR_PLAYER_TAG="${CR_PLAYER_TAG}"
+export BROWSER_WS_URL="${BROWSER_WS_URL:-ws://cr-browser:3000}"
+export ROYALEAPI_SESSION_PATH="${ROYALEAPI_SESSION_PATH:-/app/data/royaleapi_session.json}"
+export PYTHONUNBUFFERED=1
+clash-stats --fetch-replays --player-tag "${CR_PLAYER_TAG}" --db ${DB_PATH}
+EOF
+chmod +x /app/replay_wrapper.sh
+
 PUSH_DEST="${STATS_REPO_URL:-origin}/${STATS_BRANCH:-stats}"
 echo "=== cr-tracker starting ==="
 echo "  Player tag: #${CR_PLAYER_TAG}"
@@ -53,6 +64,8 @@ echo "  Schedule:   every minute (crond)"
 echo "  Database:   ${DB_PATH}"
 echo "  Dashboard:  http://0.0.0.0:8078"
 echo "  Stats push: every 5 min → ${PUSH_DEST}"
+echo "  Replays:    every 30 min (if session active)"
+echo "  noVNC:      http://0.0.0.0:6080 (browser sidecar)"
 
 # Initial fetch on startup
 /app/fetch.sh
