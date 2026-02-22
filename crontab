@@ -1,3 +1,5 @@
+PATH=/usr/local/bin:/usr/bin:/bin
+
 # Fetch battles every minute for near-realtime dashboard updates
 * * * * * root /app/fetch.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Publish stats JSON to GitHub every 5 minutes
