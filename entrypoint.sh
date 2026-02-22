@@ -71,7 +71,7 @@ cat > /app/corpus_scrape.sh << EOF
 export CR_API_KEY="${CR_API_KEY}"
 [ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
 export PYTHONUNBUFFERED=1
-clash-stats --corpus-scrape --corpus-limit 50 --db ${DB_PATH}
+clash-stats --corpus-scrape --corpus-limit 200 --db ${DB_PATH}
 EOF
 chmod +x /app/corpus_scrape.sh
 
