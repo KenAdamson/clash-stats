@@ -15,7 +15,11 @@ LADDER_TYPES = ("PvP",)
 
 
 def _apply_ladder_filter(stmt, ladder_only: bool):
-    """Add a WHERE clause to restrict to ladder battles if requested."""
+    """Add a WHERE clause to restrict to ladder battles if requested.
+
+    Always filters to personal corpus (excludes training data).
+    """
+    stmt = stmt.where(Battle.corpus == "personal")
     if ladder_only:
         return stmt.where(Battle.battle_type.in_(LADDER_TYPES))
     return stmt
@@ -209,8 +213,10 @@ def store_battle(
 
 
 def get_total_battles(session: Session) -> int:
-    """Get total number of tracked battles."""
-    return session.scalar(select(func.count()).select_from(Battle)) or 0
+    """Get total number of tracked personal battles."""
+    return session.scalar(
+        select(func.count()).select_from(Battle).where(Battle.corpus == "personal")
+    ) or 0
 
 
 def get_overall_stats(session: Session, ladder_only: bool = False) -> dict:
