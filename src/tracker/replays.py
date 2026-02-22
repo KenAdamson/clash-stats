@@ -14,9 +14,22 @@ import time
 from pathlib import Path
 
 from bs4 import BeautifulSoup
-from sqlalchemy import text, update
+from circuitbreaker import circuit, CircuitBreakerError
+from sqlalchemy import update
 from sqlalchemy.orm import Session
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential_jitter,
+)
 
+from tracker.metrics import (
+    CIRCUIT_BREAKER_TRIPS,
+    REPLAYS_FAILED,
+    REPLAYS_FETCHED,
+    SESSION_EXPIRY,
+)
 from tracker.models import Battle, ReplayEvent, ReplaySummary
 
 logger = logging.getLogger(__name__)
@@ -25,6 +38,18 @@ ROYALEAPI_BASE = "https://royaleapi.com"
 DEFAULT_BROWSER_CDP = "http://cr-browser:9223"
 DEFAULT_SESSION_PATH = "/app/data/royaleapi_session.json"
 FETCH_DELAY = 3  # seconds between page loads
+
+
+# ---------------------------------------------------------------------------
+# Custom exceptions
+# ---------------------------------------------------------------------------
+
+class SessionExpiredError(Exception):
+    """RoyaleAPI session has expired (redirected to login)."""
+
+
+class CloudflareBlockError(Exception):
+    """Cloudflare challenge could not be resolved."""
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +147,6 @@ def _parse_summaries(soup: BeautifulSoup) -> list[dict]:
                 summary["ability_plays"] = count_val
                 summary["ability_elixir"] = elixir_val
             elif label == "leaked":
-                # Leaked row has elixir in a colspan td, no separate count
                 summary["elixir_leaked"] = elixir_val
 
         summaries.append(summary)
@@ -144,7 +168,6 @@ def _parse_number(text: str) -> int | float | None:
     """Extract a number from text that may contain icons or whitespace."""
     if not text:
         return None
-    # Strip non-numeric chars except dot and minus
     cleaned = re.sub(r"[^\d.\-]", "", text)
     if not cleaned:
         return None
@@ -205,6 +228,87 @@ def store_replay_data(session: Session, battle_id: str, data: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Resilient page navigation
+# ---------------------------------------------------------------------------
+
+@circuit(
+    failure_threshold=3,
+    recovery_timeout=300,
+    expected_exception=SessionExpiredError,
+)
+async def _navigate_authenticated(page, url: str) -> None:
+    """Navigate to a RoyaleAPI URL, detecting auth failures.
+
+    Raises SessionExpiredError if redirected to login page.
+    Circuit opens after 3 consecutive auth failures (5 min cooldown).
+    """
+    await page.goto(url, wait_until="load", timeout=60000)
+    await _wait_for_cloudflare(page)
+
+    if "/login" in page.url:
+        SESSION_EXPIRY.inc()
+        raise SessionExpiredError("Redirected to login — session expired")
+
+
+@retry(
+    retry=retry_if_exception_type((CloudflareBlockError, TimeoutError)),
+    wait=wait_exponential_jitter(initial=5, max=30, jitter=3),
+    stop=stop_after_attempt(3),
+    reraise=True,
+)
+async def _fetch_replay_page(page, url: str) -> tuple:
+    """Fetch a single replay page with retry on transient failures.
+
+    Returns (response_status, html) tuple.
+    """
+    resp = await page.goto(url, wait_until="load", timeout=60000)
+    await _wait_for_cloudflare(page)
+
+    status = resp.status if resp else 0
+    html = await _extract_replay_html(page)
+    return status, html
+
+
+async def _wait_for_cloudflare(page, timeout: int = 15000) -> None:
+    """Wait for Cloudflare challenge to resolve if present."""
+    try:
+        title = await page.title()
+        if "just a moment" in title.lower():
+            logger.info("Cloudflare challenge detected, waiting...")
+            await page.wait_for_function(
+                "() => !document.title.toLowerCase().includes('just a moment')",
+                timeout=timeout,
+            )
+            logger.info("Cloudflare challenge passed.")
+    except Exception as e:
+        logger.warning("Cloudflare wait failed: %s", e)
+        raise CloudflareBlockError(f"Cloudflare challenge not resolved: {e}")
+
+
+async def _extract_replay_html(page) -> str:
+    """Extract replay HTML from the page.
+
+    The /data/replay endpoint returns JSON: {"success": true, "html": "..."}
+    where the HTML is entity-encoded inside a <pre> tag.
+    """
+    content = await page.content()
+
+    pre_match = re.search(r"<pre[^>]*>(.*?)</pre>", content, re.DOTALL)
+    if pre_match:
+        import html as html_module
+        raw_json = html_module.unescape(pre_match.group(1))
+        try:
+            data = json.loads(raw_json)
+            if isinstance(data, dict) and data.get("success") and "html" in data:
+                return data["html"]
+        except (json.JSONDecodeError, KeyError) as e:
+            logger.warning("Failed to parse replay JSON: %s", e)
+
+    logger.warning("Falling back to raw page content for replay parsing")
+    return content
+
+
+# ---------------------------------------------------------------------------
 # Playwright scraper (connects to remote browser sidecar)
 # ---------------------------------------------------------------------------
 
@@ -212,8 +316,7 @@ async def start_login(browser_ws: str | None = None) -> None:
     """Navigate the sidecar browser to RoyaleAPI login page.
 
     The user completes Google SSO by interacting with the browser
-    via noVNC at http://<host>:6080. Call check_login_and_save()
-    to poll for completion.
+    via noVNC at http://<host>:6080.
 
     Args:
         browser_ws: CDP endpoint URL for the Chromium browser.
@@ -224,7 +327,6 @@ async def start_login(browser_ws: str | None = None) -> None:
 
     async with async_playwright() as p:
         browser = await p.chromium.connect_over_cdp(cdp_url)
-        # Use existing default context (the one visible on noVNC)
         contexts = browser.contexts
         if contexts:
             context = contexts[0]
@@ -234,8 +336,6 @@ async def start_login(browser_ws: str | None = None) -> None:
             page = await context.new_page()
         await page.goto(f"{ROYALEAPI_BASE}/login", wait_until="networkidle")
         logger.info("Navigated to RoyaleAPI login page. Complete login via noVNC.")
-        # Don't close — the user interacts via noVNC.
-        # The browser context stays open in the sidecar.
 
 
 async def check_login_and_save(
@@ -243,10 +343,6 @@ async def check_login_and_save(
     state_path: str | None = None,
 ) -> bool:
     """Check if RoyaleAPI login is complete and save session state.
-
-    Args:
-        browser_ws: CDP endpoint URL for the Chromium browser.
-        state_path: Path to save the browser session state JSON.
 
     Returns:
         True if authenticated and session saved, False otherwise.
@@ -272,11 +368,9 @@ async def check_login_and_save(
         page = pages[0]
         url = page.url
 
-        # Check if we're on a logged-in page (not /login)
         if "/login" in url or "accounts.google.com" in url:
             return False
 
-        # Save the full browser state (cookies + localStorage)
         await context.storage_state(path=save_path)
         logger.info("RoyaleAPI session saved to %s", save_path)
         return True
@@ -291,19 +385,15 @@ async def fetch_replays(
 ) -> int:
     """Fetch replay data for battles that haven't been scraped yet.
 
-    Navigates to the player's battles page on RoyaleAPI, extracts
-    replay links, fetches each replay's HTML, parses it, and stores
-    the results.
-
     Args:
         session: SQLAlchemy session.
         player_tag: Player tag (with or without #).
-        browser_ws: WebSocket URL for the Playwright server.
+        browser_ws: CDP endpoint URL for the Chromium browser.
         state_path: Path to the saved session state JSON.
         limit: Maximum number of replays to fetch per run.
 
     Returns:
-        Number of replays successfully fetched and stored.
+        Number of replays fetched, or -1 if session expired.
     """
     from playwright.async_api import async_playwright
 
@@ -314,8 +404,7 @@ async def fetch_replays(
 
     if not Path(save_path).exists():
         logger.warning(
-            "No RoyaleAPI session found at %s. "
-            "Run --replay-login first.",
+            "No RoyaleAPI session found at %s. Run --replay-login first.",
             save_path,
         )
         return 0
@@ -324,7 +413,10 @@ async def fetch_replays(
     tag_clean = player_tag.lstrip("#")
     unfetched = (
         session.query(Battle)
-        .filter(Battle.replay_fetched == 0, Battle.battle_type.in_(["PvP", "riverRacePvP"]))
+        .filter(
+            Battle.replay_fetched == 0,
+            Battle.battle_type.in_(["PvP", "pathOfLegend", "riverRacePvP"]),
+        )
         .filter(Battle.player_tag.like(f"%{tag_clean}%"))
         .order_by(Battle.battle_time.desc())
         .limit(limit)
@@ -332,17 +424,17 @@ async def fetch_replays(
     )
 
     if not unfetched:
-        logger.info("No unfetched battles found.")
+        logger.info("No unfetched battles for %s.", tag_clean)
         return 0
 
-    logger.info("Found %d battles to fetch replays for.", len(unfetched))
-    fetched_count = 0
+    logger.info("Found %d unfetched battles for %s.", len(unfetched), tag_clean)
+
+    # Run stats
+    stats = {"fetched": 0, "failed_transient": 0, "failed_no_events": 0, "no_link": 0}
 
     async with async_playwright() as p:
         browser = await p.chromium.connect_over_cdp(cdp_url)
 
-        # Prefer the existing default context (already authenticated from
-        # noVNC login). Fall back to a new context with saved session state.
         contexts = browser.contexts
         if contexts:
             context = contexts[0]
@@ -356,61 +448,58 @@ async def fetch_replays(
             page = await context.new_page()
             owns_context = True
 
-        # Navigate to player battles page to discover replay links
+        # Navigate to player battles page
         battles_url = f"{ROYALEAPI_BASE}/player/{tag_clean}/battles"
         logger.info("Navigating to %s", battles_url)
-        await page.goto(battles_url, wait_until="load", timeout=60000)
-        # Wait for Cloudflare challenge to resolve if present
-        await _wait_for_cloudflare(page)
 
-        # Check if we got redirected to login
-        if "/login" in page.url:
-            logger.warning(
-                "RoyaleAPI session expired. Re-run --replay-login."
-            )
+        try:
+            await _navigate_authenticated(page, battles_url)
+        except SessionExpiredError:
+            logger.error("RoyaleAPI session expired for %s.", tag_clean)
             if owns_context:
                 await context.close()
-            return 0
+            return -1
+        except CircuitBreakerError:
+            logger.error("Auth circuit breaker open — skipping %s.", tag_clean)
+            CIRCUIT_BREAKER_TRIPS.labels(breaker="royaleapi_auth").inc()
+            if owns_context:
+                await context.close()
+            return -1
 
-        # Wait for replay links to appear in DOM
+        # Wait for replay links
         await page.wait_for_timeout(3000)
 
-        # Extract all replay links from the battles page
         replay_links = await _extract_replay_links(page)
-        logger.info("Found %d replay links on battles page.", len(replay_links))
+        logger.info("Found %d replay links for %s.", len(replay_links), tag_clean)
 
-        # Match replay links to unfetched battles
         for battle in unfetched:
             link = _match_replay_link(battle, replay_links)
             if not link:
-                logger.debug(
-                    "No replay link found for battle %s", battle.battle_id
-                )
-                # Don't mark as fetched — the battle may appear on
-                # a future page load. Only skip for this run.
+                stats["no_link"] += 1
                 continue
 
             try:
                 replay_url = f"{ROYALEAPI_BASE}{link}"
                 logger.info("Fetching replay: %s", replay_url)
-                resp = await page.goto(replay_url, wait_until="load", timeout=60000)
-                await _wait_for_cloudflare(page)
 
-                if resp and resp.status == 200:
-                    html = await _extract_replay_html(page)
+                status, html = await _fetch_replay_page(page, replay_url)
+
+                if status == 200:
                     data = parse_replay_html(html)
 
                     if data["events"]:
                         store_replay_data(session, battle.battle_id, data)
-                        fetched_count += 1
+                        stats["fetched"] += 1
+                        REPLAYS_FETCHED.labels(source="scraper").inc()
                         logger.info(
                             "Stored %d events for battle %s",
                             len(data["events"]),
                             battle.battle_id,
                         )
                     else:
+                        # Genuinely no events (not an error) — mark fetched
                         logger.warning(
-                            "No events found in replay for %s",
+                            "No events in replay for %s (empty replay)",
                             battle.battle_id,
                         )
                         session.execute(
@@ -419,79 +508,63 @@ async def fetch_replays(
                             .values(replay_fetched=1)
                         )
                         session.commit()
+                        stats["failed_no_events"] += 1
+                        REPLAYS_FAILED.labels(error_type="no_events").inc()
                 else:
                     logger.warning(
-                        "Failed to fetch replay for %s: HTTP %s",
-                        battle.battle_id,
-                        resp.status if resp else "no response",
+                        "HTTP %s fetching replay for %s",
+                        status, battle.battle_id,
                     )
+                    stats["failed_transient"] += 1
+                    REPLAYS_FAILED.labels(error_type="http_error").inc()
 
-                # Rate limit
                 await asyncio.sleep(FETCH_DELAY)
+
+            except SessionExpiredError:
+                logger.error("Session expired mid-scrape for %s.", tag_clean)
+                if owns_context:
+                    await context.close()
+                return -1
+
+            except CircuitBreakerError:
+                logger.error("Auth circuit breaker tripped for %s.", tag_clean)
+                CIRCUIT_BREAKER_TRIPS.labels(breaker="royaleapi_auth").inc()
+                if owns_context:
+                    await context.close()
+                return -1
+
+            except CloudflareBlockError:
+                logger.warning(
+                    "Cloudflare blocked replay fetch for %s", battle.battle_id
+                )
+                stats["failed_transient"] += 1
+                REPLAYS_FAILED.labels(error_type="cloudflare").inc()
 
             except Exception as e:
                 logger.error(
-                    "Error fetching replay for %s: %s",
-                    battle.battle_id,
-                    e,
+                    "Error fetching replay for %s: %s", battle.battle_id, e
                 )
+                stats["failed_transient"] += 1
+                REPLAYS_FAILED.labels(error_type="transient").inc()
 
         if owns_context:
             await context.close()
 
-    return fetched_count
+    logger.info(
+        "Replay scrape for %s: %d fetched, %d transient errors, "
+        "%d no_events, %d no_link",
+        tag_clean,
+        stats["fetched"],
+        stats["failed_transient"],
+        stats["failed_no_events"],
+        stats["no_link"],
+    )
 
-
-async def _extract_replay_html(page) -> str:
-    """Extract replay HTML from the page.
-
-    The /data/replay endpoint returns JSON: {"success": true, "html": "..."}
-    where the HTML is entity-encoded inside a <pre> tag. This function
-    extracts and decodes it. Falls back to raw page content if not JSON.
-    """
-    content = await page.content()
-
-    # Try to extract JSON from <pre> tag
-    pre_match = re.search(r"<pre[^>]*>(.*?)</pre>", content, re.DOTALL)
-    if pre_match:
-        import html as html_module
-        raw_json = html_module.unescape(pre_match.group(1))
-        try:
-            data = json.loads(raw_json)
-            if isinstance(data, dict) and data.get("success") and "html" in data:
-                return data["html"]
-        except (json.JSONDecodeError, KeyError):
-            pass
-
-    # Fallback: return raw page content
-    return content
-
-
-async def _wait_for_cloudflare(page, timeout: int = 15000) -> None:
-    """Wait for Cloudflare challenge to resolve if present."""
-    try:
-        title = await page.title()
-        if "just a moment" in title.lower():
-            logger.info("Cloudflare challenge detected, waiting...")
-            await page.wait_for_function(
-                "() => !document.title.toLowerCase().includes('just a moment')",
-                timeout=timeout,
-            )
-            logger.info("Cloudflare challenge passed.")
-    except Exception:
-        pass  # Not a Cloudflare page, or timed out — continue anyway
+    return stats["fetched"]
 
 
 async def _extract_replay_links(page) -> list[dict]:
-    """Extract replay link data from the player's battles page.
-
-    RoyaleAPI stores replay metadata as data-* attributes on
-    .replay_button elements. We extract these and build the
-    /data/replay URL from the attributes.
-
-    Returns list of dicts with: url, tag, team_tags, opponent_tags,
-    team_crowns, opponent_crowns.
-    """
+    """Extract replay link data from the player's battles page."""
     links = []
     buttons = await page.query_selector_all(".replay_button")
 
@@ -525,30 +598,8 @@ async def _extract_replay_links(page) -> list[dict]:
     return links
 
 
-def _parse_replay_url(url: str) -> dict | None:
-    """Parse a RoyaleAPI replay URL into its components."""
-    try:
-        from urllib.parse import parse_qs, urlparse
-        parsed = urlparse(url)
-        params = parse_qs(parsed.query)
-
-        return {
-            "url": url,
-            "tag": params.get("tag", [""])[0],
-            "team_tags": params.get("team_tags", [""])[0],
-            "opponent_tags": params.get("opponent_tags", [""])[0],
-            "team_crowns": int(params.get("team_crowns", [0])[0]),
-            "opponent_crowns": int(params.get("opponent_crowns", [0])[0]),
-        }
-    except (ValueError, IndexError):
-        return None
-
-
 def _match_replay_link(battle: Battle, links: list[dict]) -> str | None:
-    """Match a stored battle to a replay link by player/opponent tags and crowns.
-
-    Returns the replay URL path if matched, None otherwise.
-    """
+    """Match a stored battle to a replay link by player/opponent tags and crowns."""
     player_tag = (battle.player_tag or "").lstrip("#")
     opponent_tag = (battle.opponent_tag or "").lstrip("#")
     player_crowns = battle.player_crowns
@@ -570,6 +621,10 @@ def _match_replay_link(battle: Battle, links: list[dict]) -> str | None:
 
     return None
 
+
+# ---------------------------------------------------------------------------
+# Synchronous wrappers
+# ---------------------------------------------------------------------------
 
 def run_fetch_replays(
     session: Session,

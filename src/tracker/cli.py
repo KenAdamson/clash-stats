@@ -1,7 +1,11 @@
 """CLI entrypoint for the Clash Royale Battle Tracker."""
 
 import argparse
+import logging
 import os
+
+# Must be set before prometheus_client is first imported (via tracker.metrics)
+os.environ.setdefault("PROMETHEUS_DISABLE_CREATED_SERIES", "true")
 
 from tracker import analytics, reporting
 from tracker.api import ClashRoyaleAPI, DEFAULT_API_URL
@@ -64,6 +68,12 @@ def fetch_and_store(
 
 def main() -> int:
     """CLI entrypoint. Returns exit code."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
     parser = argparse.ArgumentParser(
         description="Clash Royale Battle Tracker - Build your historical match database",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -136,6 +146,8 @@ Environment variables:
                 print("       Or set CR_API_KEY and CR_PLAYER_TAG environment variables")
                 return 1
             fetch_and_store(api_key, player_tag.replace("#", ""), session, api_url=api_url)
+            from tracker.metrics import flush_metrics
+            flush_metrics("fetch")
 
         export_fmt = args.export
         export_out = args.output
@@ -228,18 +240,22 @@ Environment variables:
                 print("Error: --api-key required for corpus scraping")
                 return 1
             from tracker.corpus_scraper import scrape_corpus_battles
+            from tracker.metrics import flush_metrics
             api = ClashRoyaleAPI(api_key, base_url=api_url)
             result = scrape_corpus_battles(session, api, limit=args.corpus_limit)
             print(f"  ✓ Corpus battles: {result['total_players']} players, "
                   f"{result['total_new_battles']} new battles")
+            flush_metrics("corpus_scrape")
 
         if args.corpus_replays:
             from tracker.corpus_scraper import run_scrape_corpus_replays
+            from tracker.metrics import flush_metrics
             result = run_scrape_corpus_replays(
                 session, limit=args.corpus_limit, replays_per_player=25
             )
             print(f"  ✓ Corpus replays: {result['total_players']} players, "
                   f"{result['total_replays']} replays")
+            flush_metrics("corpus_replays")
 
         if args.corpus_stats:
             from tracker.corpus import get_corpus_stats

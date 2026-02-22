@@ -9,6 +9,9 @@ dependencies = [
     "flask>=3.0",
     "playwright>=1.50",
     "beautifulsoup4>=4.12",
+    "tenacity>=9.0",
+    "circuitbreaker>=2.0",
+    "prometheus-client>=0.20",
 ]
 
 [project.scripts]

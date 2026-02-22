@@ -1,0 +1,10 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: "cr-tracker"
+    static_configs:
+      - targets: ["cr-tracker:8078"]
+        labels:
+          service: "cr-tracker"
