@@ -1,0 +1,236 @@
+# ADR-006: Counterfactual Deck Simulator
+
+**Status:** Proposed
+**Date:** 2026-02-22
+**Depends on:** ADR-001 (Feature Engineering), ADR-003 (Game State Embeddings), ADR-005 (Opponent Prediction)
+
+## Context
+
+Deck evolution is the highest-stakes decision in Clash Royale — changing one card affects every matchup, every interaction, every elixir trade. Currently, deck changes are tested live on ladder at the cost of trophies. There is no way to answer "what if I ran Zap instead of Arrows?" without actually running it for 50+ games and eating the losses while you learn the new interactions.
+
+A counterfactual simulator generates synthetic game sequences under modified deck conditions. It answers "what would have happened in this game if I had card X instead of card Y?" and, at scale, "what is my expected win rate with the modified deck across all matchups?"
+
+This is the most ambitious model in the stack and the one that benefits most from the manifold generation techniques Ken has in his toolkit.
+
+## Decision
+
+### 1. Problem Formulation
+
+Given:
+- A real game's event sequence (from replay data)
+- A deck modification (swap card A for card B)
+
+Produce:
+- A synthetic event sequence representing how the game *would have* unfolded with the modified deck
+- A predicted outcome (win/loss/crowns) for the modified game
+
+This is a **conditional generation** problem: generate a plausible game trajectory conditioned on the deck modification and the opponent's behavior.
+
+### 2. Architecture: Conditional Variational Autoencoder (CVAE)
+
+The CVAE learns to encode game trajectories into a latent space and decode them back, conditioned on deck composition.
+
+```
+ENCODER:
+  Input: Full event sequence + deck context features
+    │
+    ▼
+  TCN Encoder (from ADR-003) → game_embedding (128-dim)
+    │
+    ▼
+  Variational projection:
+    μ = Linear(128 → 64)
+    σ = Linear(128 → 64) → Softplus
+    z = μ + σ * ε,  ε ~ N(0, I)    [reparameterization trick]
+    │
+    ▼
+  Latent code z (64-dim)
+
+DECODER:
+  Input: z (64-dim) + deck_condition (player deck embedding + opponent deck embedding)
+    │
+    ▼
+  Conditioning: Linear(64 + deck_dim → 256)
+    │
+    ▼
+  Autoregressive decoder (Transformer or LSTM):
+    At each step, predict next event:
+      - card_name (softmax over player's deck, constrained to hand)
+      - game_tick (positive real, monotonically increasing)
+      - arena_x, arena_y (continuous)
+    │
+    ▼
+  Output: Generated event sequence + predicted outcome
+```
+
+**Why CVAE over alternatives:**
+
+| Architecture | Pros | Cons |
+|-------------|------|------|
+| GAN | Sharp generations | Mode collapse, training instability, no latent space for interpolation |
+| **CVAE** | **Stable training, interpretable latent space, natural conditioning on deck, supports interpolation** | Blurry generations (mitigated by discrete card choices) |
+| Diffusion | High quality generation | Slow inference, overkill for this domain, complex training |
+| Autoregressive only | Simple, no encoder needed | No latent space, can't interpolate, can't do manifold analysis |
+
+The CVAE's latent space is the key enabler: deck modifications correspond to *movements in latent space*, and the decoder translates those movements back into event sequences.
+
+### 3. Counterfactual Generation Process
+
+To answer "what if I had Zap instead of Arrows?":
+
+1. **Encode** the real game into latent code z
+2. **Modify** the deck condition vector: replace Arrows embedding with Zap embedding
+3. **Decode** from the same z with the new deck condition
+4. **Evaluate** the generated sequence: feed it through the win probability model (ADR-004) to get predicted outcome
+
+The key insight: the latent code z captures the *opponent's behavior and the game's macro trajectory*. The deck condition captures *your available tools*. By changing the condition while holding z fixed, we ask: "In this same game situation, with this same opponent playing the same way, how would the game unfold with different cards?"
+
+### 4. Opponent Behavior Modeling
+
+The counterfactual assumes the opponent plays the same way regardless of your deck change. This is approximately true for:
+- Card interactions on the opponent's side of the map (they don't see your deck change)
+- Opening plays (before your modified card is revealed)
+- Cycle patterns (driven by their deck, not yours)
+
+It's approximately false for:
+- Responses to your plays (if you play Zap instead of Arrows, they may play differently)
+- Late-game adaptation (good players adjust strategy based on what they've seen)
+
+**Mitigation: Stochastic opponent response.** Instead of replaying the opponent's exact sequence, use the opponent prediction model (ADR-005) to generate *plausible* opponent responses conditioned on your modified plays. This makes the simulation responsive: change your card, the opponent's behavior adapts probabilistically.
+
+This creates a two-agent simulation:
+1. Your play sequence is generated by the decoder conditioned on the modified deck
+2. The opponent's play sequence is generated by the opponent model conditioned on your plays
+3. Interleave the two sequences by game tick
+4. Feed the combined sequence to the win probability model for outcome prediction
+
+### 5. Manifold-Based Deck Exploration
+
+The CVAE latent space plus the deck condition space defines a product manifold:
+
+```
+Game Manifold = Latent Space (64-dim) × Deck Space (deck embedding dim)
+```
+
+Exploring this manifold enables:
+
+#### Deck Neighborhood Search
+- Embed your current deck as a point in deck space
+- Search the local neighborhood: all decks reachable by swapping 1 card
+- For each neighbor, generate synthetic games and estimate win rate
+- Produce a "deck gradient": which single-card swap most improves expected win rate?
+
+#### Archetype Interpolation
+- Find the deck embedding of a known strong archetype (e.g., top-ladder Pekka BS)
+- Interpolate between your deck embedding and theirs along the geodesic
+- Decode at intermediate points to discover "hybrid" decks that blend your strategy with established meta
+
+#### Latent Space Cartography
+- Map the latent space using Ken's manifold generation techniques
+- Identify regions corresponding to different game archetypes (aggressive, defensive, control, cycle)
+- Your games occupy a specific submanifold — where does it sit relative to the meta?
+- Low-density regions between your submanifold and the meta represent untested strategies
+
+### 6. Deck Embedding
+
+Each deck is represented as a permutation-invariant set embedding:
+
+```
+deck_embedding = f({card_1, card_2, ..., card_8})
+```
+
+**Method: Deep Sets / Set Transformer**
+
+```
+Per-card embedding: card_name → 16-dim learned embedding (from ADR-001)
+  │
+  ▼
+Per-card MLP: Linear(16 → 32) → ReLU → Linear(32 → 32) per card
+  │
+  ▼
+Aggregation: mean(card_embeddings) + max(card_embeddings) → 64-dim
+  │
+  ▼
+Set-level MLP: Linear(64 → 64) → ReLU → Linear(64 → 32)
+  │
+  ▼
+Deck embedding: 32-dim vector
+```
+
+Permutation invariance ensures that the embedding doesn't depend on card order. The mean+max aggregation captures both the average character of the deck and its most extreme card.
+
+### 7. Validation Strategy
+
+Counterfactual simulation cannot be validated against ground truth (we can't observe the counterfactual game). Instead:
+
+**Reconstruction test:** Encode a real game, decode with the *same* deck condition. The generated sequence should resemble the original. Measure: event count within ±20%, card frequency correlation > 0.8, outcome matches.
+
+**Held-out prediction:** Train on 80% of games, generate synthetic games for the 20% held-out matchups, compare predicted win rates to actual.
+
+**Card swap sanity checks:**
+- Replacing Pekka with Skeletons should decrease win rate against beatdown and increase nothing
+- Replacing Arrows with a second spell (e.g., Fireball) should improve against Goblin Barrel decks
+- Replacing a card with itself should produce no change
+- These are human-verifiable sanity checks, not ground truth
+
+**Ablation study:** Compare counterfactual win rate estimates against the Monte Carlo simulation (ADR-002) for the same card swaps. If both methods agree on the direction of change (e.g., "Zap is worse than Arrows against Goblin Gang"), confidence in both methods increases.
+
+### 8. Implementation
+
+```
+src/tracker/
+├── ml/
+│   ├── cvae.py               ← CVAE architecture (encoder, decoder, deck embedder)
+│   ├── counterfactual.py     ← Counterfactual generation pipeline
+│   ├── deck_explorer.py      ← Neighborhood search, interpolation
+│   └── deck_embeddings.py    ← Deep Sets deck embedding model
+```
+
+CLI additions:
+```
+clash-stats --train-cvae                        # Train CVAE
+clash-stats --counterfactual BATTLE_ID OLD NEW  # "What if" for a specific game
+clash-stats --deck-gradient                     # Best single-card swap by expected WR change
+clash-stats --deck-neighbors                    # All 1-swap deck variants ranked
+clash-stats --deck-interpolate TARGET_DECK      # Interpolation toward a target deck
+```
+
+## Consequences
+
+### Positive
+- Deck evolution decisions backed by quantitative estimates instead of gut feel and trophy sacrifice
+- Manifold exploration discovers deck variants that human intuition would never consider
+- Two-agent simulation (your decoder + opponent model) captures interactive dynamics, not just static matchups
+- CVAE latent space enables the full suite of manifold analysis techniques (interpolation, density estimation, curvature analysis from ADR-003)
+- Deck gradient provides a concrete "next experiment" recommendation
+
+### Negative
+- Most data-hungry model in the stack — needs 2,000+ games with replay data for reliable generation
+- Counterfactual validity is fundamentally unfalsifiable — we can never observe the true counterfactual
+- Opponent response modeling is approximate — real opponents adapt in ways the model may not capture
+- CVAE training requires careful balancing of reconstruction loss vs KL divergence (β-VAE scheduling)
+- Generated sequences may violate game rules (e.g., playing a card while at 0 elixir) — need rule-based post-processing to filter invalid generations
+
+### Scale Requirements
+
+| Games with replay data | Capability |
+|----------------------|------------|
+| < 500 | Use Monte Carlo card substitution (ADR-002) instead |
+| 500-2,000 | CVAE trained with high regularization, rough counterfactual estimates |
+| 2,000-5,000 | Reliable single-game counterfactuals, deck gradient computation |
+| 5,000-20,000 | Deck neighborhood exploration, archetype interpolation |
+| 20,000+ | Full manifold cartography, generative deck design |
+
+### Relationship to Monte Carlo (ADR-002)
+
+The Monte Carlo card substitution analysis and the CVAE counterfactual simulator answer the same question from different angles:
+
+| | Monte Carlo (ADR-002) | CVAE (ADR-006) |
+|---|---|---|
+| **Method** | Sample from observed interaction distributions | Generate synthetic game sequences |
+| **Assumes** | Independence between exchanges | Temporal dependencies captured by decoder |
+| **Requires** | 200+ games | 2,000+ games |
+| **Captures** | Average elixir efficiency change | Full game trajectory change |
+| **Opponent model** | Static (sampled from data) | Dynamic (opponent prediction model) |
+
+They should be run in parallel: Monte Carlo provides the fast, rough estimate; CVAE provides the detailed simulation. When they agree, confidence is high. When they disagree, investigate why — the disagreement reveals where temporal dependencies or interaction effects override average-case analysis.

@@ -89,15 +89,32 @@ These data points inform what analytics matter:
 
 **Player tag encoding:** Tags start with `#` which must be URL-encoded as `%23`. The current code handles this.
 
+## ML & Simulation Layer
+
+The replay scraper (`replays.py`) transforms this from a results database into a full game telemetry system. Architecture Decision Records for the ML and simulation capabilities are in [`docs/adr/`](docs/adr/README.md):
+
+- **Monte Carlo Simulation** (ADR-002): Elixir economy modeling, opening hand analysis, Bayesian matchup estimation, card substitution analysis. No ML required — runs immediately on current data.
+- **Game State Embeddings** (ADR-003): TCN-based learned representations of game trajectories. Enables similarity search, cluster analysis, manifold geometry exploration.
+- **Win Probability Estimator** (ADR-004): P(win) at every game tick. WPA (Win Probability Added) per card placement. Critical play identification.
+- **Opponent Prediction** (ADR-005): Sequence model predicting opponent's next card, timing, and position. Markov chain cycle tracking.
+- **Counterfactual Simulator** (ADR-006): CVAE generating synthetic game sequences under deck modifications. Deck gradient computation. Manifold-based deck exploration.
+- **Training Data Pipeline** (ADR-007): Top-ladder replay corpus for pre-training. Transfer learning to personal games. Meta shift detection.
+
+Dependencies: `torch`, `numpy`, `scikit-learn`, `umap-learn` (added to Docker image when ML features are active).
+
 ## Future Vision
 
 The endgame is a unified analytics platform that runs as a Docker container with a lightweight web dashboard. Data-driven competitive advantage for a player who's already proving that precision beats volume.
 
 Priorities:
-1. Fix the Evo tracking gap in the tracker (deck hash + schema)
-2. Add streak detection and rolling window stats
-3. Build a simple web dashboard (even Flask + Chart.js) for visualizing trophy progression and matchup data
+1. ~~Fix the Evo tracking gap in the tracker (deck hash + schema)~~ Done
+2. ~~Add streak detection and rolling window stats~~ Done
+3. ~~Build a simple web dashboard~~ Done (Flask + Chart.js)
 4. Add tilt detection — if the tracker sees 3+ consecutive losses, surface a "you're tilting" warning
+5. Complete BVT on replay scraper pipeline
+6. Monte Carlo simulation framework (ADR-002) — first ML milestone, no training data minimum
+7. Top-ladder corpus collection (ADR-007) — pre-training data for neural models
+8. Game state embeddings (ADR-003) — foundation for all downstream ML
 
 ## Deployment
 
@@ -110,28 +127,48 @@ clash-stats/
 ├── Dockerfile
 ├── docker-compose.yml
 ├── pyproject.toml
+├── docs/
+│   └── adr/               ← Architecture Decision Records for ML/simulation layer
+│       ├── README.md
+│       ├── 001-feature-engineering.md
+│       ├── 002-monte-carlo-simulation.md
+│       ├── 003-game-state-embeddings.md
+│       ├── 004-win-probability-estimator.md
+│       ├── 005-opponent-prediction.md
+│       ├── 006-counterfactual-simulator.md
+│       └── 007-training-data-pipeline.md
+├── docker/
+│   └── browser/            ← Playwright + NoVNC sidecar for replay scraping
+│       ├── Dockerfile
+│       └── entrypoint.sh
 ├── src/
 │   └── tracker/
 │       ├── __init__.py
 │       ├── __main__.py          ← python -m tracker
-│       ├── models.py            ← SQLAlchemy ORM (Battle, PlayerSnapshot, DeckCard)
+│       ├── models.py            ← SQLAlchemy ORM (Battle, PlayerSnapshot, DeckCard, ReplayEvent, ReplaySummary)
 │       ├── database.py          ← Engine/session setup, Alembic migration runner
 │       ├── api.py               ← ClashRoyaleAPI client
 │       ├── analytics.py         ← All query/storage functions
+│       ├── replays.py           ← RoyaleAPI replay scraper and parser
 │       ├── reporting.py         ← Terminal output formatting
 │       ├── export.py            ← CSV/JSON export
 │       ├── archetypes.py        ← Opponent deck classification
 │       ├── cli.py               ← argparse + main() dispatch
 │       ├── alembic/             ← Alembic migration config + versions
+│       ├── simulation/          ← (planned) Monte Carlo framework (ADR-002)
+│       ├── ml/                  ← (planned) Neural models (ADR-003 through ADR-006)
 │       └── tests/
 │           ├── conftest.py      ← Shared fixtures
+│           ├── fixtures/        ← Static HTML fixtures for replay parser tests
 │           ├── test_models.py
 │           ├── test_analytics.py
 │           ├── test_api.py
+│           ├── test_replays.py
 │           ├── test_reporting.py
 │           ├── test_cli.py
+│           ├── test_dashboard.py
 │           └── test_export.py
-├── data/                  <- Volume mount, persists SQLite DB
+├── data/                  <- Volume mount, persists SQLite DB + feature cache
 │   └── clash_royale_history.db
 └── .env                   <- CR_API_KEY, CR_PLAYER_TAG (not committed)
 ```
