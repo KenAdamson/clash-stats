@@ -1,6 +1,8 @@
-FROM python:3.11-alpine
+FROM python:3.11-slim-bookworm
 
-RUN apk add --no-cache git openssh-client curl
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git openssh-client curl cron \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -12,8 +14,9 @@ RUN pip install --no-cache-dir .
 # Create data directory for SQLite volume mount
 RUN mkdir -p /app/data
 
-# Cron schedule — Alpine's crond is built into BusyBox, already present
-COPY crontab /etc/crontabs/root
+# Cron schedule — Debian cron reads from /etc/cron.d/
+COPY crontab /etc/cron.d/cr-tracker
+RUN chmod 0644 /etc/cron.d/cr-tracker
 
 COPY entrypoint.sh /app/entrypoint.sh
 COPY publish_stats.sh /app/publish_stats.sh

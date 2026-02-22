@@ -15,6 +15,8 @@ services:
       - ~/.ssh/id_ed25519:/root/.ssh/id_ed25519:ro
     depends_on:
       - cr-browser
+    networks:
+      - media-network
     ports:
       - "8078:8078"
 
@@ -22,8 +24,14 @@ services:
     build: docker/browser
     container_name: cr-browser
     restart: unless-stopped
+    networks:
+      - media-network
     ports:
       - "6080:6080"
     shm_size: '1gb'
     volumes:
       - ./data:/app/data
+
+networks:
+  media-network:
+    external: true

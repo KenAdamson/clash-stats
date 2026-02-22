@@ -1,6 +1,6 @@
 # Fetch battles every minute for near-realtime dashboard updates
-* * * * * /app/fetch.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
+* * * * * root /app/fetch.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Publish stats JSON to GitHub every 5 minutes
-*/5 * * * * /app/publish_wrapper.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
+*/5 * * * * root /app/publish_wrapper.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Fetch replay data from RoyaleAPI every 30 minutes
-*/30 * * * * /app/replay_wrapper.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
+*/30 * * * * root /app/replay_wrapper.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
