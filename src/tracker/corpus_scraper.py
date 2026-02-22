@@ -54,16 +54,18 @@ def scrape_corpus_battles(
             new_count = 0
 
             for battle in battles:
-                # Only store PvP ladder battles (ADR-007 §4)
+                # Only store competitive ladder battles (ADR-007 §4)
                 battle_type = battle.get("type", "")
-                if battle_type not in ("PvP", "riverRacePvP"):
+                if battle_type not in ("PvP", "pathOfLegend", "riverRacePvP"):
                     continue
 
-                # Check trophy floor (7000+)
-                team = battle.get("team", [{}])[0]
-                trophies = team.get("startingTrophies", 0)
-                if trophies and trophies < 7000:
-                    continue
+                # Trophy floor: 7000+ for regular ladder, any for Path of Legend
+                # (PoL startingTrophies is the elo rating, ~3000+, already top-tier)
+                if battle_type == "PvP":
+                    team = battle.get("team", [{}])[0]
+                    trophies = team.get("startingTrophies", 0)
+                    if trophies and trophies < 7000:
+                        continue
 
                 battle_id, is_new = analytics.store_battle(
                     session, battle, player.player_tag, corpus="top_ladder"
@@ -130,7 +132,7 @@ async def scrape_corpus_replays(
             session.query(Battle)
             .filter(
                 Battle.replay_fetched == 0,
-                Battle.battle_type.in_(["PvP", "riverRacePvP"]),
+                Battle.battle_type.in_(["PvP", "pathOfLegend", "riverRacePvP"]),
                 Battle.player_tag.like(f"%{tag}%"),
                 Battle.corpus == "top_ladder",
             )
