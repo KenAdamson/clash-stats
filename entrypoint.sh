@@ -49,12 +49,40 @@ chmod +x /app/publish_wrapper.sh
 cat > /app/replay_wrapper.sh << EOF
 #!/bin/sh
 export CR_PLAYER_TAG="${CR_PLAYER_TAG}"
-export BROWSER_WS_URL="${BROWSER_WS_URL:-ws://cr-browser:3000}"
+export BROWSER_WS_URL="${BROWSER_WS_URL:-http://cr-browser:9223}"
 export ROYALEAPI_SESSION_PATH="${ROYALEAPI_SESSION_PATH:-/app/data/royaleapi_session.json}"
 export PYTHONUNBUFFERED=1
 clash-stats --fetch-replays --player-tag "${CR_PLAYER_TAG}" --db ${DB_PATH}
 EOF
 chmod +x /app/replay_wrapper.sh
+
+# Build corpus wrapper scripts for crond
+cat > /app/corpus_update.sh << EOF
+#!/bin/sh
+export CR_API_KEY="${CR_API_KEY}"
+[ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
+export PYTHONUNBUFFERED=1
+clash-stats --corpus-update --corpus-limit 200 --db ${DB_PATH}
+EOF
+chmod +x /app/corpus_update.sh
+
+cat > /app/corpus_scrape.sh << EOF
+#!/bin/sh
+export CR_API_KEY="${CR_API_KEY}"
+[ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
+export PYTHONUNBUFFERED=1
+clash-stats --corpus-scrape --corpus-limit 200 --db ${DB_PATH}
+EOF
+chmod +x /app/corpus_scrape.sh
+
+cat > /app/corpus_replays.sh << EOF
+#!/bin/sh
+export BROWSER_WS_URL="${BROWSER_WS_URL:-http://cr-browser:9223}"
+export ROYALEAPI_SESSION_PATH="${ROYALEAPI_SESSION_PATH:-/app/data/royaleapi_session.json}"
+export PYTHONUNBUFFERED=1
+clash-stats --corpus-replays --corpus-limit 10 --db ${DB_PATH}
+EOF
+chmod +x /app/corpus_replays.sh
 
 PUSH_DEST="${STATS_REPO_URL:-origin}/${STATS_BRANCH:-stats}"
 echo "=== cr-tracker starting ==="
@@ -76,6 +104,6 @@ python -m tracker.dashboard &
 FLASK_PID=$!
 trap "kill ${FLASK_PID} 2>/dev/null; exit 0" TERM INT
 
-# Start BusyBox crond in foreground, log to stderr
-echo "=== crond active ==="
-crond -f -l 6
+# Start cron in foreground
+echo "=== cron active ==="
+cron -f

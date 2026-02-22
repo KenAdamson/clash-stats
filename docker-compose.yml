@@ -7,7 +7,7 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - FETCH_INTERVAL=14400  # 4 hours in seconds
-      - BROWSER_WS_URL=ws://cr-browser:3000
+      - BROWSER_WS_URL=http://cr-browser:9223
       - ROYALEAPI_SESSION_PATH=/app/data/royaleapi_session.json
     volumes:
       - ./data:/app/data

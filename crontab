@@ -6,3 +6,9 @@ PATH=/usr/local/bin:/usr/bin:/bin
 */5 * * * * root /app/publish_wrapper.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Fetch replay data from RoyaleAPI every 30 minutes
 */30 * * * * root /app/replay_wrapper.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
+# Weekly: refresh top-ladder player tags (Monday 6am UTC)
+0 6 * * 1 root /app/corpus_update.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
+# Daily: scrape battles for corpus players (8am UTC)
+0 8 * * * root /app/corpus_scrape.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
+# Daily: scrape replays for corpus players (9am UTC, after battles)
+0 9 * * * root /app/corpus_replays.sh >> /proc/1/fd/1 2>> /proc/1/fd/2

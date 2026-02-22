@@ -96,6 +96,9 @@ class Battle(Base):
     # Added in migration v2
     replay_fetched: Mapped[int] = mapped_column(default=0)
 
+    # Added in migration v3 (ADR-007)
+    corpus: Mapped[str] = mapped_column(String, default="personal")
+
     # Relationship
     deck_cards: Mapped[list["DeckCard"]] = relationship(
         back_populates="battle", cascade="all, delete-orphan"
@@ -125,6 +128,22 @@ class DeckCard(Base):
 
     # Relationship
     battle: Mapped["Battle"] = relationship(back_populates="deck_cards")
+
+
+class PlayerCorpus(Base):
+    """Tracked players for corpus data collection (ADR-007)."""
+
+    __tablename__ = "player_corpus"
+
+    player_tag: Mapped[str] = mapped_column(String, primary_key=True)
+    player_name: Mapped[Optional[str]]
+    source: Mapped[str] = mapped_column(String, nullable=False)  # top_ladder, matchup_search, manual
+    trophy_range_low: Mapped[Optional[int]]
+    trophy_range_high: Mapped[Optional[int]]
+    games_scraped: Mapped[int] = mapped_column(default=0)
+    replays_scraped: Mapped[int] = mapped_column(default=0)
+    last_scraped: Mapped[Optional[datetime]]
+    active: Mapped[int] = mapped_column(default=1)
 
 
 class ReplayEvent(Base):
