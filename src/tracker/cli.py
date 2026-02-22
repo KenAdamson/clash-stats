@@ -105,6 +105,16 @@ Environment variables:
                         help="Check if RoyaleAPI login is complete and save session")
     parser.add_argument("--fetch-replays", action="store_true",
                         help="Fetch replay data from RoyaleAPI for recent battles")
+    parser.add_argument("--corpus-update", action="store_true",
+                        help="Refresh top-ladder player tags for training corpus")
+    parser.add_argument("--corpus-scrape", action="store_true",
+                        help="Scrape battles for corpus players")
+    parser.add_argument("--corpus-replays", action="store_true",
+                        help="Scrape replays for corpus players")
+    parser.add_argument("--corpus-stats", action="store_true",
+                        help="Show training corpus statistics")
+    parser.add_argument("--corpus-limit", type=int, default=20, metavar="N",
+                        help="Max corpus players to process per run (default: 20)")
     parser.add_argument("--api-key", type=str, help="CR API key")
     parser.add_argument("--player-tag", type=str, help="Player tag (without #)")
     parser.add_argument("--api-url", type=str, help="API base URL (default: https://api.clashroyale.com/v1)")
@@ -204,12 +214,53 @@ Environment variables:
             count = run_fetch_replays(session, player_tag.replace("#", ""))
             print(f"  ✓ Fetched {count} replays")
 
+        if args.corpus_update:
+            if not api_key:
+                print("Error: --api-key required for corpus update")
+                return 1
+            from tracker.corpus import update_top_ladder
+            api = ClashRoyaleAPI(api_key, base_url=api_url)
+            added = update_top_ladder(session, api, limit=args.corpus_limit)
+            print(f"  ✓ Corpus update: {added} new players added")
+
+        if args.corpus_scrape:
+            if not api_key:
+                print("Error: --api-key required for corpus scraping")
+                return 1
+            from tracker.corpus_scraper import scrape_corpus_battles
+            api = ClashRoyaleAPI(api_key, base_url=api_url)
+            result = scrape_corpus_battles(session, api, limit=args.corpus_limit)
+            print(f"  ✓ Corpus battles: {result['total_players']} players, "
+                  f"{result['total_new_battles']} new battles")
+
+        if args.corpus_replays:
+            from tracker.corpus_scraper import run_scrape_corpus_replays
+            result = run_scrape_corpus_replays(
+                session, limit=args.corpus_limit, replays_per_player=5
+            )
+            print(f"  ✓ Corpus replays: {result['total_players']} players, "
+                  f"{result['total_replays']} replays")
+
+        if args.corpus_stats:
+            from tracker.corpus import get_corpus_stats
+            stats = get_corpus_stats(session)
+            print("\n📊 Training Data Corpus")
+            print(f"  Players tracked:   {stats['total_players']} "
+                  f"({stats['active_players']} active)")
+            print(f"  Source breakdown:   {stats['source_breakdown']}")
+            print(f"  Battles by corpus: {stats['battles_by_corpus']}")
+            print(f"  Total battles:     {stats['total_battles']:,}")
+            print(f"  With replay data:  {stats['battles_with_replays']:,} "
+                  f"({stats['replay_coverage_pct']}%)")
+
         # Default: show help + db status
         has_action = any([
             args.fetch, args.stats, args.deck_stats, args.crowns,
             args.matchups, args.recent, args.streaks, args.rolling,
             args.trophy_history, args.archetypes,
             args.replay_login, args.replay_check, args.fetch_replays,
+            args.corpus_update, args.corpus_scrape, args.corpus_replays,
+            args.corpus_stats,
         ])
         if not has_action:
             parser.print_help()

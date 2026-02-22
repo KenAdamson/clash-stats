@@ -107,13 +107,16 @@ def store_player_snapshot(session: Session, player: dict) -> None:
     session.commit()
 
 
-def store_battle(session: Session, battle: dict, player_tag: str) -> tuple[str, bool]:
+def store_battle(
+    session: Session, battle: dict, player_tag: str, corpus: str = "personal",
+) -> tuple[str, bool]:
     """Store a battle. Returns (battle_id, is_new).
 
     Args:
         session: SQLAlchemy session.
         battle: Raw battle dict from the API.
         player_tag: Player's tag.
+        corpus: Data source provenance ('personal', 'top_ladder', 'matchup_targeted').
 
     Returns:
         Tuple of (battle_id, is_new).
@@ -172,6 +175,7 @@ def store_battle(session: Session, battle: dict, player_tag: str) -> tuple[str, 
         player_elixir_leaked=team.get("elixirLeaked"),
         opponent_elixir_leaked=opponent.get("elixirLeaked"),
         battle_duration=battle.get("battleDuration"),
+        corpus=corpus,
     )
     session.add(b)
 
