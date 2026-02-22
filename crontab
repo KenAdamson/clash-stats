@@ -10,5 +10,5 @@ PATH=/usr/local/bin:/usr/bin:/bin
 0 6 * * 1 root /app/corpus_update.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Scrape battles for corpus players every 6 hours
 0 */6 * * * root /app/corpus_scrape.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
-# Daily: scrape replays for corpus players (9am UTC, after battles)
-0 9 * * * root /app/corpus_replays.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
+# Scrape replays for corpus players every 6 hours (offset 1h after battle scrape)
+0 1,7,13,19 * * * root /app/corpus_replays.sh >> /proc/1/fd/1 2>> /proc/1/fd/2

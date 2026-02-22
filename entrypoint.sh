@@ -80,7 +80,7 @@ cat > /app/corpus_replays.sh << EOF
 export BROWSER_WS_URL="${BROWSER_WS_URL:-http://cr-browser:9223}"
 export ROYALEAPI_SESSION_PATH="${ROYALEAPI_SESSION_PATH:-/app/data/royaleapi_session.json}"
 export PYTHONUNBUFFERED=1
-clash-stats --corpus-replays --corpus-limit 10 --db ${DB_PATH}
+clash-stats --corpus-replays --corpus-limit 200 --db ${DB_PATH}
 EOF
 chmod +x /app/corpus_replays.sh
 

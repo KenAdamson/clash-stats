@@ -168,7 +168,8 @@ The Clash Royale meta shifts with balance patches (typically every 1-3 months) a
 
 **Rate limiting:** RoyaleAPI is a community resource. The scraper must be respectful:
 - 3-second minimum delay between page loads (already implemented)
-- Maximum 1,000 replay fetches per day
+- 5-second delay between switching players
+- Per-run safety cap (5,000 replays) — real throttle is Cloudflare/RoyaleAPI pushback
 - Backoff on HTTP 429 (rate limit) responses
 - Identify the scraper via User-Agent string
 

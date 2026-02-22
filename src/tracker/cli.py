@@ -236,7 +236,7 @@ Environment variables:
         if args.corpus_replays:
             from tracker.corpus_scraper import run_scrape_corpus_replays
             result = run_scrape_corpus_replays(
-                session, limit=args.corpus_limit, replays_per_player=5
+                session, limit=args.corpus_limit, replays_per_player=25
             )
             print(f"  ✓ Corpus replays: {result['total_players']} players, "
                   f"{result['total_replays']} replays")

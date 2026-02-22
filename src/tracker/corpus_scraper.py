@@ -18,9 +18,9 @@ from tracker.replays import fetch_replays
 
 logger = logging.getLogger(__name__)
 
-# Rate limits (ADR-007 §7)
-MAX_REPLAYS_PER_DAY = 1000
-DELAY_BETWEEN_PLAYERS = 5  # seconds between switching players
+# Rate limits
+MAX_REPLAYS_PER_RUN = 5000  # per invocation; real throttle is RoyaleAPI/Cloudflare
+DELAY_BETWEEN_PLAYERS = 5   # seconds between switching players
 
 
 def scrape_corpus_battles(
@@ -161,8 +161,8 @@ async def scrape_corpus_replays(
 
             players_processed += 1
 
-            if total_replays >= MAX_REPLAYS_PER_DAY:
-                logger.info("Daily replay limit reached (%d).", MAX_REPLAYS_PER_DAY)
+            if total_replays >= MAX_REPLAYS_PER_RUN:
+                logger.info("Per-run replay limit reached (%d).", MAX_REPLAYS_PER_RUN)
                 break
 
         except Exception as e:
