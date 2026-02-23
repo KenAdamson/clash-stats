@@ -4,18 +4,22 @@ PATH=/usr/local/bin:/usr/bin:/bin
 * * * * * root /app/fetch.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Publish stats JSON to GitHub every 5 minutes
 */5 * * * * root /app/publish_wrapper.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
-# Fetch replay data from RoyaleAPI every 30 minutes
-*/30 * * * * root /app/replay_wrapper.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
-# Weekly: refresh top-ladder player tags (Monday 6am UTC)
-0 6 * * 1 root /app/corpus_update.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Scrape battles for corpus players every 30 minutes
 */30 * * * * root /app/corpus_scrape.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
+# Weekly: refresh top-ladder player tags (Monday 6am UTC)
+0 6 * * 1 root /app/corpus_update.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Refresh simulation results after corpus scrape (every 6h, offset 2h)
 0 2,8,14,20 * * * root /app/sim_refresh.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
-# Scrape replays for priority corpus players every 15 minutes
+
+# --- Replay scrapes staggered to avoid 429s from RoyaleAPI ---
+# Personal replays at :05 and :35
+5,35 * * * * root /app/replay_wrapper.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
+# Priority corpus replays at :00/:15/:30/:45 (small batch, 4 tabs)
 */15 * * * * root /app/corpus_replays_priority.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
-# Scrape replays for all corpus players every 30 minutes (30 players/run, rotates by staleness)
-*/30 * * * * root /app/corpus_replays.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
+# Full corpus replays at :10 and :40 (big batch, 5 tabs — offset from priority)
+10,40 * * * * root /app/corpus_replays.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
+
+# --- Discovery jobs ---
 # Hourly: add opponents I've lost to into the corpus
 0 * * * * root /app/corpus_nemeses.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Daily: discover new players from opponent tags (3am UTC)

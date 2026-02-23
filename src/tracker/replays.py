@@ -38,7 +38,7 @@ ROYALEAPI_BASE = "https://royaleapi.com"
 DEFAULT_BROWSER_CDP = "http://cr-browser:9223"
 DEFAULT_SESSION_PATH = "/app/data/royaleapi_session.json"
 FETCH_DELAY = 3  # seconds between page navigations
-REPLAY_FETCH_DELAY = 0.5  # seconds between XHR replay fetches (no page nav)
+REPLAY_FETCH_DELAY = 1.5  # seconds between XHR replay fetches (no page nav)
 
 
 # ---------------------------------------------------------------------------
@@ -264,14 +264,15 @@ async def _fetch_replay_page(page, url: str) -> tuple:
     avoiding Cloudflare challenges and page renders per replay.
     The /data/replay endpoint returns JSON: {"success": true, "html": "..."}.
 
-    Returns (response_status, html) tuple.
+    Returns (response_status, html, retry_after) tuple.
     """
     result = await page.evaluate(
         """async (url) => {
             try {
                 const resp = await fetch(url, {credentials: 'include'});
                 const text = await resp.text();
-                return {status: resp.status, body: text};
+                const retryAfter = resp.headers.get('Retry-After');
+                return {status: resp.status, body: text, retryAfter: retryAfter};
             } catch (e) {
                 return {status: 0, body: '', error: e.message};
             }
@@ -282,6 +283,15 @@ async def _fetch_replay_page(page, url: str) -> tuple:
     status = result.get("status", 0)
     body = result.get("body", "")
     error = result.get("error")
+    retry_after = result.get("retryAfter")
+
+    # Parse Retry-After into seconds (could be a number or HTTP-date)
+    retry_seconds = 0.0
+    if retry_after:
+        try:
+            retry_seconds = float(retry_after)
+        except (ValueError, TypeError):
+            retry_seconds = 30.0  # conservative default for unparseable values
 
     if error:
         logger.warning("XHR fetch failed for %s: %s", url, error)
@@ -291,17 +301,17 @@ async def _fetch_replay_page(page, url: str) -> tuple:
         try:
             data = json.loads(body)
             if isinstance(data, dict) and data.get("success") and "html" in data:
-                return status, data["html"]
+                return status, data["html"], retry_seconds
             # API returned success=false or no html key
             logger.warning("Replay API returned unexpected JSON for %s", url)
-            return status, ""
+            return status, "", retry_seconds
         except json.JSONDecodeError:
             # Not JSON — might be Cloudflare HTML challenge
             if "just a moment" in body.lower():
                 raise CloudflareBlockError("Cloudflare challenge in XHR response")
-            return status, body
+            return status, body, retry_seconds
 
-    return status, body
+    return status, body, retry_seconds
 
 
 async def _wait_for_cloudflare(page, timeout: int = 15000) -> None:
@@ -518,7 +528,17 @@ async def fetch_replays(
                 replay_url = f"{ROYALEAPI_BASE}{link}"
                 logger.info("Fetching replay: %s", replay_url)
 
-                status, html = await _fetch_replay_page(page, replay_url)
+                status, html, retry_after = await _fetch_replay_page(page, replay_url)
+
+                if status == 429:
+                    wait = retry_after if retry_after > 0 else 30.0
+                    logger.warning(
+                        "429 rate-limited fetching %s — backing off %.0fs",
+                        battle.battle_id, wait,
+                    )
+                    REPLAYS_FAILED.labels(error_type="rate_limited").inc()
+                    await asyncio.sleep(wait)
+                    continue
 
                 if status == 200:
                     data = parse_replay_html(html)
@@ -667,7 +687,17 @@ async def fetch_replays_for_player(
 
         try:
             replay_url = f"{ROYALEAPI_BASE}{link}"
-            status, html = await _fetch_replay_page(page, replay_url)
+            status, html, retry_after = await _fetch_replay_page(page, replay_url)
+
+            if status == 429:
+                wait = retry_after if retry_after > 0 else 30.0
+                logger.warning(
+                    "429 rate-limited fetching %s — backing off %.0fs",
+                    battle.battle_id, wait,
+                )
+                REPLAYS_FAILED.labels(error_type="rate_limited").inc()
+                await asyncio.sleep(wait)
+                continue
 
             if status == 200:
                 data = parse_replay_html(html)
