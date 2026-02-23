@@ -70,6 +70,28 @@
         </div>
     </section>
 
+    <!-- Monte Carlo Analysis (ADR-002) -->
+    <section class="card full-width" id="sim-section" style="display:none">
+        <h2>Monte Carlo Analysis <span class="badge" id="sim-timestamp"></span></h2>
+        <div class="split-layout">
+            <div class="split-left">
+                <h3>Matchup Posteriors <span class="sub-header">Beta(W+1, L+1)</span></h3>
+                <table id="threat-table" class="matchup-table">
+                    <thead><tr><th>Archetype</th><th>W</th><th>L</th><th>P(win)</th><th>95% CI</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+            <div class="split-right">
+                <h3>Card Threat Matrix <span class="sub-header">P(win | opp has card)</span></h3>
+                <table id="card-threat-table" class="matchup-table">
+                    <thead><tr><th>Card</th><th>Faced</th><th>P(win)</th><th>95% CI</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+        <div id="sub-archetype-section"></div>
+    </section>
+
     <!-- Recent Battles -->
     <section class="card full-width">
         <h2>Recent Battles</h2>

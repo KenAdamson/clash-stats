@@ -86,7 +86,11 @@ def add_manual_player(
         True if added, False if already exists.
     """
     tag = f"#{player_tag.lstrip('#')}"
-    if session.get(PlayerCorpus, tag):
+    existing = session.get(PlayerCorpus, tag)
+    if existing:
+        if existing.source != source:
+            existing.source = source
+            session.commit()
         return False
 
     session.add(PlayerCorpus(
@@ -122,8 +126,9 @@ def get_corpus_players(
     if source:
         stmt = stmt.where(PlayerCorpus.source == source)
 
-    # Prioritize players never scraped, then least recently scraped
+    # Priority players first, then never-scraped, then least recently scraped
     stmt = stmt.order_by(
+        (PlayerCorpus.source == "priority").desc(),
         PlayerCorpus.last_scraped.is_(None).desc(),
         PlayerCorpus.last_scraped.asc(),
     )

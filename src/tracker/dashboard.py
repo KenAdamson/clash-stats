@@ -3,10 +3,15 @@
 import os
 from pathlib import Path
 
-from flask import Flask, jsonify, render_template, request
+# Must be set before prometheus_client is first imported
+os.environ.setdefault("PROMETHEUS_DISABLE_CREATED_SERIES", "true")
+
+from flask import Flask, Response, jsonify, render_template, request
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 from tracker import analytics
 from tracker.database import get_engine, get_session, init_db
+from tracker.metrics import filter_in_process_metrics, render_accumulated_metrics
 
 TEMPLATE_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
@@ -96,6 +101,14 @@ def create_app(db_path: str | None = None) -> Flask:
         finally:
             session.close()
 
+    @app.route("/api/simulation")
+    def api_simulation():
+        from tracker.simulation.runner import get_cached_results
+        results = get_cached_results()
+        if results is None:
+            return jsonify({"error": "No simulation results yet. Run --sim-full first."}), 404
+        return jsonify(results)
+
     @app.route("/api/replay-auth/start", methods=["POST"])
     def replay_auth_start():
         try:
@@ -133,6 +146,20 @@ def create_app(db_path: str | None = None) -> Flask:
             })
         finally:
             session.close()
+
+    @app.route("/metrics")
+    def metrics():
+        """Serve Prometheus metrics.
+
+        Combines in-process metrics from the dashboard with accumulated
+        metrics from batch CLI jobs (corpus scrape, fetch, etc.).
+        """
+        in_process = filter_in_process_metrics(generate_latest().decode("utf-8"))
+        parts = [in_process]
+        batch_metrics = render_accumulated_metrics()
+        if batch_metrics:
+            parts.append(batch_metrics)
+        return Response("".join(parts), mimetype=CONTENT_TYPE_LATEST)
 
     return app
 

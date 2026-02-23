@@ -383,7 +383,101 @@ function renderTimeChart(timeData) {
     });
 }
 
+// ─── Monte Carlo simulation ──────────────────────────────────────
+
+async function fetchSimulation() {
+    try {
+        const resp = await fetch("/api/simulation");
+        if (!resp.ok) return;
+        const data = await resp.json();
+        renderSimulation(data);
+    } catch (e) {
+        // No simulation data yet — hide section
+    }
+}
+
+function renderSimulation(data) {
+    const section = document.getElementById("sim-section");
+    section.style.display = "";
+
+    // Timestamp
+    if (data.computed_at) {
+        const ts = new Date(data.computed_at);
+        document.getElementById("sim-timestamp").textContent =
+            ts.toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    }
+
+    // Threat ranking — use personal if available, fall back to corpus
+    const threats = data.personal_threats || data.corpus_threats || [];
+    const tbody = document.querySelector("#threat-table tbody");
+    tbody.innerHTML = threats.slice(0, 20).map(t => {
+        const pct = (t.posterior_mean * 100).toFixed(1);
+        const ci = `[${(t.ci_low * 100).toFixed(0)}, ${(t.ci_high * 100).toFixed(0)}]`;
+        return `<tr>
+            <td>${t.archetype}</td>
+            <td>${t.wins}</td>
+            <td>${t.losses}</td>
+            <td class="${wrClass(t.posterior_mean * 100)}">${pct}%</td>
+            <td class="ci-col">${ci}</td>
+        </tr>`;
+    }).join("");
+
+    // Card threat matrix — worst cards (lowest win rate)
+    const interactions = data.personal_card_interactions || data.card_interactions || {};
+    const cardList = Object.entries(interactions)
+        .map(([name, d]) => ({ name, ...d }))
+        .filter(c => c.total >= 10)
+        .sort((a, b) => a.win_rate - b.win_rate);
+
+    const worstCards = cardList.slice(0, 15);
+    const bestCards = cardList.slice(-10).reverse();
+    const cardRows = [...worstCards, { name: "───", total: "", win_rate: null, ci_low: null, ci_high: null }, ...bestCards];
+
+    const cardTbody = document.querySelector("#card-threat-table tbody");
+    cardTbody.innerHTML = cardRows.map(c => {
+        if (c.win_rate === null) {
+            return `<tr class="separator"><td colspan="4">─── Best ───</td></tr>`;
+        }
+        const pct = (c.win_rate * 100).toFixed(1);
+        const ci = `[${(c.ci_low * 100).toFixed(0)}, ${(c.ci_high * 100).toFixed(0)}]`;
+        return `<tr>
+            <td>${c.name}</td>
+            <td>${c.total}</td>
+            <td class="${wrClass(c.win_rate * 100)}">${pct}%</td>
+            <td class="ci-col">${ci}</td>
+        </tr>`;
+    }).join("");
+
+    // Sub-archetypes
+    const subSection = document.getElementById("sub-archetype-section");
+    const subs = data.sub_archetypes || {};
+    const subEntries = Object.entries(subs).filter(([, v]) => v.length > 0);
+    if (subEntries.length > 0) {
+        subSection.innerHTML = `<h3>Sub-Archetype Breakdown</h3>` +
+            subEntries.map(([wc, clusters]) => {
+                const rows = clusters.map(c => {
+                    const sig = c.signature_cards.slice(0, 5).join(", ");
+                    const wr = (c.win_rate * 100).toFixed(1);
+                    return `<tr>
+                        <td>${sig}</td>
+                        <td>${c.count}</td>
+                        <td>${c.variants}</td>
+                        <td class="${wrClass(c.win_rate * 100)}">${wr}%</td>
+                        <td>${c.avg_elixir}</td>
+                    </tr>`;
+                }).join("");
+                return `<details open><summary>${wc} (${clusters.length} sub-types)</summary>
+                    <table class="matchup-table sub-table">
+                        <thead><tr><th>Signature Cards</th><th>Games</th><th>Variants</th><th>WR</th><th>Avg Elixir</th></tr></thead>
+                        <tbody>${rows}</tbody>
+                    </table></details>`;
+            }).join("");
+    }
+}
+
 // ─── Init & poll ────────────────────────────────────────────────
 
 fetchAll();
+fetchSimulation();
 setInterval(fetchAll, POLL_INTERVAL);
+setInterval(fetchSimulation, POLL_INTERVAL);

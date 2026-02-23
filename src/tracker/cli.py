@@ -1,7 +1,11 @@
 """CLI entrypoint for the Clash Royale Battle Tracker."""
 
 import argparse
+import logging
 import os
+
+# Must be set before prometheus_client is first imported (via tracker.metrics)
+os.environ.setdefault("PROMETHEUS_DISABLE_CREATED_SERIES", "true")
 
 from tracker import analytics, reporting
 from tracker.api import ClashRoyaleAPI, DEFAULT_API_URL
@@ -64,6 +68,12 @@ def fetch_and_store(
 
 def main() -> int:
     """CLI entrypoint. Returns exit code."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
     parser = argparse.ArgumentParser(
         description="Clash Royale Battle Tracker - Build your historical match database",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -113,8 +123,18 @@ Environment variables:
                         help="Scrape replays for corpus players")
     parser.add_argument("--corpus-stats", action="store_true",
                         help="Show training corpus statistics")
+    parser.add_argument("--corpus-add-priority", type=str, nargs="+", metavar="TAG",
+                        help="Add player tags to the priority replay queue")
+    parser.add_argument("--sim-matchups", action="store_true",
+                        help="Run Monte Carlo matchup analysis (ADR-002)")
+    parser.add_argument("--sim-interactions", action="store_true",
+                        help="Show card interaction matrix (P(win|card))")
+    parser.add_argument("--sim-full", action="store_true",
+                        help="Run full simulation suite and cache results")
     parser.add_argument("--corpus-limit", type=int, default=20, metavar="N",
                         help="Max corpus players to process per run (default: 20)")
+    parser.add_argument("--replays-per-player", type=int, metavar="N",
+                        help="Max replays to fetch per player (default: 25, env: REPLAYS_PER_PLAYER)")
     parser.add_argument("--api-key", type=str, help="CR API key")
     parser.add_argument("--player-tag", type=str, help="Player tag (without #)")
     parser.add_argument("--api-url", type=str, help="API base URL (default: https://api.clashroyale.com/v1)")
@@ -136,6 +156,8 @@ Environment variables:
                 print("       Or set CR_API_KEY and CR_PLAYER_TAG environment variables")
                 return 1
             fetch_and_store(api_key, player_tag.replace("#", ""), session, api_url=api_url)
+            from tracker.metrics import flush_metrics
+            flush_metrics("fetch")
 
         export_fmt = args.export
         export_out = args.output
@@ -228,18 +250,41 @@ Environment variables:
                 print("Error: --api-key required for corpus scraping")
                 return 1
             from tracker.corpus_scraper import scrape_corpus_battles
+            from tracker.metrics import flush_metrics
             api = ClashRoyaleAPI(api_key, base_url=api_url)
             result = scrape_corpus_battles(session, api, limit=args.corpus_limit)
             print(f"  ✓ Corpus battles: {result['total_players']} players, "
                   f"{result['total_new_battles']} new battles")
+            flush_metrics("corpus_scrape")
 
         if args.corpus_replays:
             from tracker.corpus_scraper import run_scrape_corpus_replays
+            from tracker.metrics import flush_metrics
+            replays_per_player = (
+                args.replays_per_player
+                or int(os.environ.get("REPLAYS_PER_PLAYER", "25"))
+            )
             result = run_scrape_corpus_replays(
-                session, limit=args.corpus_limit, replays_per_player=25
+                session, limit=args.corpus_limit, replays_per_player=replays_per_player
             )
             print(f"  ✓ Corpus replays: {result['total_players']} players, "
                   f"{result['total_replays']} replays")
+            flush_metrics("corpus_replays")
+
+        if args.corpus_add_priority:
+            from tracker.corpus import add_manual_player
+            from tracker.models import PlayerCorpus
+            for tag in args.corpus_add_priority:
+                clean = f"#{tag.lstrip('#')}"
+                existing = session.get(PlayerCorpus, clean)
+                was_priority = existing and existing.source == "priority" if existing else False
+                added = add_manual_player(session, tag, source="priority")
+                if added:
+                    print(f"  ✓ {tag}: added as priority")
+                elif was_priority:
+                    print(f"  · {tag}: already priority")
+                else:
+                    print(f"  ✓ {tag}: promoted to priority")
 
         if args.corpus_stats:
             from tracker.corpus import get_corpus_stats
@@ -253,6 +298,60 @@ Environment variables:
             print(f"  With replay data:  {stats['battles_with_replays']:,} "
                   f"({stats['replay_coverage_pct']}%)")
 
+        if args.sim_matchups:
+            from tracker.simulation.matchup_model import (
+                compute_matchup_posteriors, compute_threat_ranking,
+            )
+            posteriors = compute_matchup_posteriors(
+                session, player_tag=player_tag, min_battles=3,
+                use_sub_archetypes=True,
+            )
+            threats = compute_threat_ranking(posteriors, min_battles=5)
+            print("\n🎯 Matchup Posteriors (Beta-Binomial)")
+            print(f"{'Archetype':<28} {'W':>4} {'L':>4} {'P(win)':>8} {'95% CI':>16}")
+            print("─" * 66)
+            for t in threats:
+                ci = f"[{t['ci_low']:.2f}, {t['ci_high']:.2f}]"
+                print(f"{t['archetype']:<28} {t['wins']:>4} {t['losses']:>4} "
+                      f"{t['posterior_mean']:>7.1%} {ci:>16}")
+
+            # Sub-archetypes for top threats
+            for t in threats[:5]:
+                archetype = t["archetype"]
+                if "sub_archetypes" in posteriors.get(archetype, {}):
+                    subs = posteriors[archetype]["sub_archetypes"]
+                    print(f"\n  ↳ {archetype} sub-archetypes:")
+                    for sa in subs:
+                        sig = ", ".join(sa["signature_cards"][:4])
+                        print(f"    {sig:<40} n={sa['count']:>3} "
+                              f"P(win)={sa['posterior_mean']:.1%} "
+                              f"[{sa['ci_low']:.2f}, {sa['ci_high']:.2f}]")
+
+        if args.sim_interactions:
+            from tracker.simulation.interaction_matrix import (
+                build_card_interaction_matrix,
+            )
+            matrix = build_card_interaction_matrix(
+                session, player_tag=player_tag, min_appearances=5,
+            )
+            print("\n⚔️  Card Interaction Matrix — P(win | opponent has card)")
+            print(f"{'Card':<28} {'Faced':>6} {'Win%':>6} {'95% CI':>16}")
+            print("─" * 60)
+            for card, data in matrix.items():
+                ci = f"[{data['ci_low']:.2f}, {data['ci_high']:.2f}]"
+                print(f"{card:<28} {data['total']:>6} "
+                      f"{data['win_rate']:>5.1%} {ci:>16}")
+
+        if args.sim_full:
+            from tracker.simulation.runner import run_full_simulation
+            results = run_full_simulation(session, player_tag=player_tag)
+            n_matchups = len(results.get("corpus_matchups", {}))
+            n_cards = len(results.get("card_interactions", {}))
+            n_subs = sum(len(v) for v in results.get("sub_archetypes", {}).values())
+            print(f"  ✓ Simulation complete: {n_matchups} matchups, "
+                  f"{n_cards} card interactions, {n_subs} sub-archetypes")
+            print(f"  ✓ Results cached for dashboard")
+
         # Default: show help + db status
         has_action = any([
             args.fetch, args.stats, args.deck_stats, args.crowns,
@@ -260,7 +359,8 @@ Environment variables:
             args.trophy_history, args.archetypes,
             args.replay_login, args.replay_check, args.fetch_replays,
             args.corpus_update, args.corpus_scrape, args.corpus_replays,
-            args.corpus_stats,
+            args.corpus_stats, args.corpus_add_priority,
+            args.sim_matchups, args.sim_interactions, args.sim_full,
         ])
         if not has_action:
             parser.print_help()
