@@ -1,7 +1,8 @@
 # ADR-002: Monte Carlo Simulation Framework
 
-**Status:** Proposed
+**Status:** Implemented
 **Date:** 2026-02-22
+**Implemented:** 2026-02-23
 **Depends on:** ADR-001 (Feature Engineering)
 
 ## Context

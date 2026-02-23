@@ -260,6 +260,49 @@ header h1 {
 .rolling-stat-row .rs-label { color: var(--text-dim); }
 .rolling-stat-row .rs-value { font-weight: 600; }
 
+/* Simulation section */
+.sub-header {
+    font-size: 0.7rem;
+    color: var(--text-dim);
+    font-weight: 400;
+}
+
+.ci-col {
+    font-family: "SF Mono", "Fira Code", monospace;
+    font-size: 0.8rem;
+    color: var(--text-dim);
+}
+
+.separator td {
+    text-align: center;
+    color: var(--text-dim);
+    font-size: 0.75rem;
+    padding: 0.5rem;
+}
+
+details {
+    margin-top: 1rem;
+}
+
+summary {
+    cursor: pointer;
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--accent);
+    margin-bottom: 0.5rem;
+}
+
+.sub-table {
+    font-size: 0.8rem;
+    margin-left: 1rem;
+}
+
+#threat-table tbody,
+#card-threat-table tbody {
+    max-height: 500px;
+    overflow-y: auto;
+}
+
 /* Responsive */
 @media (max-width: 768px) {
     .split-layout { grid-template-columns: 1fr; }

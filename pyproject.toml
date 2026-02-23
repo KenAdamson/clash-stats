@@ -12,6 +12,8 @@ dependencies = [
     "tenacity>=9.0",
     "circuitbreaker>=2.0",
     "prometheus-client>=0.20",
+    "numpy>=1.26",
+    "scipy>=1.12",
 ]
 
 [project.scripts]

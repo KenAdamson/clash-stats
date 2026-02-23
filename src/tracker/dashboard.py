@@ -101,6 +101,14 @@ def create_app(db_path: str | None = None) -> Flask:
         finally:
             session.close()
 
+    @app.route("/api/simulation")
+    def api_simulation():
+        from tracker.simulation.runner import get_cached_results
+        results = get_cached_results()
+        if results is None:
+            return jsonify({"error": "No simulation results yet. Run --sim-full first."}), 404
+        return jsonify(results)
+
     @app.route("/api/replay-auth/start", methods=["POST"])
     def replay_auth_start():
         try:

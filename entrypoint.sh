@@ -75,6 +75,14 @@ clash-stats --corpus-scrape --corpus-limit 200 --db ${DB_PATH}
 EOF
 chmod +x /app/corpus_scrape.sh
 
+cat > /app/sim_refresh.sh << EOF
+#!/bin/sh
+export CR_PLAYER_TAG="${CR_PLAYER_TAG}"
+export PYTHONUNBUFFERED=1
+clash-stats --sim-full --player-tag "${CR_PLAYER_TAG}" --db ${DB_PATH}
+EOF
+chmod +x /app/sim_refresh.sh
+
 cat > /app/corpus_replays.sh << EOF
 #!/bin/sh
 export BROWSER_WS_URL="${BROWSER_WS_URL:-http://cr-browser:9223}"
@@ -94,6 +102,7 @@ echo "  Database:   ${DB_PATH}"
 echo "  Dashboard:  http://0.0.0.0:8078"
 echo "  Stats push: every 5 min → ${PUSH_DEST}"
 echo "  Replays:    every 30 min (if session active)"
+echo "  Corpus rep: every 2h (priority players first)"
 echo "  Metrics:    http://0.0.0.0:8001/metrics (Prometheus)"
 echo "  noVNC:      http://0.0.0.0:6080 (browser sidecar)"
 

@@ -123,6 +123,14 @@ Environment variables:
                         help="Scrape replays for corpus players")
     parser.add_argument("--corpus-stats", action="store_true",
                         help="Show training corpus statistics")
+    parser.add_argument("--corpus-add-priority", type=str, nargs="+", metavar="TAG",
+                        help="Add player tags to the priority replay queue")
+    parser.add_argument("--sim-matchups", action="store_true",
+                        help="Run Monte Carlo matchup analysis (ADR-002)")
+    parser.add_argument("--sim-interactions", action="store_true",
+                        help="Show card interaction matrix (P(win|card))")
+    parser.add_argument("--sim-full", action="store_true",
+                        help="Run full simulation suite and cache results")
     parser.add_argument("--corpus-limit", type=int, default=20, metavar="N",
                         help="Max corpus players to process per run (default: 20)")
     parser.add_argument("--replays-per-player", type=int, metavar="N",
@@ -263,6 +271,21 @@ Environment variables:
                   f"{result['total_replays']} replays")
             flush_metrics("corpus_replays")
 
+        if args.corpus_add_priority:
+            from tracker.corpus import add_manual_player
+            from tracker.models import PlayerCorpus
+            for tag in args.corpus_add_priority:
+                clean = f"#{tag.lstrip('#')}"
+                existing = session.get(PlayerCorpus, clean)
+                was_priority = existing and existing.source == "priority" if existing else False
+                added = add_manual_player(session, tag, source="priority")
+                if added:
+                    print(f"  ✓ {tag}: added as priority")
+                elif was_priority:
+                    print(f"  · {tag}: already priority")
+                else:
+                    print(f"  ✓ {tag}: promoted to priority")
+
         if args.corpus_stats:
             from tracker.corpus import get_corpus_stats
             stats = get_corpus_stats(session)
@@ -275,6 +298,60 @@ Environment variables:
             print(f"  With replay data:  {stats['battles_with_replays']:,} "
                   f"({stats['replay_coverage_pct']}%)")
 
+        if args.sim_matchups:
+            from tracker.simulation.matchup_model import (
+                compute_matchup_posteriors, compute_threat_ranking,
+            )
+            posteriors = compute_matchup_posteriors(
+                session, player_tag=player_tag, min_battles=3,
+                use_sub_archetypes=True,
+            )
+            threats = compute_threat_ranking(posteriors, min_battles=5)
+            print("\n🎯 Matchup Posteriors (Beta-Binomial)")
+            print(f"{'Archetype':<28} {'W':>4} {'L':>4} {'P(win)':>8} {'95% CI':>16}")
+            print("─" * 66)
+            for t in threats:
+                ci = f"[{t['ci_low']:.2f}, {t['ci_high']:.2f}]"
+                print(f"{t['archetype']:<28} {t['wins']:>4} {t['losses']:>4} "
+                      f"{t['posterior_mean']:>7.1%} {ci:>16}")
+
+            # Sub-archetypes for top threats
+            for t in threats[:5]:
+                archetype = t["archetype"]
+                if "sub_archetypes" in posteriors.get(archetype, {}):
+                    subs = posteriors[archetype]["sub_archetypes"]
+                    print(f"\n  ↳ {archetype} sub-archetypes:")
+                    for sa in subs:
+                        sig = ", ".join(sa["signature_cards"][:4])
+                        print(f"    {sig:<40} n={sa['count']:>3} "
+                              f"P(win)={sa['posterior_mean']:.1%} "
+                              f"[{sa['ci_low']:.2f}, {sa['ci_high']:.2f}]")
+
+        if args.sim_interactions:
+            from tracker.simulation.interaction_matrix import (
+                build_card_interaction_matrix,
+            )
+            matrix = build_card_interaction_matrix(
+                session, player_tag=player_tag, min_appearances=5,
+            )
+            print("\n⚔️  Card Interaction Matrix — P(win | opponent has card)")
+            print(f"{'Card':<28} {'Faced':>6} {'Win%':>6} {'95% CI':>16}")
+            print("─" * 60)
+            for card, data in matrix.items():
+                ci = f"[{data['ci_low']:.2f}, {data['ci_high']:.2f}]"
+                print(f"{card:<28} {data['total']:>6} "
+                      f"{data['win_rate']:>5.1%} {ci:>16}")
+
+        if args.sim_full:
+            from tracker.simulation.runner import run_full_simulation
+            results = run_full_simulation(session, player_tag=player_tag)
+            n_matchups = len(results.get("corpus_matchups", {}))
+            n_cards = len(results.get("card_interactions", {}))
+            n_subs = sum(len(v) for v in results.get("sub_archetypes", {}).values())
+            print(f"  ✓ Simulation complete: {n_matchups} matchups, "
+                  f"{n_cards} card interactions, {n_subs} sub-archetypes")
+            print(f"  ✓ Results cached for dashboard")
+
         # Default: show help + db status
         has_action = any([
             args.fetch, args.stats, args.deck_stats, args.crowns,
@@ -282,7 +359,8 @@ Environment variables:
             args.trophy_history, args.archetypes,
             args.replay_login, args.replay_check, args.fetch_replays,
             args.corpus_update, args.corpus_scrape, args.corpus_replays,
-            args.corpus_stats,
+            args.corpus_stats, args.corpus_add_priority,
+            args.sim_matchups, args.sim_interactions, args.sim_full,
         ])
         if not has_action:
             parser.print_help()
