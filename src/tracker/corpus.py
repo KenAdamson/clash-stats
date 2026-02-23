@@ -160,6 +160,225 @@ def mark_player_scraped(
         session.commit()
 
 
+def discover_from_opponents(
+    session: Session,
+    min_trophies: int = 7000,
+    max_players: int = 200,
+) -> int:
+    """Mine opponent tags from existing corpus battles and add to corpus.
+
+    Finds players who appeared as opponents in corpus battles but aren't
+    yet tracked. This grows the network organically — every player we
+    track exposes 25 new opponents per scrape.
+
+    Args:
+        session: SQLAlchemy session.
+        min_trophies: Minimum startingTrophies to include (0 = all).
+        max_players: Maximum new players to add per run.
+
+    Returns:
+        Number of new players added.
+    """
+    # Find opponent tags not already in the corpus
+    existing_tags = set(
+        row[0] for row in session.execute(
+            select(PlayerCorpus.player_tag)
+        ).all()
+    )
+
+    # Get opponent tags from corpus battles, with their names and trophy data
+    rows = session.execute(
+        select(
+            Battle.opponent_tag,
+            Battle.opponent_name,
+            func.MAX(Battle.opponent_starting_trophies).label("max_trophies"),
+            func.MIN(Battle.opponent_starting_trophies).label("min_trophies"),
+            func.COUNT(Battle.battle_id).label("appearances"),
+        )
+        .where(Battle.corpus.isnot(None))
+        .where(Battle.opponent_tag.isnot(None))
+        .group_by(Battle.opponent_tag)
+        .order_by(func.COUNT(Battle.battle_id).desc())
+    ).all()
+
+    added = 0
+    for row in rows:
+        if added >= max_players:
+            break
+
+        tag = row.opponent_tag
+        if not tag or tag in existing_tags:
+            continue
+
+        # Trophy filter (0 means unknown — include those too since
+        # Path of Legend uses a different rating scale)
+        max_trophy = row.max_trophies or 0
+        if min_trophies > 0 and 0 < max_trophy < min_trophies:
+            continue
+
+        session.add(PlayerCorpus(
+            player_tag=tag,
+            player_name=row.opponent_name,
+            source="network",
+            trophy_range_low=row.min_trophies if row.min_trophies and row.min_trophies > 0 else None,
+            trophy_range_high=row.max_trophies if row.max_trophies and row.max_trophies > 0 else None,
+            active=1,
+        ))
+        added += 1
+
+    session.commit()
+    total_corpus = session.scalar(
+        select(func.count()).select_from(PlayerCorpus).where(PlayerCorpus.active == 1)
+    ) or 0
+    logger.info(
+        "Network discovery: %d new players from opponent tags (%d total active).",
+        added, total_corpus,
+    )
+    return added
+
+
+def discover_nemeses(
+    session: Session,
+    player_tag: str,
+) -> int:
+    """Add opponents the player has lost to into the corpus.
+
+    Also promotes existing corpus players to 'nemesis' source so they
+    get prioritized in scrape ordering.
+
+    Args:
+        session: SQLAlchemy session.
+        player_tag: Player tag (with or without #).
+
+    Returns:
+        Number of new players added.
+    """
+    tag = f"#{player_tag.lstrip('#')}"
+
+    # Find opponent tags from losses not already in corpus
+    existing_tags = set(
+        row[0] for row in session.execute(
+            select(PlayerCorpus.player_tag)
+        ).all()
+    )
+
+    rows = session.execute(
+        select(
+            Battle.opponent_tag,
+            Battle.opponent_name,
+        )
+        .where(Battle.player_tag == tag)
+        .where(Battle.result == "loss")
+        .where(Battle.opponent_tag.isnot(None))
+        .distinct()
+    ).all()
+
+    added = 0
+    promoted = 0
+    for row in rows:
+        opp_tag = row.opponent_tag
+        if not opp_tag:
+            continue
+
+        if opp_tag not in existing_tags:
+            session.add(PlayerCorpus(
+                player_tag=opp_tag,
+                player_name=row.opponent_name,
+                source="nemesis",
+                active=1,
+            ))
+            added += 1
+            existing_tags.add(opp_tag)
+        else:
+            # Promote existing non-priority players to nemesis
+            existing = session.get(PlayerCorpus, opp_tag)
+            if existing and existing.source not in ("priority", "nemesis"):
+                existing.source = "nemesis"
+                promoted += 1
+
+    session.commit()
+    logger.info(
+        "Nemesis discovery for %s: %d new, %d promoted, %d total nemeses.",
+        tag, added, promoted, added + promoted,
+    )
+    return added
+
+
+def update_location_leaderboards(
+    session: Session,
+    api: ClashRoyaleAPI,
+    location_ids: list[str] | None = None,
+    limit: int = 200,
+) -> int:
+    """Fetch players from location-specific leaderboards.
+
+    Location leaderboards go deeper than global — useful for finding
+    players in the 8000-11000 trophy range who aren't on the global top 200.
+
+    Args:
+        session: SQLAlchemy session.
+        api: ClashRoyaleAPI client.
+        location_ids: List of location IDs. Defaults to major regions.
+        limit: Players per leaderboard (max 200).
+
+    Returns:
+        Number of new players added across all locations.
+    """
+    if location_ids is None:
+        # Major regions with deep ladder pools
+        location_ids = [
+            "57000249",  # United States
+            "57000056",  # China
+            "57000109",  # Japan
+            "57000138",  # South Korea
+            "57000034",  # Brazil
+            "57000070",  # France
+            "57000077",  # Germany
+            "57000224",  # Turkey
+            "57000183",  # Russia
+            "57000094",  # Indonesia
+        ]
+
+    total_added = 0
+    for loc_id in location_ids:
+        try:
+            players = api.get_top_players(location_id=loc_id, limit=limit)
+            logger.info("Fetched %d players from location %s.", len(players), loc_id)
+
+            for p in players:
+                tag = p.get("tag", "").lstrip("#")
+                if not tag:
+                    continue
+
+                existing = session.get(PlayerCorpus, f"#{tag}")
+                trophies = p.get("eloRating") or p.get("trophies", 0)
+                if existing:
+                    existing.player_name = p.get("name")
+                    if existing.trophy_range_high is None or trophies > existing.trophy_range_high:
+                        existing.trophy_range_high = trophies
+                    if existing.trophy_range_low is None or trophies < existing.trophy_range_low:
+                        existing.trophy_range_low = trophies
+                else:
+                    session.add(PlayerCorpus(
+                        player_tag=f"#{tag}",
+                        player_name=p.get("name"),
+                        source="location_ladder",
+                        trophy_range_low=trophies,
+                        trophy_range_high=trophies,
+                        active=1,
+                    ))
+                    total_added += 1
+
+            session.commit()
+        except Exception as e:
+            logger.warning("Error fetching location %s: %s", loc_id, e)
+            continue
+
+    logger.info("Location discovery: %d new players across %d regions.",
+                total_added, len(location_ids))
+    return total_added
+
+
 def get_corpus_stats(session: Session) -> dict:
     """Get summary statistics about the corpus.
 

@@ -16,3 +16,9 @@ PATH=/usr/local/bin:/usr/bin:/bin
 */15 * * * * root /app/corpus_replays_priority.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Scrape replays for all corpus players every 30 minutes (30 players/run, rotates by staleness)
 */30 * * * * root /app/corpus_replays.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
+# Hourly: add opponents I've lost to into the corpus
+0 * * * * root /app/corpus_nemeses.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
+# Daily: discover new players from opponent tags (3am UTC)
+0 3 * * * root /app/corpus_discover.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
+# Weekly: discover players from regional leaderboards (Monday 7am UTC)
+0 7 * * 1 root /app/corpus_locations.sh >> /proc/1/fd/1 2>> /proc/1/fd/2

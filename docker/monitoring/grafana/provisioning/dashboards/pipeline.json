@@ -10,7 +10,7 @@
       "title": "Battles Scraped",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 16, "x": 0, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
           "expr": "increase(battles_scraped_total[10m])",
@@ -30,7 +30,7 @@
       "title": "Total Battles",
       "type": "stat",
       "gridPos": { "h": 8, "w": 8, "x": 16, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
           "expr": "sum(battles_scraped_total)",
@@ -57,7 +57,7 @@
       "title": "Replays Fetched vs Failed",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
-      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
           "expr": "increase(replays_fetched_total[1h])",
@@ -81,7 +81,7 @@
       "title": "API Request Rate",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 8, "x": 0, "y": 16 },
-      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
           "expr": "rate(api_requests_total[5m])",
@@ -94,7 +94,7 @@
       "title": "API Latency (p95)",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 8, "x": 8, "y": 16 },
-      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
           "expr": "histogram_quantile(0.95, rate(api_request_duration_seconds_bucket[5m]))",
@@ -115,7 +115,7 @@
       "title": "Pipeline Health",
       "type": "stat",
       "gridPos": { "h": 8, "w": 8, "x": 16, "y": 16 },
-      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
           "expr": "sum(corpus_players_active)",
@@ -143,7 +143,7 @@
       "title": "Scrape Runs (24h)",
       "type": "stat",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
-      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
           "expr": "sum(increase(scrape_runs_total{outcome=\"success\"}[24h]))",
@@ -200,7 +200,7 @@
       "title": "Container Logs",
       "type": "logs",
       "gridPos": { "h": 10, "w": 12, "x": 12, "y": 24 },
-      "datasource": { "type": "loki", "uid": "P8E80F9AEF21F6940" },
+      "datasource": { "type": "loki", "uid": "loki" },
       "targets": [
         {
           "expr": "{container=~\"cr-tracker|cr-browser\"} |= ``",

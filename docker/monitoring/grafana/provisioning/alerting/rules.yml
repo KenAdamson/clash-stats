@@ -1,0 +1,183 @@
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: pipeline-health
+    folder: Pipeline Alerts
+    interval: 1m
+    rules:
+      # RoyaleAPI session expired — replay scraping is dead until re-auth
+      - uid: session-expired
+        title: RoyaleAPI Session Expired
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: increase(session_expiry_total[5m])
+              instant: true
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0]
+        for: 0s
+        annotations:
+          summary: "RoyaleAPI session has expired. Replay scraping is stopped. Re-authenticate via noVNC."
+        labels:
+          severity: critical
+
+      # CR API auth failure — API key invalid or expired
+      - uid: api-auth-failure
+        title: CR API Auth Failure
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: increase(scrape_runs_total{outcome="failed"}[10m])
+              instant: true
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0]
+        for: 0s
+        annotations:
+          summary: "Corpus scrape run failed (auth error). Check CR_API_KEY."
+        labels:
+          severity: critical
+
+      # Circuit breaker tripped — 3+ consecutive auth failures
+      - uid: circuit-breaker-tripped
+        title: Circuit Breaker Tripped
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: increase(circuit_breaker_trips_total[5m])
+              instant: true
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0]
+        for: 0s
+        annotations:
+          summary: "Auth circuit breaker opened — replay scraping paused for 5 minutes."
+        labels:
+          severity: warning
+
+      # Battle scraper silent — no new battles in 2 hours
+      - uid: scraper-silent
+        title: Battle Scraper Silent
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 7200
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: increase(battles_scraped_total[2h])
+              instant: true
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: lt
+                    params: [1]
+        for: 10m
+        annotations:
+          summary: "No new battles scraped in 2+ hours. Corpus scrape may be stuck or API may be down."
+        labels:
+          severity: warning
+
+      # High replay failure rate
+      - uid: replay-failures-high
+        title: High Replay Failure Rate
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 1800
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: increase(replays_failed_total[30m])
+              instant: true
+          - refId: B
+            relativeTimeRange:
+              from: 1800
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: increase(replays_fetched_total[30m]) + increase(replays_failed_total[30m])
+              instant: true
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: math
+              expression: $A / $B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0.5]
+        for: 5m
+        annotations:
+          summary: "More than 50% of replay fetches are failing. Check Cloudflare blocks or browser sidecar health."
+        labels:
+          severity: warning
+
+      # Session expired detected in logs (Loki)
+      - uid: session-expired-logs
+        title: Session Expired (Logs)
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: loki
+            model:
+              expr: 'count_over_time({container="cr-tracker"} |= "session expired" [5m])'
+              instant: true
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0]
+        for: 0s
+        annotations:
+          summary: "Log message detected: RoyaleAPI session expired. Re-authenticate via noVNC."
+        labels:
+          severity: critical

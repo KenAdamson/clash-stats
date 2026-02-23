@@ -125,6 +125,12 @@ Environment variables:
                         help="Show training corpus statistics")
     parser.add_argument("--corpus-add-priority", type=str, nargs="+", metavar="TAG",
                         help="Add player tags to the priority replay queue")
+    parser.add_argument("--corpus-discover", action="store_true",
+                        help="Discover new players from opponent tags in existing battles")
+    parser.add_argument("--corpus-locations", action="store_true",
+                        help="Discover players from regional leaderboards (deeper than global)")
+    parser.add_argument("--corpus-nemeses", action="store_true",
+                        help="Add opponents you've lost to into the corpus")
     parser.add_argument("--sim-matchups", action="store_true",
                         help="Run Monte Carlo matchup analysis (ADR-002)")
     parser.add_argument("--sim-interactions", action="store_true",
@@ -296,6 +302,30 @@ Environment variables:
                 else:
                     print(f"  ✓ {tag}: promoted to priority")
 
+        if args.corpus_discover:
+            from tracker.corpus import discover_from_opponents
+            added = discover_from_opponents(
+                session, max_players=args.corpus_limit,
+            )
+            print(f"  ✓ Network discovery: {added} new players from opponent tags")
+
+        if args.corpus_locations:
+            if not api_key:
+                print("Error: --api-key required for location discovery")
+                return 1
+            from tracker.corpus import update_location_leaderboards
+            api = ClashRoyaleAPI(api_key, base_url=api_url)
+            added = update_location_leaderboards(session, api, limit=args.corpus_limit)
+            print(f"  ✓ Location discovery: {added} new players from regional leaderboards")
+
+        if args.corpus_nemeses:
+            if not player_tag:
+                print("Error: --player-tag required for nemesis discovery")
+                return 1
+            from tracker.corpus import discover_nemeses
+            added = discover_nemeses(session, player_tag)
+            print(f"  ✓ Nemesis discovery: {added} new players from your losses")
+
         if args.corpus_stats:
             from tracker.corpus import get_corpus_stats
             stats = get_corpus_stats(session)
@@ -370,6 +400,7 @@ Environment variables:
             args.replay_login, args.replay_check, args.fetch_replays,
             args.corpus_update, args.corpus_scrape, args.corpus_replays,
             args.corpus_stats, args.corpus_add_priority,
+            args.corpus_discover, args.corpus_locations, args.corpus_nemeses,
             args.sim_matchups, args.sim_interactions, args.sim_full,
         ])
         if not has_action:

@@ -191,18 +191,60 @@ BATCH_METRIC_NAMES = {
 }
 
 
+def _base_metric_name(key: str) -> str:
+    """Extract base metric name from a key like 'foo_total{labels}'."""
+    name = key.split("{")[0]
+    for suffix in ("_total", "_bucket", "_count", "_sum"):
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
+
+
+# Map base metric names to their Prometheus types and help text
+_METRIC_TYPE_MAP = {
+    "battles_scraped": ("counter", "Battles written to DB"),
+    "battles_deduped": ("counter", "Battles skipped (already in DB)"),
+    "replays_fetched": ("counter", "Replays successfully fetched and stored"),
+    "replays_failed": ("counter", "Replay fetch failures"),
+    "api_requests": ("counter", "CR API requests"),
+    "api_request_duration_seconds": ("histogram", "CR API call duration"),
+    "session_expiry": ("counter", "RoyaleAPI session expiry events"),
+    "corpus_players_active": ("gauge", "Number of active corpus players"),
+    "corpus_players_deactivated": ("counter", "Players deactivated (404)"),
+    "circuit_breaker_trips": ("counter", "Circuit breaker trip events"),
+    "scrape_runs": ("counter", "Scrape run completions"),
+}
+
+
 def render_accumulated_metrics() -> str:
     """Render accumulated batch metrics in Prometheus text format.
 
-    Called by the dashboard's /metrics endpoint.
+    Called by the dashboard's /metrics endpoint. Emits proper
+    # TYPE and # HELP headers so Prometheus recognizes counters
+    and can compute rate()/increase() correctly.
     """
     accumulated = _read_accumulated()
     if not accumulated:
         return ""
 
     lines = []
-    for key, value in sorted(accumulated.items()):
+    emitted_headers: set[str] = set()
+
+    for key in sorted(accumulated.keys()):
+        value = accumulated[key]
+        base = _base_metric_name(key)
+
+        # Emit TYPE/HELP once per base metric
+        if base not in emitted_headers and base in _METRIC_TYPE_MAP:
+            ptype, help_text = _METRIC_TYPE_MAP[base]
+            # Counters use _total suffix; gauges/histograms use bare name
+            header_name = f"{base}_total" if ptype == "counter" else base
+            lines.append(f"# HELP {header_name} {help_text}")
+            lines.append(f"# TYPE {header_name} {ptype}")
+            emitted_headers.add(base)
+
         lines.append(f"{key} {value}")
+
     return "\n".join(lines) + "\n"
 
 
@@ -218,7 +260,13 @@ def filter_in_process_metrics(raw: str) -> str:
     for line in lines:
         if line.startswith("# HELP ") or line.startswith("# TYPE "):
             metric_name = line.split()[2]
-            skip = metric_name in BATCH_METRIC_NAMES
+            # Strip suffixes to match BATCH_METRIC_NAMES (which uses base names)
+            base_header = metric_name
+            for suffix in ("_total", "_bucket", "_count", "_sum"):
+                if base_header.endswith(suffix):
+                    base_header = base_header[: -len(suffix)]
+                    break
+            skip = base_header in BATCH_METRIC_NAMES
         elif not line.startswith("#") and line.strip():
             metric_name = line.split("{")[0].split()[0]
             # Strip _total, _bucket, _count, _sum suffixes to get base name

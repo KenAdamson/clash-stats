@@ -155,6 +155,9 @@ def create_app(db_path: str | None = None) -> Flask:
         metrics from batch CLI jobs (corpus scrape, fetch, etc.).
         """
         in_process = filter_in_process_metrics(generate_latest().decode("utf-8"))
+        # Ensure in-process metrics end with newline before appending batch metrics
+        if in_process and not in_process.endswith("\n"):
+            in_process += "\n"
         parts = [in_process]
         batch_metrics = render_accumulated_metrics()
         if batch_metrics:

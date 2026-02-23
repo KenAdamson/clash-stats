@@ -103,6 +103,35 @@ clash-stats --corpus-replays --corpus-limit 6 --concurrency 4 --max-pages 2 --db
 EOF
 chmod +x /app/corpus_replays_priority.sh
 
+# Network discovery: mine opponent tags and add to corpus
+cat > /app/corpus_discover.sh << EOF
+#!/bin/sh
+export CR_API_KEY="${CR_API_KEY}"
+[ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
+export PYTHONUNBUFFERED=1
+clash-stats --corpus-discover --corpus-limit 200 --db ${DB_PATH}
+EOF
+chmod +x /app/corpus_discover.sh
+
+# Location leaderboard discovery
+cat > /app/corpus_locations.sh << EOF
+#!/bin/sh
+export CR_API_KEY="${CR_API_KEY}"
+[ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
+export PYTHONUNBUFFERED=1
+clash-stats --corpus-locations --corpus-limit 200 --db ${DB_PATH}
+EOF
+chmod +x /app/corpus_locations.sh
+
+# Nemesis discovery: add opponents I've lost to
+cat > /app/corpus_nemeses.sh << EOF
+#!/bin/sh
+export CR_PLAYER_TAG="${CR_PLAYER_TAG}"
+export PYTHONUNBUFFERED=1
+clash-stats --corpus-nemeses --player-tag "${CR_PLAYER_TAG}" --db ${DB_PATH}
+EOF
+chmod +x /app/corpus_nemeses.sh
+
 PUSH_DEST="${STATS_REPO_URL:-origin}/${STATS_BRANCH:-stats}"
 echo "=== cr-tracker starting ==="
 echo "  Player tag: #${CR_PLAYER_TAG}"
@@ -114,6 +143,7 @@ echo "  Stats push: every 5 min → ${PUSH_DEST}"
 echo "  Replays:    every 30 min (if session active)"
 echo "  Corpus bat: every 30m (200 players, ~7 min/run)"
 echo "  Corpus rep: every 15m priority (4 tabs), every 30m full (5 tabs, 50 players)"
+echo "  Discovery:  daily 3am opponent network + weekly Mon 7am regional leaderboards"
 echo "  Metrics:    http://0.0.0.0:8001/metrics (Prometheus)"
 echo "  noVNC:      http://0.0.0.0:6080 (browser sidecar)"
 
