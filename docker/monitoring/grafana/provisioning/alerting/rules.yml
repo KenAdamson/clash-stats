@@ -10,6 +10,7 @@ groups:
       - uid: session-expired
         title: RoyaleAPI Session Expired
         condition: C
+        noDataState: OK
         data:
           - refId: A
             relativeTimeRange:
@@ -38,6 +39,7 @@ groups:
       - uid: api-auth-failure
         title: CR API Auth Failure
         condition: C
+        noDataState: OK
         data:
           - refId: A
             relativeTimeRange:
@@ -66,6 +68,7 @@ groups:
       - uid: circuit-breaker-tripped
         title: Circuit Breaker Tripped
         condition: C
+        noDataState: OK
         data:
           - refId: A
             relativeTimeRange:
@@ -94,6 +97,7 @@ groups:
       - uid: scraper-silent
         title: Battle Scraper Silent
         condition: C
+        noDataState: OK
         data:
           - refId: A
             relativeTimeRange:
@@ -122,6 +126,7 @@ groups:
       - uid: replay-failures-high
         title: High Replay Failure Rate
         condition: C
+        noDataState: OK
         data:
           - refId: A
             relativeTimeRange:
@@ -158,6 +163,7 @@ groups:
       - uid: session-expired-logs
         title: Session Expired (Logs)
         condition: C
+        noDataState: OK
         data:
           - refId: A
             relativeTimeRange:
