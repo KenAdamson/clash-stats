@@ -165,6 +165,7 @@ async def scrape_corpus_replays(
     state_path: str | None = None,
     limit: int = 20,
     replays_per_player: int = 5,
+    max_pages: int = 5,
 ) -> dict:
     """Scrape replay data for corpus players from RoyaleAPI.
 
@@ -176,6 +177,7 @@ async def scrape_corpus_replays(
         state_path: Path to RoyaleAPI session state JSON.
         limit: Maximum corpus players to process.
         replays_per_player: Max replays per player per run.
+        max_pages: Pagination depth per player (1=fast/recent only).
 
     Returns:
         Dict with scrape statistics.
@@ -216,6 +218,7 @@ async def scrape_corpus_replays(
                 browser_ws=browser_ws,
                 state_path=state_path,
                 limit=replays_per_player,
+                max_pages=max_pages,
             )
 
             if count == -1:
@@ -280,10 +283,11 @@ def run_scrape_corpus_replays(
     state_path: str | None = None,
     limit: int = 20,
     replays_per_player: int = 5,
+    max_pages: int = 5,
 ) -> dict:
     """Synchronous wrapper for scrape_corpus_replays."""
     return asyncio.run(
         scrape_corpus_replays(
-            session, browser_ws, state_path, limit, replays_per_player
+            session, browser_ws, state_path, limit, replays_per_player, max_pages
         )
     )

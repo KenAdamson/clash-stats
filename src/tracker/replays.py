@@ -417,6 +417,7 @@ async def fetch_replays(
     browser_ws: str | None = None,
     state_path: str | None = None,
     limit: int = 5,
+    max_pages: int = 5,
 ) -> int:
     """Fetch replay data for battles that haven't been scraped yet.
 
@@ -426,6 +427,7 @@ async def fetch_replays(
         browser_ws: CDP endpoint URL for the Chromium browser.
         state_path: Path to the saved session state JSON.
         limit: Maximum number of replays to fetch per run.
+        max_pages: Maximum pagination depth (1 = first page only).
 
     Returns:
         Number of replays fetched, or -1 if session expired.
@@ -503,7 +505,7 @@ async def fetch_replays(
 
         # Paginate through battle pages to collect all replay links
         await page.wait_for_timeout(3000)
-        replay_links = await _paginate_and_extract_links(page, tag_clean)
+        replay_links = await _paginate_and_extract_links(page, tag_clean, max_pages=max_pages)
         logger.info("Found %d replay links for %s.", len(replay_links), tag_clean)
 
         for battle in unfetched:

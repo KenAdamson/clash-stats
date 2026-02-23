@@ -89,9 +89,19 @@ export BROWSER_WS_URL="${BROWSER_WS_URL:-http://cr-browser:9223}"
 export ROYALEAPI_SESSION_PATH="${ROYALEAPI_SESSION_PATH:-/app/data/royaleapi_session.json}"
 export REPLAYS_PER_PLAYER="${REPLAYS_PER_PLAYER:-25}"
 export PYTHONUNBUFFERED=1
-clash-stats --corpus-replays --corpus-limit 200 --db ${DB_PATH}
+clash-stats --corpus-replays --corpus-limit 30 --db ${DB_PATH}
 EOF
 chmod +x /app/corpus_replays.sh
+
+cat > /app/corpus_replays_priority.sh << EOF
+#!/bin/sh
+export BROWSER_WS_URL="${BROWSER_WS_URL:-http://cr-browser:9223}"
+export ROYALEAPI_SESSION_PATH="${ROYALEAPI_SESSION_PATH:-/app/data/royaleapi_session.json}"
+export REPLAYS_PER_PLAYER="${REPLAYS_PER_PLAYER:-25}"
+export PYTHONUNBUFFERED=1
+clash-stats --corpus-replays --corpus-limit 6 --max-pages 2 --db ${DB_PATH}
+EOF
+chmod +x /app/corpus_replays_priority.sh
 
 PUSH_DEST="${STATS_REPO_URL:-origin}/${STATS_BRANCH:-stats}"
 echo "=== cr-tracker starting ==="
@@ -102,7 +112,7 @@ echo "  Database:   ${DB_PATH}"
 echo "  Dashboard:  http://0.0.0.0:8078"
 echo "  Stats push: every 5 min → ${PUSH_DEST}"
 echo "  Replays:    every 30 min (if session active)"
-echo "  Corpus rep: every 2h (priority players first)"
+echo "  Corpus rep: every 15m priority, every 30m full (30 players/run)"
 echo "  Metrics:    http://0.0.0.0:8001/metrics (Prometheus)"
 echo "  noVNC:      http://0.0.0.0:6080 (browser sidecar)"
 

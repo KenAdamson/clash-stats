@@ -135,6 +135,8 @@ Environment variables:
                         help="Max corpus players to process per run (default: 20)")
     parser.add_argument("--replays-per-player", type=int, metavar="N",
                         help="Max replays to fetch per player (default: 25, env: REPLAYS_PER_PLAYER)")
+    parser.add_argument("--max-pages", type=int, default=5, metavar="N",
+                        help="Max pagination depth per player (1=fast/recent, 5=full; default: 5)")
     parser.add_argument("--api-key", type=str, help="CR API key")
     parser.add_argument("--player-tag", type=str, help="Player tag (without #)")
     parser.add_argument("--api-url", type=str, help="API base URL (default: https://api.clashroyale.com/v1)")
@@ -265,7 +267,9 @@ Environment variables:
                 or int(os.environ.get("REPLAYS_PER_PLAYER", "25"))
             )
             result = run_scrape_corpus_replays(
-                session, limit=args.corpus_limit, replays_per_player=replays_per_player
+                session, limit=args.corpus_limit,
+                replays_per_player=replays_per_player,
+                max_pages=args.max_pages,
             )
             print(f"  ✓ Corpus replays: {result['total_players']} players, "
                   f"{result['total_replays']} replays")

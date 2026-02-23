@@ -12,5 +12,7 @@ PATH=/usr/local/bin:/usr/bin:/bin
 0 */2 * * * root /app/corpus_scrape.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Refresh simulation results after corpus scrape (every 6h, offset 2h)
 0 2,8,14,20 * * * root /app/sim_refresh.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
-# Scrape replays for corpus players every 2 hours (offset 1h after battle scrape)
-0 */2 * * * root /app/corpus_replays.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
+# Scrape replays for priority corpus players every 15 minutes
+*/15 * * * * root /app/corpus_replays_priority.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
+# Scrape replays for all corpus players every 30 minutes (30 players/run, rotates by staleness)
+*/30 * * * * root /app/corpus_replays.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
