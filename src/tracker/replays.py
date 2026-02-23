@@ -37,7 +37,8 @@ logger = logging.getLogger(__name__)
 ROYALEAPI_BASE = "https://royaleapi.com"
 DEFAULT_BROWSER_CDP = "http://cr-browser:9223"
 DEFAULT_SESSION_PATH = "/app/data/royaleapi_session.json"
-FETCH_DELAY = 3  # seconds between page loads
+FETCH_DELAY = 3  # seconds between page navigations
+REPLAY_FETCH_DELAY = 0.5  # seconds between XHR replay fetches (no page nav)
 
 
 # ---------------------------------------------------------------------------
@@ -257,16 +258,50 @@ async def _navigate_authenticated(page, url: str) -> None:
     reraise=True,
 )
 async def _fetch_replay_page(page, url: str) -> tuple:
-    """Fetch a single replay page with retry on transient failures.
+    """Fetch replay data via XHR from the authenticated page context.
+
+    Uses fetch() within the browser instead of full page navigation,
+    avoiding Cloudflare challenges and page renders per replay.
+    The /data/replay endpoint returns JSON: {"success": true, "html": "..."}.
 
     Returns (response_status, html) tuple.
     """
-    resp = await page.goto(url, wait_until="load", timeout=60000)
-    await _wait_for_cloudflare(page)
+    result = await page.evaluate(
+        """async (url) => {
+            try {
+                const resp = await fetch(url, {credentials: 'include'});
+                const text = await resp.text();
+                return {status: resp.status, body: text};
+            } catch (e) {
+                return {status: 0, body: '', error: e.message};
+            }
+        }""",
+        url,
+    )
 
-    status = resp.status if resp else 0
-    html = await _extract_replay_html(page)
-    return status, html
+    status = result.get("status", 0)
+    body = result.get("body", "")
+    error = result.get("error")
+
+    if error:
+        logger.warning("XHR fetch failed for %s: %s", url, error)
+        raise CloudflareBlockError(f"XHR fetch error: {error}")
+
+    if status == 200 and body:
+        try:
+            data = json.loads(body)
+            if isinstance(data, dict) and data.get("success") and "html" in data:
+                return status, data["html"]
+            # API returned success=false or no html key
+            logger.warning("Replay API returned unexpected JSON for %s", url)
+            return status, ""
+        except json.JSONDecodeError:
+            # Not JSON — might be Cloudflare HTML challenge
+            if "just a moment" in body.lower():
+                raise CloudflareBlockError("Cloudflare challenge in XHR response")
+            return status, body
+
+    return status, body
 
 
 async def _wait_for_cloudflare(page, timeout: int = 15000) -> None:
@@ -517,7 +552,7 @@ async def fetch_replays(
                     stats["failed_transient"] += 1
                     REPLAYS_FAILED.labels(error_type="http_error").inc()
 
-                await asyncio.sleep(FETCH_DELAY)
+                await asyncio.sleep(REPLAY_FETCH_DELAY)
 
             except SessionExpiredError:
                 logger.error("Session expired mid-scrape for %s.", tag_clean)
