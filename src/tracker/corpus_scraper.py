@@ -27,7 +27,10 @@ from tracker.metrics import (
     REPLAYS_FETCHED,
     REPLAYS_FAILED,
     SCRAPE_RUNS,
+    flush_metrics,
 )
+
+FLUSH_EVERY_N_PLAYERS = 5  # flush metrics to disk every N players
 from tracker.models import Battle
 from tracker.replays import fetch_replays
 
@@ -108,6 +111,13 @@ def scrape_corpus_battles(
                 logger.info(
                     "  %s (%s): %d new battles",
                     player.player_name or tag, tag, new_count,
+                )
+
+            if stats["total_players"] % FLUSH_EVERY_N_PLAYERS == 0:
+                flush_metrics("corpus_scrape")
+                logger.info(
+                    "Progress: %d players, %d new battles so far",
+                    stats["total_players"], stats["total_new_battles"],
                 )
 
             time.sleep(DELAY_BETWEEN_PLAYERS)
@@ -232,6 +242,13 @@ async def scrape_corpus_replays(
                     )
 
             stats["total_players"] += 1
+
+            if stats["total_players"] % FLUSH_EVERY_N_PLAYERS == 0:
+                flush_metrics("corpus_replays")
+                logger.info(
+                    "Progress: %d players, %d replays so far",
+                    stats["total_players"], stats["total_replays"],
+                )
 
             if stats["total_replays"] >= MAX_REPLAYS_PER_RUN:
                 logger.info("Per-run replay limit reached (%d).", MAX_REPLAYS_PER_RUN)

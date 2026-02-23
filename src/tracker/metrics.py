@@ -27,6 +27,9 @@ logger = logging.getLogger(__name__)
 
 # Shared metrics accumulator file — persisted on Docker volume
 METRICS_FILE = Path(os.environ.get("PROMETHEUS_METRICS_FILE", "/app/data/metrics/accumulated.json"))
+
+# Track last-flushed counter values to compute deltas for mid-run flushes
+_last_flushed: dict[str, float] = {}
 TEXTFILE_DIR = METRICS_FILE.parent
 
 # ---------------------------------------------------------------------------
@@ -129,8 +132,9 @@ def _write_accumulated(data: dict) -> None:
 def flush_metrics(job_name: str = "batch") -> None:
     """Persist current process counter values to a shared accumulator.
 
-    Reads existing accumulated totals, adds this run's increments,
-    and writes back. The dashboard's /metrics endpoint renders these.
+    Reads existing accumulated totals, adds this run's increments
+    (delta since last flush), and writes back. Safe to call multiple
+    times during a single run — only the new increment is added each time.
 
     Args:
         job_name: Label for logging.
@@ -154,15 +158,16 @@ def flush_metrics(job_name: str = "batch") -> None:
                 key = f"{sample.name}{{{label_str}}}"
 
             if sample.value and sample.value > 0:
-                if sample.name.endswith("_bucket"):
-                    # Histogram buckets: accumulate
-                    accumulated[key] = accumulated.get(key, 0) + sample.value
-                elif "gauge" in metric.type:
+                if "gauge" in metric.type:
                     # Gauges: overwrite (latest value wins)
                     accumulated[key] = sample.value
                 else:
-                    # Counters: accumulate
-                    accumulated[key] = accumulated.get(key, 0) + sample.value
+                    # Counters and histograms: accumulate delta since last flush
+                    prev = _last_flushed.get(key, 0)
+                    delta = sample.value - prev
+                    if delta > 0:
+                        accumulated[key] = accumulated.get(key, 0) + delta
+                    _last_flushed[key] = sample.value
 
     _write_accumulated(accumulated)
     logger.info("Metrics accumulated to %s (%s)", METRICS_FILE, job_name)
