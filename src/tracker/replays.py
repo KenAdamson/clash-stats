@@ -466,10 +466,9 @@ async def fetch_replays(
                 await context.close()
             return -1
 
-        # Wait for replay links
+        # Paginate through battle pages to collect all replay links
         await page.wait_for_timeout(3000)
-
-        replay_links = await _extract_replay_links(page)
+        replay_links = await _paginate_and_extract_links(page, tag_clean)
         logger.info("Found %d replay links for %s.", len(replay_links), tag_clean)
 
         for battle in unfetched:
@@ -561,6 +560,51 @@ async def fetch_replays(
     )
 
     return stats["fetched"]
+
+
+async def _paginate_and_extract_links(
+    page, tag: str, max_pages: int = 5,
+) -> list[dict]:
+    """Follow pagination on the battles page to collect all replay links.
+
+    RoyaleAPI shows ~5 battles per page with cursor-based pagination
+    (next page link: /battles/history?before={timestamp}).
+
+    Args:
+        page: Playwright page.
+        tag: Player tag (for logging).
+        max_pages: Safety cap on pages to traverse.
+
+    Returns:
+        Combined list of replay link dicts from all pages.
+    """
+    all_links = []
+
+    for page_num in range(max_pages):
+        links = await _extract_replay_links(page)
+        all_links.extend(links)
+        logger.info(
+            "Page %d: %d replay buttons for %s (total: %d)",
+            page_num + 1, len(links), tag, len(all_links),
+        )
+
+        # Find the "next page" pagination link
+        next_link = await page.query_selector(
+            '.pagination_before_after a[href*="/battles/history?before="]'
+        )
+        if not next_link:
+            break
+
+        href = await next_link.get_attribute("href")
+        if not href or href.startswith("#"):
+            break
+
+        next_url = f"{ROYALEAPI_BASE}{href}"
+        await page.goto(next_url, wait_until="load", timeout=60000)
+        await _wait_for_cloudflare(page)
+        await page.wait_for_timeout(FETCH_DELAY * 1000)
+
+    return all_links
 
 
 async def _extract_replay_links(page) -> list[dict]:
