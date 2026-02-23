@@ -137,6 +137,8 @@ Environment variables:
                         help="Max replays to fetch per player (default: 25, env: REPLAYS_PER_PLAYER)")
     parser.add_argument("--max-pages", type=int, default=5, metavar="N",
                         help="Max pagination depth per player (1=fast/recent, 5=full; default: 5)")
+    parser.add_argument("--concurrency", type=int, default=1, metavar="N",
+                        help="Number of parallel browser tabs for replay scraping (default: 1)")
     parser.add_argument("--api-key", type=str, help="CR API key")
     parser.add_argument("--player-tag", type=str, help="Player tag (without #)")
     parser.add_argument("--api-url", type=str, help="API base URL (default: https://api.clashroyale.com/v1)")
@@ -266,10 +268,14 @@ Environment variables:
                 args.replays_per_player
                 or int(os.environ.get("REPLAYS_PER_PLAYER", "25"))
             )
+            concurrency = args.concurrency or int(
+                os.environ.get("REPLAY_CONCURRENCY", "1")
+            )
             result = run_scrape_corpus_replays(
                 session, limit=args.corpus_limit,
                 replays_per_player=replays_per_player,
                 max_pages=args.max_pages,
+                concurrency=concurrency,
             )
             print(f"  ✓ Corpus replays: {result['total_players']} players, "
                   f"{result['total_replays']} replays")

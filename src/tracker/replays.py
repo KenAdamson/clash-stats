@@ -599,6 +599,147 @@ async def fetch_replays(
     return stats["fetched"]
 
 
+async def fetch_replays_for_player(
+    session: Session,
+    page,
+    player_tag: str,
+    limit: int = 25,
+    max_pages: int = 5,
+) -> int:
+    """Fetch replays for a player using a pre-opened browser page.
+
+    Designed for parallel scraping — caller manages the browser/context,
+    this function just uses the given page. Does not close the page.
+
+    Args:
+        session: SQLAlchemy session.
+        page: Playwright page (already authenticated).
+        player_tag: Player tag (without #).
+        limit: Max replays to fetch.
+        max_pages: Pagination depth.
+
+    Returns:
+        Number of replays fetched, or -1 if session expired.
+    """
+    tag_clean = player_tag.lstrip("#")
+
+    unfetched = (
+        session.query(Battle)
+        .filter(
+            Battle.replay_fetched == 0,
+            Battle.battle_type.in_(["PvP", "pathOfLegend", "riverRacePvP"]),
+        )
+        .filter(Battle.player_tag.like(f"%{tag_clean}%"))
+        .order_by(Battle.battle_time.desc())
+        .limit(limit)
+        .all()
+    )
+
+    if not unfetched:
+        return 0
+
+    logger.info("Found %d unfetched battles for %s.", len(unfetched), tag_clean)
+
+    stats = {"fetched": 0, "failed_transient": 0, "failed_no_events": 0, "no_link": 0}
+
+    # Navigate to player battles page
+    battles_url = f"{ROYALEAPI_BASE}/player/{tag_clean}/battles"
+    try:
+        await _navigate_authenticated(page, battles_url)
+    except SessionExpiredError:
+        logger.error("RoyaleAPI session expired for %s.", tag_clean)
+        return -1
+    except CircuitBreakerError:
+        logger.error("Auth circuit breaker open — skipping %s.", tag_clean)
+        CIRCUIT_BREAKER_TRIPS.labels(breaker="royaleapi_auth").inc()
+        return -1
+
+    # Paginate to discover replay links
+    await page.wait_for_timeout(3000)
+    replay_links = await _paginate_and_extract_links(page, tag_clean, max_pages=max_pages)
+    logger.info("Found %d replay links for %s.", len(replay_links), tag_clean)
+
+    for battle in unfetched:
+        link = _match_replay_link(battle, replay_links)
+        if not link:
+            stats["no_link"] += 1
+            continue
+
+        try:
+            replay_url = f"{ROYALEAPI_BASE}{link}"
+            status, html = await _fetch_replay_page(page, replay_url)
+
+            if status == 200:
+                data = parse_replay_html(html)
+
+                if data["events"]:
+                    store_replay_data(session, battle.battle_id, data)
+                    stats["fetched"] += 1
+                    REPLAYS_FETCHED.labels(source="scraper").inc()
+                    logger.info(
+                        "Stored %d events for battle %s",
+                        len(data["events"]),
+                        battle.battle_id,
+                    )
+                else:
+                    logger.warning(
+                        "No events in replay for %s (empty replay)",
+                        battle.battle_id,
+                    )
+                    session.execute(
+                        update(Battle)
+                        .where(Battle.battle_id == battle.battle_id)
+                        .values(replay_fetched=1)
+                    )
+                    session.commit()
+                    stats["failed_no_events"] += 1
+                    REPLAYS_FAILED.labels(error_type="no_events").inc()
+            else:
+                logger.warning(
+                    "HTTP %s fetching replay for %s",
+                    status, battle.battle_id,
+                )
+                stats["failed_transient"] += 1
+                REPLAYS_FAILED.labels(error_type="http_error").inc()
+
+            await asyncio.sleep(REPLAY_FETCH_DELAY)
+
+        except SessionExpiredError:
+            logger.error("Session expired mid-scrape for %s.", tag_clean)
+            return -1
+
+        except CircuitBreakerError:
+            logger.error("Auth circuit breaker tripped for %s.", tag_clean)
+            CIRCUIT_BREAKER_TRIPS.labels(breaker="royaleapi_auth").inc()
+            return -1
+
+        except CloudflareBlockError:
+            logger.warning(
+                "Cloudflare blocked replay fetch for %s", battle.battle_id
+            )
+            stats["failed_transient"] += 1
+            REPLAYS_FAILED.labels(error_type="cloudflare").inc()
+
+        except Exception as e:
+            logger.error(
+                "Error fetching replay for %s: %s", battle.battle_id, e
+            )
+            stats["failed_transient"] += 1
+            REPLAYS_FAILED.labels(error_type="transient").inc()
+
+    logger.info(
+        "Replay scrape for %s: %d fetched, %d transient, "
+        "%d no_events, %d no_link",
+        tag_clean,
+        stats["fetched"],
+        stats["failed_transient"],
+        stats["failed_no_events"],
+        stats["no_link"],
+    )
+
+    return stats["fetched"]
+
+
 async def _paginate_and_extract_links(
     page, tag: str, max_pages: int = 5,
 ) -> list[dict]:
@@ -636,6 +777,8 @@ async def _paginate_and_extract_links(
         if not href or href.startswith("#"):
             break
 
+        # Clean trailing ampersands from href (causes ERR_ABORTED)
+        href = href.rstrip("&")
         next_url = f"{ROYALEAPI_BASE}{href}"
         await page.goto(next_url, wait_until="load", timeout=60000)
         await _wait_for_cloudflare(page)
