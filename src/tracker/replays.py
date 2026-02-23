@@ -598,6 +598,26 @@ async def _extract_replay_links(page) -> list[dict]:
     return links
 
 
+def _parse_replay_url(url: str) -> dict:
+    """Parse replay URL query parameters into a dict.
+
+    Args:
+        url: Replay URL path with query string.
+
+    Returns:
+        Dict with tag, team_tags, opponent_tags, team_crowns, opponent_crowns.
+    """
+    from urllib.parse import parse_qs, urlparse
+    params = parse_qs(urlparse(url).query)
+    return {
+        "tag": params.get("tag", [""])[0],
+        "team_tags": params.get("team_tags", [""])[0],
+        "opponent_tags": params.get("opponent_tags", [""])[0],
+        "team_crowns": int(params["team_crowns"][0]) if "team_crowns" in params else 0,
+        "opponent_crowns": int(params["opponent_crowns"][0]) if "opponent_crowns" in params else 0,
+    }
+
+
 def _match_replay_link(battle: Battle, links: list[dict]) -> str | None:
     """Match a stored battle to a replay link by player/opponent tags and crowns."""
     player_tag = (battle.player_tag or "").lstrip("#")
