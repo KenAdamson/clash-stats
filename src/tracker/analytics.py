@@ -15,6 +15,15 @@ from tracker.models import Battle, DeckCard, PlayerSnapshot
 LADDER_TYPES = ("PvP",)
 
 
+def _card_variant(card: dict) -> str:
+    """Classify a card as base, evo, or hero from API data."""
+    evo_level = card.get("evolutionLevel", 0)
+    max_evo = card.get("maxEvolutionLevel", 0)
+    if evo_level and evo_level > 0:
+        return "hero" if max_evo and max_evo > 1 else "evo"
+    return "base"
+
+
 def _apply_ladder_filter(stmt, ladder_only: bool):
     """Add a WHERE clause to restrict to ladder battles if requested.
 
@@ -196,6 +205,7 @@ def store_battle(
             is_player_deck=1,
             evolution_level=card.get("evolutionLevel", 0),
             star_level=card.get("starLevel", 0),
+            card_variant=_card_variant(card),
         ))
 
     for card in opponent_deck:
@@ -208,6 +218,7 @@ def store_battle(
             is_player_deck=0,
             evolution_level=card.get("evolutionLevel", 0),
             star_level=card.get("starLevel", 0),
+            card_variant=_card_variant(card),
         ))
 
     session.commit()

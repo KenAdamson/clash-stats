@@ -125,6 +125,7 @@ class DeckCard(Base):
     is_player_deck: Mapped[Optional[int]]
     evolution_level: Mapped[int] = mapped_column(default=0)
     star_level: Mapped[int] = mapped_column(default=0)
+    card_variant: Mapped[str] = mapped_column(String, default="base")  # base, evo, hero
 
     # Relationship
     battle: Mapped["Battle"] = relationship(back_populates="deck_cards")
