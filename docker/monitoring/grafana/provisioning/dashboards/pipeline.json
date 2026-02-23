@@ -60,20 +60,21 @@
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
-          "expr": "increase(replays_fetched_total[1h])",
+          "expr": "increase(replays_fetched_total[10m])",
           "legendFormat": "fetched ({{source}})",
           "refId": "A"
         },
         {
-          "expr": "increase(replays_failed_total[1h])",
+          "expr": "increase(replays_failed_total[10m])",
           "legendFormat": "failed ({{error_type}})",
           "refId": "B"
         }
       ],
       "fieldConfig": {
         "defaults": {
+          "decimals": 0,
           "color": { "mode": "palette-classic" },
-          "custom": { "fillOpacity": 20, "lineWidth": 2 }
+          "custom": { "fillOpacity": 30, "lineWidth": 2, "drawStyle": "bars", "barAlignment": 0 }
         }
       }
     },
