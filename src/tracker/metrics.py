@@ -168,6 +168,24 @@ def flush_metrics(job_name: str = "batch") -> None:
     logger.info("Metrics accumulated to %s (%s)", METRICS_FILE, job_name)
 
 
+# Metric names that are only meaningful from batch jobs.
+# These must be stripped from generate_latest() to avoid duplicates
+# with the accumulated JSON values.
+BATCH_METRIC_NAMES = {
+    "battles_scraped",
+    "battles_deduped",
+    "replays_fetched",
+    "replays_failed",
+    "api_requests",
+    "api_request_duration_seconds",
+    "session_expiry",
+    "corpus_players_active",
+    "corpus_players_deactivated",
+    "circuit_breaker_trips",
+    "scrape_runs",
+}
+
+
 def render_accumulated_metrics() -> str:
     """Render accumulated batch metrics in Prometheus text format.
 
@@ -181,3 +199,32 @@ def render_accumulated_metrics() -> str:
     for key, value in sorted(accumulated.items()):
         lines.append(f"{key} {value}")
     return "\n".join(lines) + "\n"
+
+
+def filter_in_process_metrics(raw: str) -> str:
+    """Remove batch-only metrics from generate_latest() output.
+
+    Prevents duplicate series when the accumulated JSON also provides
+    these metrics with real values from batch jobs.
+    """
+    lines = raw.split("\n")
+    filtered = []
+    skip = False
+    for line in lines:
+        if line.startswith("# HELP ") or line.startswith("# TYPE "):
+            metric_name = line.split()[2]
+            skip = metric_name in BATCH_METRIC_NAMES
+        elif not line.startswith("#") and line.strip():
+            metric_name = line.split("{")[0].split()[0]
+            # Strip _total, _bucket, _count, _sum suffixes to get base name
+            base = metric_name
+            for suffix in ("_total", "_bucket", "_count", "_sum"):
+                if base.endswith(suffix):
+                    base = base[:-len(suffix)]
+                    break
+            skip = base in BATCH_METRIC_NAMES
+
+        if not skip:
+            filtered.append(line)
+
+    return "\n".join(filtered)

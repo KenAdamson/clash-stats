@@ -11,7 +11,7 @@ from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 from tracker import analytics
 from tracker.database import get_engine, get_session, init_db
-from tracker.metrics import render_accumulated_metrics
+from tracker.metrics import filter_in_process_metrics, render_accumulated_metrics
 
 TEMPLATE_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
@@ -146,7 +146,8 @@ def create_app(db_path: str | None = None) -> Flask:
         Combines in-process metrics from the dashboard with accumulated
         metrics from batch CLI jobs (corpus scrape, fetch, etc.).
         """
-        parts = [generate_latest().decode("utf-8")]
+        in_process = filter_in_process_metrics(generate_latest().decode("utf-8"))
+        parts = [in_process]
         batch_metrics = render_accumulated_metrics()
         if batch_metrics:
             parts.append(batch_metrics)

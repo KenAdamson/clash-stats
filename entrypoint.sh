@@ -79,6 +79,7 @@ cat > /app/corpus_replays.sh << EOF
 #!/bin/sh
 export BROWSER_WS_URL="${BROWSER_WS_URL:-http://cr-browser:9223}"
 export ROYALEAPI_SESSION_PATH="${ROYALEAPI_SESSION_PATH:-/app/data/royaleapi_session.json}"
+export REPLAYS_PER_PLAYER="${REPLAYS_PER_PLAYER:-25}"
 export PYTHONUNBUFFERED=1
 clash-stats --corpus-replays --corpus-limit 200 --db ${DB_PATH}
 EOF

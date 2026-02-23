@@ -9,26 +9,54 @@
     {
       "title": "Battles Scraped",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "gridPos": { "h": 8, "w": 16, "x": 0, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
       "targets": [
         {
-          "expr": "increase(battles_scraped_total[1h])",
+          "expr": "increase(battles_scraped_total[10m])",
           "legendFormat": "{{corpus}}",
           "refId": "A"
         }
       ],
       "fieldConfig": {
         "defaults": {
+          "decimals": 0,
           "color": { "mode": "palette-classic" },
-          "custom": { "fillOpacity": 20, "lineWidth": 2 }
+          "custom": { "fillOpacity": 30, "lineWidth": 2, "drawStyle": "bars", "barAlignment": 0 }
+        }
+      }
+    },
+    {
+      "title": "Total Battles",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+      "targets": [
+        {
+          "expr": "sum(battles_scraped_total)",
+          "legendFormat": "Scraped",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "value_and_name",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"]
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "color": { "mode": "fixed", "fixedColor": "blue" }
         }
       }
     },
     {
       "title": "Replays Fetched vs Failed",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
       "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
       "targets": [
         {
@@ -52,7 +80,7 @@
     {
       "title": "API Request Rate",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 16 },
       "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
       "targets": [
         {
@@ -65,7 +93,7 @@
     {
       "title": "API Latency (p95)",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 8 },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 16 },
       "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
       "targets": [
         {
@@ -86,7 +114,7 @@
     {
       "title": "Pipeline Health",
       "type": "stat",
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 16 },
       "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
       "targets": [
         {
@@ -112,22 +140,66 @@
       }
     },
     {
-      "title": "Scrape Run Outcomes",
-      "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "title": "Scrape Runs (24h)",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
       "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
       "targets": [
         {
-          "expr": "increase(scrape_runs_total[6h])",
-          "legendFormat": "{{scrape_type}} — {{outcome}}",
+          "expr": "sum(increase(scrape_runs_total{outcome=\"success\"}[24h]))",
+          "legendFormat": "Success",
           "refId": "A"
+        },
+        {
+          "expr": "sum(increase(scrape_runs_total{outcome=\"partial\"}[24h]))",
+          "legendFormat": "Partial",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(increase(scrape_runs_total{outcome=\"failed\"}[24h]))",
+          "legendFormat": "Failed",
+          "refId": "C"
         }
-      ]
+      ],
+      "options": {
+        "colorMode": "background_solid",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"]
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Success" },
+            "properties": [
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Partial" },
+            "properties": [
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "yellow" } }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Failed" },
+            "properties": [
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }
+            ]
+          }
+        ]
+      }
     },
     {
       "title": "Container Logs",
       "type": "logs",
-      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 16 },
+      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 24 },
       "datasource": { "type": "loki", "uid": "P8E80F9AEF21F6940" },
       "targets": [
         {
