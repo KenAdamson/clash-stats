@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 # Rate limits
 MAX_REPLAYS_PER_RUN = 5000  # per invocation; real throttle is RoyaleAPI/Cloudflare
-DELAY_BETWEEN_PLAYERS = 5   # seconds between switching players
+DELAY_BETWEEN_PLAYERS = 2   # seconds between CR API calls per player
 
 
 def scrape_corpus_battles(
