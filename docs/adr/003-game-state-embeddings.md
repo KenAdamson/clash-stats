@@ -2,6 +2,7 @@
 
 **Status:** Proposed
 **Date:** 2026-02-22
+**Updated:** 2026-02-23
 **Depends on:** ADR-001 (Feature Engineering), ADR-007 (Training Data Pipeline)
 
 ## Context
@@ -12,7 +13,9 @@ A game of Clash Royale is a trajectory through a high-dimensional state space. T
 
 ### Phased Approach
 
-The embedding system is built in two phases. Phase 0 (UMAP) runs immediately on current data with no training infrastructure. Phase 1 (TCN) upgrades to learned representations when the corpus reaches sufficient scale. Both phases produce embeddings that downstream models can consume — the interface is identical, only the embedding method changes.
+The embedding system is built in three phases. Phase 0 (UMAP) runs immediately on current data with no training infrastructure. Phase 1 (TCN) introduces learned sequence representations. Phase 2 (Transformer) is the publication-grade architecture with interpretable attention maps. All three phases produce embeddings through the same interface — downstream models are agnostic to the embedding source.
+
+**Update (2026-02-23):** Corpus growth rate (5,699 battles in Day 1, projected 25K by end of Week 1) has compressed the original timeline dramatically. The TCN data threshold (500+ games with replay data) will be met within days rather than months, and the transformer threshold (10K+ games) within 2 weeks. The three-phase approach is retained because each phase tells a progression story for the paper — classical statistics → temporal convolutions → attention — with each layer demonstrably improving on the last. The TCN also serves a practical role as a fast-inference model for latency-sensitive applications (real-time opponent prediction) while the transformer handles deep post-game analysis.
 
 ### 1. Phase 0: UMAP Dimensionality Reduction (Available Now)
 
@@ -86,30 +89,69 @@ UMAP (Uniform Manifold Approximation and Projection) is not a visualization gimm
 - **Outlier games:** Games far from any cluster are anomalies. These are the ones worth manual review — either novel opponent strategies or your own unusual plays.
 - **Archetype neighborhoods:** Games against the same archetype should cluster. If they don't, the archetype classification from `archetypes.py` is too coarse — the UMAP embedding reveals sub-archetypes.
 
-### 2. Phase 1: Temporal Convolutional Network (TCN) — Neural Upgrade Path
+### 2. Phase 1: Temporal Convolutional Network (TCN) — Sequence Baseline
 
-When the corpus reaches 500+ games with replay data (or immediately if the top-ladder pipeline from ADR-007 is active), the TCN replaces UMAP as the primary embedding method. The TCN operates on the raw event *sequence* rather than the aggregated tabular features, capturing temporal dynamics that UMAP on aggregated features cannot.
+When the corpus reaches 500+ games with replay data, the TCN introduces learned sequence representations that operate on the raw event *sequence* rather than aggregated tabular features, capturing temporal dynamics that UMAP on aggregated features cannot.
 
 The game event sequence is an ordered time series of variable length (20-100+ events per game). The TCN:
 - Handles variable-length sequences efficiently
 - Captures both local patterns (card-response pairs) and global patterns (game-level tempo)
 - Produces a fixed-size embedding regardless of game length
 - Trains efficiently on hundreds to low thousands of examples
-
-**Why TCN over alternatives:**
-
-| Architecture | Pros | Cons | Verdict |
-|-------------|------|------|---------|
-| LSTM/GRU | Good at sequential dependencies | Slow training, vanishing gradients on long sequences, sequential inference | Viable but slower |
-| Transformer | Attention captures long-range dependencies | Needs 10K+ examples, O(n²) attention, overkill for sequences of 50-100 | Future upgrade path |
-| 1D-CNN | Fast, parallelizable, good local pattern detection | Limited receptive field without stacking | Too shallow alone |
-| **TCN** | **Dilated convolutions = exponential receptive field, parallelizable, trains well on small data** | Less flexible than attention | **Best fit for current scale** |
+- Serves as the fast-inference model for latency-sensitive applications
 
 The TCN uses dilated causal convolutions with exponentially increasing dilation factors (1, 2, 4, 8, 16, ...) so that with 6-7 layers, the receptive field covers the entire game sequence. Each layer sees a wider temporal context without losing resolution on local card interactions.
 
-**UMAP → TCN transition:** When the TCN is trained, compute both UMAP and TCN embeddings in parallel for a validation period. Compare downstream task performance (clustering coherence, similarity search relevance, win prediction accuracy). Switch to TCN as primary when it demonstrably outperforms UMAP. Keep UMAP as a diagnostic — applying UMAP to TCN embeddings reveals whether the neural model has learned a better manifold than raw features.
+**UMAP → TCN transition:** When the TCN is trained, compute both UMAP and TCN embeddings in parallel for a validation period. Compare downstream task performance (clustering coherence, similarity search relevance, win prediction accuracy). Keep UMAP as a diagnostic — applying UMAP to TCN embeddings reveals whether the neural model has learned a better manifold than raw features.
 
-### 3. TCN Model Structure
+### 2b. Phase 2: Transformer Encoder — Publication Architecture
+
+When the corpus reaches 10K+ games with replay data (projected within 2 weeks at current scrape rates), a transformer encoder replaces the TCN as the primary deep embedding model. The TCN remains available for fast inference.
+
+**Why the transformer is the target architecture:**
+
+| Property | TCN | Transformer |
+|----------|-----|-------------|
+| Attention maps | No — hidden states are opaque | Yes — "model attends to opponent's Inferno Dragon when predicting loss" |
+| Long-range dependencies | Requires deep stacking for full receptive field | Native via self-attention |
+| Publication appeal | Niche architecture | Lingua franca of modern ML — connects to broader literature |
+| Causal structure | Built-in (dilated causal convolutions) | Causal attention mask (equivalent guarantee) |
+| Training data minimum | 500+ games | 2,000+ games (more parameters to constrain) |
+| Parameter count | ~2M | ~5-10M |
+| Inference latency | Lower (parallelized convolutions) | Higher (O(n²) attention, but n=50-100 is trivial) |
+
+**Architecture:**
+
+```
+Input: (batch, seq_len, event_feature_dim)    # From ADR-001, dim ≈ 34
+  │
+  ▼
+Card Embedding Layer (shared across all models)
+  │
+  ▼
+Positional Encoding (game tick → sinusoidal encoding)
+  │
+  ▼
+Transformer Encoder (4-6 layers, 4 heads, 128-dim, causal mask)
+  │
+  ▼
+[CLS] token embedding → Game Embedding (128-dim)
+  │
+  ├──► Classification head: Linear(128 → 1) → Sigmoid
+  ├──► Contrastive projection: Linear(128 → 64)
+  └──► Attention maps → interpretable card-level importance
+```
+
+**Parameter count:** ~5-10M parameters. Fits comfortably on an A770 16GB with room to spare for batch training.
+
+**The attention map payoff:** Transformer attention heads produce per-event importance weights that are directly interpretable. "When predicting win probability at game tick 120, the model attends most strongly to the opponent's Inferno Dragon placement at tick 45 and the player's spell response at tick 48." This is a result you can visualize, discuss in a paper, and use for player coaching. TCN hidden states don't give you this.
+
+**Dual-model deployment:**
+- **TCN:** Fast inference for real-time applications (opponent prediction during a match, live win probability overlay). Lower latency, smaller memory footprint.
+- **Transformer:** Deep analysis for post-game review (WPA computation, counterfactual generation, embedding quality). Higher quality, interpretable attention. Primary model for paper results.
+- Both share the same card embedding layer and training data pipeline. Same 128-dim output interface.
+
+### 3. TCN Model Structure (Phase 1)
 
 ```
 Input: (batch, seq_len, event_feature_dim)    # From ADR-001, dim ≈ 34
@@ -245,14 +287,15 @@ src/tracker/
 │   ├── __init__.py
 │   ├── umap_embeddings.py  ← Phase 0: UMAP feature aggregation, reduction, clustering
 │   ├── tcn.py              ← Phase 1: TCN architecture (PyTorch)
-│   ├── embeddings.py       ← Training loop, embedding extraction (both phases)
+│   ├── transformer.py      ← Phase 2: Transformer encoder (PyTorch)
+│   ├── embeddings.py       ← Training loop, embedding extraction (all phases)
 │   ├── similarity.py       ← Nearest-neighbor search, clustering
 │   └── manifold.py         ← Dimensionality estimation, visualization
 ```
 
 Dependencies:
 - Phase 0: `umap-learn`, `hdbscan`, `scikit-learn`, `numpy` (lightweight, no PyTorch)
-- Phase 1: adds `torch`
+- Phase 1-2: adds `torch`
 
 CLI additions:
 ```
@@ -293,12 +336,15 @@ clash-stats --compare-embeddings        # UMAP vs TCN quality comparison
 
 ### Scale Requirements
 
-| Games with replay data | Phase | Capability |
-|----------------------|-------|------------|
-| 50 | Phase 0 | UMAP with unsupervised clustering — discover game types |
-| 100 | Phase 0 | Supervised UMAP — win/loss separation, failure mode clusters |
-| 200 | Phase 0 | **Current scale.** Full UMAP pipeline: similarity search, archetype fingerprinting, anomaly detection, manifold visualization |
-| 500 | Phase 0→1 | TCN training viable — run both in parallel, compare quality |
-| 500-2,000 | Phase 1 | TCN with contrastive learning, expect 75-80% classification, meaningful sequence-aware clusters emerge |
-| 2,000-10,000 | Phase 1 | Multi-task TCN training, 80-85%, manifold geometry becomes informative |
-| 10,000+ | Phase 1 | Fine-grained sub-cluster analysis, per-card interaction embeddings, transfer to other models |
+**Updated 2026-02-23:** Corpus growth (5,699 battles/day) compresses all timelines. Replay coverage (currently 2.6%) is the gating factor, not battle count.
+
+| Games with replay data | Phase | Capability | Projected date |
+|----------------------|-------|------------|----------------|
+| 50 | Phase 0 | UMAP with unsupervised clustering — discover game types | Now (149 replays in corpus) |
+| 100 | Phase 0 | Supervised UMAP — win/loss separation, failure mode clusters | Now |
+| 200 | Phase 0 | Full UMAP pipeline: similarity search, archetype fingerprinting, anomaly detection | Days |
+| 500 | Phase 0→1 | TCN training viable — run both in parallel, compare quality | ~1 week |
+| 2,000 | Phase 1→2 | TCN with contrastive learning + transformer training viable | ~2 weeks |
+| 10,000+ | Phase 2 | Transformer with attention maps, full manifold analysis, paper-ready results | ~1 month |
+
+**Note:** At current replay scrape rates (2h intervals, 200 players, ~5 replay buttons visible per player page), replay coverage grows at roughly 50-100/day. The bottleneck is RoyaleAPI's replay button display limit, not scrape frequency. Priority players (SIMO, Ronnie, Clown, Wyze) are scraped first each cycle.

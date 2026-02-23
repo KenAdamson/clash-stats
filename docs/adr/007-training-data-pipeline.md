@@ -104,11 +104,24 @@ Scraping 50K games/day is unnecessary and would abuse RoyaleAPI. Instead, use st
 - These are extremely rare (zero community usage per RoyaleAPI) but invaluable for understanding the mirror
 - Purpose: edge case handling
 
-**Estimated corpus growth:**
+**Estimated corpus growth (original projection, pre-implementation):**
 - Month 1: 5,000 games (Tier 1 weekly scrapes)
 - Month 3: 15,000 games + 2,000 targeted
 - Month 6: 30,000+ games
 - Year 1: 60,000+ games with full replay event data
+
+**Actual corpus growth (measured 2026-02-23):**
+- Day 1: 5,699 top-ladder battles from 200 players — exceeded Month 1 projection in 24 hours
+- Growth rate: ~3,000-4,000 battles/day at 2-hour scrape intervals
+- Projected Week 1: ~25,000 battles (5x the original Month 1 estimate)
+- Projected Month 1: ~100,000+ battles
+
+The original projections assumed weekly scraping of 200 players (1 scrape/week × 25 battles/window = 5,000/week). Actual deployment scrapes every 2 hours, capturing most of each player's daily output rather than a single 25-game window per week. The API's 25-battle buffer is the constraint — frequent scraping keeps the buffer from overflowing rather than increasing per-scrape yield.
+
+**Scrape frequency evolution:**
+- v1 (original ADR): weekly scrape → 5K/month
+- v2 (initial deployment): every 6h → 5.7K/day
+- v3 (current, 2026-02-23): every 2h → estimated 3-4K/day sustained
 
 ### 4. Data Quality and Filtering
 
@@ -232,6 +245,8 @@ Crontab additions:
 
 ### Projected Corpus Timeline
 
+**Original projections (pre-implementation):**
+
 | Milestone | Personal Games | Top-Ladder Games | Total | Models Unlocked |
 |-----------|---------------|-----------------|-------|----------------|
 | Week 1 | 200 | 1,000 | 1,200 | Monte Carlo (ADR-002), Basic embeddings (ADR-003) |
@@ -239,3 +254,14 @@ Crontab additions:
 | Month 3 | 350 | 17,000 | 17,350 | Counterfactual generation (ADR-006) |
 | Month 6 | 500 | 35,000 | 35,500 | Full manifold exploration, deck gradient |
 | Year 1 | 700 | 65,000 | 65,700 | Per-card interaction embeddings, meta evolution tracking |
+
+**Revised projections (based on actual Day 1 data, 2026-02-23):**
+
+| Milestone | Personal Games | Top-Ladder Games | Total | Models Unlocked |
+|-----------|---------------|-----------------|-------|----------------|
+| Day 1 ✓ | 140 | 5,699 | 5,839 | Monte Carlo (ADR-002) — **implemented** |
+| Week 1 | 150 | 25,000 | 25,150 | Basic embeddings, UMAP manifold exploration |
+| Month 1 | 200 | 100,000 | 100,200 | All sequence models, dense interaction matrices |
+| Month 3 | 300 | 300,000 | 300,300 | Per-card embeddings, meta evolution tracking |
+
+All neural model scale thresholds (ADR-003 through ADR-006) are expected to be met within 2 weeks rather than 3-6 months. The bottleneck has shifted from data volume to replay coverage (currently 2.6% of corpus battles have replay event data) and engineering time to build the models.
