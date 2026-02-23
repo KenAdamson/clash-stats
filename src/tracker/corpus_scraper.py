@@ -22,7 +22,6 @@ from tracker.api import (
 )
 from tracker.corpus import get_corpus_players, mark_player_scraped
 from tracker.metrics import (
-    BATTLES_SCRAPED,
     CORPUS_PLAYERS_ACTIVE,
     CORPUS_PLAYERS_DEACTIVATED,
     REPLAYS_FETCHED,
@@ -107,7 +106,6 @@ def scrape_corpus_battles(
                 )
                 if is_new:
                     new_count += 1
-                    BATTLES_SCRAPED.labels(corpus="top_ladder").inc()
 
             mark_player_scraped(session, player.player_tag, games=new_count)
             stats["total_new_battles"] += new_count

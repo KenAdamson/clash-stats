@@ -8,6 +8,7 @@ from sqlalchemy import case, cast, func, Integer, select
 from sqlalchemy.orm import Session
 
 from tracker.archetypes import classify_archetype
+from tracker.metrics import BATTLES_SCRAPED, BATTLES_DEDUPED
 from tracker.models import Battle, DeckCard, PlayerSnapshot
 
 # Battle types considered "ladder" (competitive, with trophy stakes)
@@ -128,6 +129,7 @@ def store_battle(
     bid = generate_battle_id(battle)
 
     if battle_exists(session, bid):
+        BATTLES_DEDUPED.labels(corpus=corpus).inc()
         return bid, False
 
     team = battle.get("team", [{}])[0]
@@ -209,6 +211,7 @@ def store_battle(
         ))
 
     session.commit()
+    BATTLES_SCRAPED.labels(corpus=corpus).inc()
     return bid, True
 
 
