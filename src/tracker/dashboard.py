@@ -147,6 +147,85 @@ def create_app(db_path: str | None = None) -> Flask:
         finally:
             session.close()
 
+    @app.route("/api/embeddings")
+    def api_embeddings():
+        """Return 3D embeddings for scatter plot visualization."""
+        session = get_session(engine)
+        try:
+            from tracker.ml.storage import GameEmbedding, from_blob
+            from tracker.models import Battle
+            from sqlalchemy import select
+
+            rows = session.execute(
+                select(
+                    GameEmbedding.battle_id,
+                    GameEmbedding.embedding_3d,
+                    GameEmbedding.cluster_id,
+                )
+            ).all()
+
+            if not rows:
+                return jsonify({"error": "No embeddings. Run --train-embeddings first."}), 404
+
+            battle_ids = [r[0] for r in rows]
+            battles = session.execute(
+                select(Battle.battle_id, Battle.result, Battle.corpus, Battle.opponent_name)
+                .where(Battle.battle_id.in_(battle_ids))
+            ).all()
+            meta = {b[0]: b for b in battles}
+
+            points = []
+            for bid, emb_3d, cluster_id in rows:
+                try:
+                    xyz = from_blob(emb_3d, 3)
+                except ValueError:
+                    continue  # Skip stale 2D embeddings pre-retraining
+                b = meta.get(bid)
+                points.append({
+                    "battle_id": bid,
+                    "x": float(xyz[0]),
+                    "y": float(xyz[1]),
+                    "z": float(xyz[2]),
+                    "cluster_id": cluster_id,
+                    "result": b[1] if b else None,
+                    "corpus": b[2] if b else None,
+                    "opponent": b[3] if b else None,
+                })
+
+            return jsonify({"points": points, "count": len(points)})
+        finally:
+            session.close()
+
+    @app.route("/api/similar/<battle_id>")
+    def api_similar(battle_id: str):
+        """Return top-10 most similar games, split by corpus/personal."""
+        session = get_session(engine)
+        try:
+            from tracker.ml.similarity import find_similar
+            results = find_similar(session, battle_id)
+            if not results["corpus"] and not results["personal"]:
+                return jsonify({"error": f"No embedding for {battle_id}"}), 404
+            return jsonify({
+                "reference": battle_id,
+                "corpus": results["corpus"],
+                "personal": results["personal"],
+            })
+        finally:
+            session.close()
+
+    @app.route("/api/clusters")
+    def api_clusters():
+        """Return cluster profiles."""
+        session = get_session(engine)
+        try:
+            from tracker.ml.clustering import profile_clusters
+            profiles = profile_clusters(session)
+            if not profiles:
+                return jsonify({"error": "No clusters. Run --train-embeddings first."}), 404
+            return jsonify({"clusters": profiles})
+        finally:
+            session.close()
+
     @app.route("/metrics")
     def metrics():
         """Serve Prometheus metrics.

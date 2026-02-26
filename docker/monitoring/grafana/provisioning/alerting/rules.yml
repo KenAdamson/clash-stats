@@ -93,7 +93,9 @@ groups:
         labels:
           severity: warning
 
-      # Battle scraper silent — no new battles in 2 hours
+      # Battle scraper silent — no new battles in 1 hour
+      # Uses sum of two non-overlapping 30m windows to avoid restart artifacts
+      # from a single increase() spanning a counter reset.
       - uid: scraper-silent
         title: Battle Scraper Silent
         condition: C
@@ -101,11 +103,11 @@ groups:
         data:
           - refId: A
             relativeTimeRange:
-              from: 7200
+              from: 3600
               to: 0
             datasourceUid: prometheus
             model:
-              expr: increase(battles_scraped_total[2h])
+              expr: increase(battles_scraped_total[30m]) + increase(battles_scraped_total[30m] offset 30m)
               instant: true
           - refId: C
             datasourceUid: __expr__
@@ -116,9 +118,9 @@ groups:
                 - evaluator:
                     type: lt
                     params: [1]
-        for: 10m
+        for: 30m
         annotations:
-          summary: "No new battles scraped in 2+ hours. Corpus scrape may be stuck or API may be down."
+          summary: "No new battles scraped in 1+ hours. Corpus scrape may be stuck or API may be down."
         labels:
           severity: warning
 

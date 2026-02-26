@@ -20,6 +20,12 @@ dependencies = [
 clash-stats = "tracker.cli:main"
 
 [project.optional-dependencies]
+ml = [
+    "scikit-learn>=1.4",
+    "umap-learn>=0.5",
+    "hdbscan>=0.8",
+    "pandas>=2.1",
+]
 dev = [
     "pytest",
 ]

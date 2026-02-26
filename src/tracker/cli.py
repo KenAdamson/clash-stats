@@ -145,6 +145,16 @@ Environment variables:
                         help="Max pagination depth per player (1=fast/recent, 5=full; default: 5)")
     parser.add_argument("--concurrency", type=int, default=1, metavar="N",
                         help="Number of parallel browser tabs for replay scraping (default: 1)")
+    # ML Phase 0 (ADR-001, ADR-003)
+    parser.add_argument("--build-features", action="store_true",
+                        help="Extract ML feature vectors for all replay games")
+    parser.add_argument("--train-embeddings", action="store_true",
+                        help="Fit UMAP embeddings and cluster games")
+    parser.add_argument("--clusters", action="store_true",
+                        help="Show game cluster profiles")
+    parser.add_argument("--similar", type=str, metavar="BATTLE_ID",
+                        help="Find games most similar to the given battle")
+
     parser.add_argument("--api-key", type=str, help="CR API key")
     parser.add_argument("--player-tag", type=str, help="Player tag (without #)")
     parser.add_argument("--api-url", type=str, help="API base URL (default: https://api.clashroyale.com/v1)")
@@ -392,6 +402,66 @@ Environment variables:
                   f"{n_cards} card interactions, {n_subs} sub-archetypes")
             print(f"  ✓ Results cached for dashboard")
 
+        if args.build_features:
+            from tracker.ml.card_metadata import CardVocabulary
+            from tracker.ml.features import build_feature_matrix
+            vocab = CardVocabulary(session)
+            battle_ids, matrix = build_feature_matrix(session, vocab)
+            if len(battle_ids) > 0:
+                print(f"  ✓ Features extracted: {len(battle_ids)} games, "
+                      f"{matrix.shape[1]} dimensions")
+            else:
+                print("  · No new games to process")
+
+        if args.train_embeddings:
+            from pathlib import Path
+            from tracker.ml.features import load_feature_matrix
+            from tracker.ml.umap_embeddings import train_embeddings
+            battle_ids, features = load_feature_matrix(session)
+            if len(battle_ids) < 20:
+                print(f"  ✗ Need at least 20 games with features (have {len(battle_ids)})")
+                print("    Run --build-features first")
+            else:
+                model_dir = Path(args.db).parent / "ml_models"
+                train_embeddings(session, battle_ids, features, model_dir=model_dir)
+                print(f"  ✓ Embeddings trained: {len(battle_ids)} games, "
+                      f"UMAP 15d + 3d, HDBSCAN clustered")
+
+        if args.clusters:
+            from tracker.ml.clustering import profile_clusters
+            profiles = profile_clusters(session)
+            if not profiles:
+                print("  ✗ No embeddings found. Run --train-embeddings first.")
+            else:
+                print(f"\n{'Cluster':<12} {'Size':>6} {'Win%':>6} {'Personal':>10}")
+                print("─" * 38)
+                for p in profiles:
+                    label = p["label"]
+                    print(f"{label:<12} {p['size']:>6} "
+                          f"{p['win_rate']:>5.1%} {p['personal_count']:>10}")
+
+        if args.similar:
+            from tracker.ml.similarity import find_similar
+            results = find_similar(session, args.similar)
+            if not results["corpus"] and not results["personal"]:
+                print(f"  ✗ No embedding found for {args.similar}")
+            else:
+                header = (f"{'Opponent':>16} {'Result':>7} {'Score':>7} "
+                          f"{'Rank':>9} {'Kernel':>7} {'Archetype':>22}")
+                for label, games in [("Personal", results["personal"]), ("Corpus", results["corpus"])]:
+                    if not games:
+                        continue
+                    print(f"\n{label} games similar to {args.similar}:")
+                    print(header)
+                    print("─" * 75)
+                    for r in games:
+                        score = f"{r.get('player_crowns', '?')}-{r.get('opponent_crowns', '?')}"
+                        pct = f"Top {r['percentile']*100:.1f}%"
+                        print(f"{r.get('opponent_name', '?'):>16} "
+                              f"{r.get('result', '?'):>7} {score:>7} "
+                              f"{pct:>9} {r['similarity']:>7.3f} "
+                              f"{r.get('archetype', '?'):>22}")
+
         # Default: show help + db status
         has_action = any([
             args.fetch, args.stats, args.deck_stats, args.crowns,
@@ -402,6 +472,8 @@ Environment variables:
             args.corpus_stats, args.corpus_add_priority,
             args.corpus_discover, args.corpus_locations, args.corpus_nemeses,
             args.sim_matchups, args.sim_interactions, args.sim_full,
+            args.build_features, args.train_embeddings,
+            args.clusters, args.similar,
         ])
         if not has_action:
             parser.print_help()

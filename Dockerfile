@@ -1,7 +1,7 @@
 FROM python:3.11-slim-bookworm
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git openssh-client curl cron \
+    git openssh-client curl cron build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -9,7 +9,9 @@ WORKDIR /app
 # Copy source and install in one step
 COPY pyproject.toml .
 COPY src/ /app/src/
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir ".[ml]" \
+    && apt-get purge -y --auto-remove build-essential \
+    && rm -rf /var/lib/apt/lists/*
 
 # Create data directory for SQLite volume mount
 RUN mkdir -p /app/data

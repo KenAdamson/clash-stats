@@ -475,9 +475,159 @@ function renderSimulation(data) {
     }
 }
 
+// ─── Embeddings 3D scatter plot (Plotly) ─────────────────────────
+
+let embeddingData = null;  // store for click lookups
+
+async function fetchEmbeddings() {
+    try {
+        const resp = await fetch("/api/embeddings");
+        if (!resp.ok) return;
+        const data = await resp.json();
+        embeddingData = data.points;
+        renderEmbeddingChart(data.points);
+    } catch (e) {
+        // No embeddings yet — hide section
+    }
+}
+
+function renderEmbeddingChart(points) {
+    if (!points || points.length === 0) return;
+
+    const section = document.getElementById("embeddings-section");
+    section.style.display = "";
+
+    // Separate into 4 categories matching previous color scheme
+    const corpusWins = points.filter(p => p.result === "win" && p.corpus !== "personal");
+    const corpusLosses = points.filter(p => p.result === "loss" && p.corpus !== "personal");
+    const personalWins = points.filter(p => p.result === "win" && p.corpus === "personal");
+    const personalLosses = points.filter(p => p.result === "loss" && p.corpus === "personal");
+
+    const makeTrace = (arr, name, color, size, opacity, border) => ({
+        type: "scatter3d",
+        mode: "markers",
+        name: name,
+        x: arr.map(p => p.x),
+        y: arr.map(p => p.y),
+        z: arr.map(p => p.z),
+        text: arr.map(p => `${p.opponent || "?"} — ${p.result} (${p.corpus})`),
+        customdata: arr.map(p => p.battle_id),
+        hovertemplate: "%{text}<extra></extra>",
+        marker: {
+            size: size,
+            color: color,
+            opacity: opacity,
+            line: border ? { color: "#ffffff", width: 0.5 } : undefined,
+        },
+    });
+
+    const data = [
+        makeTrace(corpusWins,     "Corpus Wins",   "rgb(52, 211, 153)",  2.5, 0.25, false),
+        makeTrace(corpusLosses,   "Corpus Losses",  "rgb(248, 113, 113)", 2.5, 0.25, false),
+        makeTrace(personalWins,   "My Wins",        "rgb(52, 211, 153)",  5,   0.9,  true),
+        makeTrace(personalLosses, "My Losses",      "rgb(248, 113, 113)", 5,   0.9,  true),
+    ];
+
+    const axisStyle = {
+        gridcolor: "#2a2d3a",
+        zerolinecolor: "#2a2d3a",
+        color: "#8b8fa3",
+        backgroundcolor: "#1a1d27",
+    };
+
+    const layout = {
+        paper_bgcolor: "#1a1d27",
+        font: { color: "#8b8fa3", family: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" },
+        margin: { l: 0, r: 0, t: 0, b: 0 },
+        scene: {
+            xaxis: { ...axisStyle, title: "UMAP-1" },
+            yaxis: { ...axisStyle, title: "UMAP-2" },
+            zaxis: { ...axisStyle, title: "UMAP-3" },
+            bgcolor: "#1a1d27",
+        },
+        legend: {
+            font: { size: 11, color: "#8b8fa3" },
+            bgcolor: "rgba(26, 29, 39, 0.8)",
+        },
+        showlegend: true,
+    };
+
+    const config = {
+        responsive: true,
+        displayModeBar: true,
+        modeBarButtonsToRemove: ["toImage", "sendDataToCloud"],
+        displaylogo: false,
+    };
+
+    Plotly.newPlot("embeddingPlot", data, layout, config);
+
+    // Click handler — customdata carries battle_id directly
+    document.getElementById("embeddingPlot").on("plotly_click", function(eventData) {
+        if (eventData.points.length > 0) {
+            const battleId = eventData.points[0].customdata;
+            if (battleId) {
+                fetchSimilar(battleId);
+            }
+        }
+    });
+}
+
+async function fetchSimilar(battleId) {
+    try {
+        const resp = await fetch(`/api/similar/${battleId}`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        renderSimilarPanel(battleId, data);
+    } catch (e) {
+        console.error("Failed to fetch similar games:", e);
+    }
+}
+
+function similarRows(games) {
+    return games.map(s => {
+        const score = `${s.player_crowns ?? "?"}-${s.opponent_crowns ?? "?"}`;
+        const resultClass = s.result === "win" ? "wr-good" : s.result === "loss" ? "wr-bad" : "";
+        const deck = (s.opponent_deck || []).join(", ");
+        const pct = (s.percentile * 100).toFixed(1);
+        const pctClass = s.percentile >= 0.95 ? "wr-good" : s.percentile >= 0.80 ? "wr-mid" : "wr-bad";
+        const kernel = s.similarity.toFixed(3);
+        return `<tr>
+            <td>${s.opponent_name || "Unknown"}</td>
+            <td class="${resultClass}">${s.result || "?"}</td>
+            <td>${score}</td>
+            <td class="${pctClass}">Top ${pct}%</td>
+            <td class="kernel-col">${kernel}</td>
+            <td class="archetype-col">${s.archetype || "?"}</td>
+            <td class="deck-col" title="${deck}">${deck}</td>
+        </tr>`;
+    }).join("");
+}
+
+function renderSimilarPanel(battleId, data) {
+    const panel = document.getElementById("similar-panel");
+    panel.style.display = "";
+    document.getElementById("similar-ref").textContent = battleId.slice(0, 12) + "…";
+
+    const thead = `<thead><tr><th>Opponent</th><th>Result</th><th>Score</th><th>Rank</th><th>Kernel</th><th>Archetype</th><th>Deck</th></tr></thead>`;
+    let html = "";
+
+    if (data.personal && data.personal.length > 0) {
+        html += `<h3 class="similar-subhead">My Similar Games</h3>
+            <table class="matchup-table">${thead}<tbody>${similarRows(data.personal)}</tbody></table>`;
+    }
+
+    if (data.corpus && data.corpus.length > 0) {
+        html += `<h3 class="similar-subhead">Corpus Similar Games</h3>
+            <table class="matchup-table">${thead}<tbody>${similarRows(data.corpus)}</tbody></table>`;
+    }
+
+    document.getElementById("similar-tables").innerHTML = html;
+}
+
 // ─── Init & poll ────────────────────────────────────────────────
 
 fetchAll();
 fetchSimulation();
+fetchEmbeddings();
 setInterval(fetchAll, POLL_INTERVAL);
 setInterval(fetchSimulation, POLL_INTERVAL);

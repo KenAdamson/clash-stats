@@ -94,13 +94,13 @@ These data points inform what analytics matter:
 The replay scraper (`replays.py`) transforms this from a results database into a full game telemetry system. Architecture Decision Records for the ML and simulation capabilities are in [`docs/adr/`](docs/adr/README.md):
 
 - **Monte Carlo Simulation** (ADR-002): Elixir economy modeling, opening hand analysis, Bayesian matchup estimation, card substitution analysis. No ML required — runs immediately on current data.
-- **Game State Embeddings** (ADR-003): TCN-based learned representations of game trajectories. Enables similarity search, cluster analysis, manifold geometry exploration.
+- **Game State Embeddings** (ADR-003): Phase 0 implemented — 50-dim feature extraction from replay data, two-stage supervised UMAP (50→15-dim analytical, 15→3-dim visualization), HDBSCAN clustering, Euclidean similarity search with percentile rank + Gaussian kernel. Interactive 3D scatter plot (Plotly.js) on the dashboard with click-to-similar. Future phases: TCN-based learned representations.
 - **Win Probability Estimator** (ADR-004): P(win) at every game tick. WPA (Win Probability Added) per card placement. Critical play identification.
 - **Opponent Prediction** (ADR-005): Sequence model predicting opponent's next card, timing, and position. Markov chain cycle tracking.
 - **Counterfactual Simulator** (ADR-006): CVAE generating synthetic game sequences under deck modifications. Deck gradient computation. Manifold-based deck exploration.
 - **Training Data Pipeline** (ADR-007): Top-ladder replay corpus for pre-training. Transfer learning to personal games. Meta shift detection.
 
-Dependencies: `torch`, `numpy`, `scikit-learn`, `umap-learn` (added to Docker image when ML features are active).
+Dependencies: `torch`, `numpy`, `scikit-learn`, `umap-learn`, `hdbscan`, `pandas` (ML extras installed via `pip install .[ml]` in the Docker image).
 
 ## Future Vision
 
@@ -109,12 +109,13 @@ The endgame is a unified analytics platform that runs as a Docker container with
 Priorities:
 1. ~~Fix the Evo tracking gap in the tracker (deck hash + schema)~~ Done
 2. ~~Add streak detection and rolling window stats~~ Done
-3. ~~Build a simple web dashboard~~ Done (Flask + Chart.js)
-4. Add tilt detection — if the tracker sees 3+ consecutive losses, surface a "you're tilting" warning
-5. Complete BVT on replay scraper pipeline
-6. Monte Carlo simulation framework (ADR-002) — first ML milestone, no training data minimum
-7. Top-ladder corpus collection (ADR-007) — pre-training data for neural models
-8. Game state embeddings (ADR-003) — foundation for all downstream ML
+3. ~~Build a simple web dashboard~~ Done (Flask + Chart.js + Plotly.js)
+4. ~~Game state embeddings Phase 0 (ADR-003)~~ Done — feature extraction, UMAP, clustering, 3D scatter plot
+5. Add tilt detection — if the tracker sees 3+ consecutive losses, surface a "you're tilting" warning
+6. Complete BVT on replay scraper pipeline
+7. Monte Carlo simulation framework (ADR-002) — first ML milestone, no training data minimum
+8. Top-ladder corpus collection (ADR-007) — pre-training data for neural models
+9. Game state embeddings Phase 1+ (ADR-003) — TCN-based learned representations, manifold visualization
 
 ## Deployment
 
@@ -156,7 +157,14 @@ clash-stats/
 │       ├── cli.py               ← argparse + main() dispatch
 │       ├── alembic/             ← Alembic migration config + versions
 │       ├── simulation/          ← (planned) Monte Carlo framework (ADR-002)
-│       ├── ml/                  ← (planned) Neural models (ADR-003 through ADR-006)
+│       ├── ml/                  ← ML Phase 0: feature extraction, UMAP embeddings, clustering, similarity
+│       │   ├── __init__.py
+│       │   ├── card_metadata.py ← CardVocabulary — dynamic card→index mapping from DB
+│       │   ├── features.py      ← 50-dim feature extraction from replay data
+│       │   ├── umap_embeddings.py ← Two-stage UMAP (50→15→3) + supervised fitting
+│       │   ├── clustering.py    ← HDBSCAN clustering + cluster profiling
+│       │   ├── similarity.py    ← Euclidean distance + percentile rank + Gaussian kernel
+│       │   └── storage.py       ← GameFeature/GameEmbedding ORM models, numpy↔BLOB
 │       └── tests/
 │           ├── conftest.py      ← Shared fixtures
 │           ├── fixtures/        ← Static HTML fixtures for replay parser tests
@@ -174,8 +182,8 @@ clash-stats/
 ```
 
 **Container requirements:**
-- Base image: `python:3.11-alpine`
-- Dependencies managed via `pyproject.toml`, installed with `pip install .` in the Dockerfile
+- Base image: `python:3.11-slim-bookworm`
+- Dependencies managed via `pyproject.toml`, installed with `pip install .[ml]` in the Dockerfile
 - SQLite database lives on a Docker volume mount (`./data:/app/data`) so it survives container rebuilds
 - Environment variables via `.env` file: `CR_API_KEY`, `CR_PLAYER_TAG`
 - BusyBox crond schedule: poll every 4 hours (1-2 games/day play rate, 25-game API window means zero risk of missing games)

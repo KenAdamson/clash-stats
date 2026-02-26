@@ -303,6 +303,56 @@ summary {
     overflow-y: auto;
 }
 
+/* Embeddings scatter plot */
+.embedding-chart {
+    height: 600px;
+    width: 100%;
+}
+
+.similar-panel {
+    margin-top: 1rem;
+    padding: 1rem;
+    background: rgba(79, 140, 255, 0.05);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+
+.similar-panel h3 {
+    margin-bottom: 0.75rem;
+}
+
+.similar-subhead {
+    margin-top: 0.75rem;
+    margin-bottom: 0.4rem;
+    font-size: 0.85rem;
+    color: var(--accent);
+}
+
+.similar-subhead:first-child {
+    margin-top: 0;
+}
+
+.kernel-col {
+    font-family: "SF Mono", "Fira Code", monospace;
+    font-size: 0.8rem;
+    color: var(--text-dim);
+}
+
+.archetype-col {
+    color: var(--accent);
+    font-weight: 500;
+    white-space: nowrap;
+}
+
+.deck-col {
+    font-size: 0.75rem;
+    color: var(--text-dim);
+    max-width: 300px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 /* Responsive */
 @media (max-width: 768px) {
     .split-layout { grid-template-columns: 1fr; }
