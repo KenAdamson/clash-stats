@@ -137,6 +137,8 @@ Environment variables:
                         help="Discover players from regional leaderboards (deeper than global)")
     parser.add_argument("--corpus-nemeses", action="store_true",
                         help="Add opponents you've lost to into the corpus")
+    parser.add_argument("--corpus-combined", action="store_true",
+                        help="Combined battle+replay scrape (chains CR API and RoyaleAPI per player)")
     parser.add_argument("--sim-matchups", action="store_true",
                         help="Run Monte Carlo matchup analysis (ADR-002)")
     parser.add_argument("--sim-interactions", action="store_true",
@@ -320,6 +322,32 @@ Environment variables:
             print(f"  ✓ Corpus replays: {result['total_players']} players, "
                   f"{result['total_replays']} replays")
             flush_metrics("corpus_replays")
+
+        if args.corpus_combined:
+            if not api_key:
+                print("Error: --api-key required for combined scrape")
+                print("       Or set CR_API_KEY environment variable")
+                return 1
+            from tracker.corpus_scraper import run_scrape_corpus_combined
+            from tracker.metrics import flush_metrics
+            api = ClashRoyaleAPI(api_key, base_url=api_url)
+            replays_per_player = (
+                args.replays_per_player
+                or int(os.environ.get("REPLAYS_PER_PLAYER", "25"))
+            )
+            concurrency = args.concurrency or int(
+                os.environ.get("REPLAY_CONCURRENCY", "1")
+            )
+            result = run_scrape_corpus_combined(
+                session, api, limit=args.corpus_limit,
+                replays_per_player=replays_per_player,
+                max_pages=args.max_pages,
+                concurrency=concurrency,
+            )
+            print(f"  ✓ Combined scrape: {result['total_players']} players, "
+                  f"{result['total_new_battles']} battles, "
+                  f"{result['total_replays']} replays")
+            flush_metrics("corpus_combined")
 
         if args.corpus_add_priority:
             from tracker.corpus import add_manual_player
@@ -556,6 +584,7 @@ Environment variables:
             args.trophy_history, args.archetypes,
             args.replay_login, args.replay_check, args.fetch_replays,
             args.corpus_update, args.corpus_scrape, args.corpus_replays,
+            args.corpus_combined,
             args.corpus_stats, args.corpus_add_priority,
             args.corpus_discover, args.corpus_locations, args.corpus_nemeses,
             args.sim_matchups, args.sim_interactions, args.sim_full,

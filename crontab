@@ -4,8 +4,8 @@ PATH=/usr/local/bin:/usr/bin:/bin
 * * * * * root /app/fetch.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Publish stats JSON to GitHub every 5 minutes
 */5 * * * * root /app/publish_wrapper.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
-# Scrape battles for corpus players every 30 minutes
-*/30 * * * * root /app/corpus_scrape.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
+# Combined corpus scrape: battles + replays in one pass (every 30 min)
+*/30 * * * * root /app/corpus_combined.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Weekly: refresh top-ladder player tags (Monday 6am UTC)
 0 6 * * 1 root /app/corpus_update.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Refresh simulation results after corpus scrape (every 6h, offset 2h)
@@ -14,8 +14,6 @@ PATH=/usr/local/bin:/usr/bin:/bin
 # --- Replay scrapes ---
 # Personal replays every 15 min (offset from corpus to avoid 429s)
 5,20,35,50 * * * * root /app/replay_wrapper.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
-# Corpus replays every 15 min (200 players, 8 tabs, 2 pages)
-*/15 * * * * root /app/corpus_replays.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 
 # --- ML training ---
 # Weekly: retrain TCN on full corpus (Sunday 4am UTC)

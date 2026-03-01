@@ -143,6 +143,26 @@ clash-stats --corpus-nemeses --player-tag "${CR_PLAYER_TAG}" --db ${DB_PATH}
 EOF
 chmod +x /app/corpus_nemeses.sh
 
+# Combined corpus scrape: battles + replays in one pass
+cat > /app/corpus_combined.sh << EOF
+#!/bin/sh
+LOCKFILE=/tmp/corpus_combined.lock
+if [ -f "\$LOCKFILE" ]; then
+    echo "corpus_combined: previous run still active, skipping"
+    exit 0
+fi
+trap 'rm -f "\$LOCKFILE"' EXIT
+touch "\$LOCKFILE"
+export CR_API_KEY="${CR_API_KEY}"
+[ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
+export BROWSER_WS_URL="${BROWSER_WS_URL:-http://cr-browser:9223}"
+export ROYALEAPI_SESSION_PATH="${ROYALEAPI_SESSION_PATH:-/app/data/royaleapi_session.json}"
+export REPLAYS_PER_PLAYER="${REPLAYS_PER_PLAYER:-25}"
+export PYTHONUNBUFFERED=1
+clash-stats --corpus-combined --corpus-limit 200 --concurrency 12 --max-pages 2 --db ${DB_PATH}
+EOF
+chmod +x /app/corpus_combined.sh
+
 # TCN retraining
 cat > /app/tcn_train.sh << EOF
 #!/bin/sh
@@ -159,9 +179,8 @@ echo "  Schedule:   every minute (crond)"
 echo "  Database:   ${DB_PATH}"
 echo "  Dashboard:  http://0.0.0.0:8078"
 echo "  Stats push: every 5 min → ${PUSH_DEST}"
-echo "  Replays:    every 15 min (personal + corpus)"
-echo "  Corpus bat: every 30m (200 players, ~7 min/run)"
-echo "  Corpus rep: every 15m (200 players, 12 tabs, 2 pages)"
+echo "  Replays:    every 15 min (personal)"
+echo "  Corpus:     every 30m combined (battles + replays, 200 players, 12 tabs)"
 echo "  Discovery:  daily 3am opponent network + weekly Mon 7am regional leaderboards"
 echo "  Metrics:    http://0.0.0.0:8001/metrics (Prometheus)"
 echo "  noVNC:      http://0.0.0.0:6080 (browser sidecar)"

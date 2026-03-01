@@ -407,3 +407,288 @@ def run_scrape_corpus_replays(
             replays_per_player, max_pages, concurrency,
         )
     )
+
+
+async def scrape_corpus_combined(
+    session: Session,
+    api: ClashRoyaleAPI,
+    browser_ws: str | None = None,
+    state_path: str | None = None,
+    limit: int = 200,
+    replays_per_player: int = 25,
+    max_pages: int = 2,
+    concurrency: int = 12,
+) -> dict:
+    """Fetch battles AND replays for corpus players in a single pass.
+
+    For each batch of players: fetches battles from the CR API sequentially,
+    then immediately dispatches the same batch to browser tabs for concurrent
+    replay scraping. This maximizes the overlap between the CR API's battle
+    window and RoyaleAPI's cached battles.
+
+    Args:
+        session: SQLAlchemy session.
+        api: ClashRoyaleAPI client.
+        browser_ws: CDP endpoint URL for the Chromium browser.
+        state_path: Path to RoyaleAPI session state JSON.
+        limit: Maximum corpus players to process.
+        replays_per_player: Max replays per player per run.
+        max_pages: Pagination depth on RoyaleAPI.
+        concurrency: Number of parallel browser tabs.
+
+    Returns:
+        Dict with combined scrape statistics.
+    """
+    from playwright.async_api import async_playwright
+    from sqlalchemy import select, func
+    from tracker.models import PlayerCorpus
+
+    cdp_url = browser_ws or os.environ.get("BROWSER_WS_URL", DEFAULT_BROWSER_CDP)
+    save_path = state_path or os.environ.get(
+        "ROYALEAPI_SESSION_PATH", DEFAULT_SESSION_PATH
+    )
+
+    # Mark stale replays once at start
+    mark_stale_replays(session)
+
+    # Set corpus gauge
+    total_active = session.scalar(
+        select(func.count()).select_from(PlayerCorpus).where(PlayerCorpus.active == 1)
+    ) or 0
+    CORPUS_PLAYERS_ACTIVE.set(total_active)
+
+    players = get_corpus_players(session, active_only=True, limit=limit)
+    if not players:
+        logger.info("No active corpus players.")
+        return {
+            "total_players": 0, "total_new_battles": 0, "total_replays": 0,
+            "deactivated": 0, "battle_errors": 0, "replay_errors": 0,
+            "auth_error": False, "session_expired": False,
+        }
+
+    effective_concurrency = min(concurrency, len(players))
+    logger.info(
+        "Combined scrape: %d corpus players (%d concurrent tabs).",
+        len(players), effective_concurrency,
+    )
+
+    stats = {
+        "total_players": 0,
+        "total_new_battles": 0,
+        "total_replays": 0,
+        "deactivated": 0,
+        "battle_errors": 0,
+        "replay_errors": 0,
+        "auth_error": False,
+        "session_expired": False,
+    }
+    consecutive_auth_failures = 0
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.connect_over_cdp(cdp_url)
+        context = await browser.new_context(
+            storage_state=save_path,
+            viewport={"width": 1280, "height": 720},
+        )
+
+        # Create tab pool with resource blocking
+        pages = []
+        for _ in range(effective_concurrency):
+            page = await context.new_page()
+            await page.route(
+                "**/*.{png,jpg,jpeg,gif,svg,ico,woff,woff2,ttf,eot,css}",
+                lambda route: route.abort(),
+            )
+            await page.route("**/analytics**", lambda route: route.abort())
+            await page.route("**/ads**", lambda route: route.abort())
+            await page.route("**/tracking**", lambda route: route.abort())
+            await page.route("**/google-analytics**", lambda route: route.abort())
+            await page.route("**/gtag**", lambda route: route.abort())
+            await page.route("**/adsbygoogle**", lambda route: route.abort())
+            pages.append(page)
+        logger.info("Opened %d browser tabs (resources blocked).", len(pages))
+
+        async def _replay_worker(page, player, stagger_secs=0):
+            """Scrape replays for one player on one tab."""
+            if stagger_secs > 0:
+                await asyncio.sleep(stagger_secs)
+            tag = player.player_tag.lstrip("#")
+            count = await fetch_replays_for_player(
+                session, page, tag,
+                limit=replays_per_player,
+                max_pages=max_pages,
+            )
+            return player, tag, count
+
+        # Process players in batches of `concurrency`
+        for batch_start in range(0, len(players), effective_concurrency):
+            if stats["auth_error"] or stats["session_expired"]:
+                break
+            if stats["total_replays"] >= MAX_REPLAYS_PER_RUN:
+                logger.info("Per-run replay limit reached (%d).", MAX_REPLAYS_PER_RUN)
+                break
+
+            batch = players[batch_start:batch_start + effective_concurrency]
+
+            # --- Phase 1: Fetch battles from CR API (sequential) ---
+            batch_battles = 0
+            for player in batch:
+                if stats["auth_error"]:
+                    break
+                tag = player.player_tag.lstrip("#")
+                try:
+                    battles = api.get_battle_log(tag)
+                    new_count = 0
+
+                    for battle in battles:
+                        battle_type = battle.get("type", "")
+                        if battle_type not in ("PvP", "pathOfLegend", "riverRacePvP"):
+                            continue
+                        if battle_type == "PvP":
+                            team = battle.get("team", [{}])[0]
+                            trophies = team.get("startingTrophies", 0)
+                            if trophies and trophies < 7000:
+                                continue
+
+                        battle_id, is_new = analytics.store_battle(
+                            session, battle, player.player_tag, corpus="top_ladder"
+                        )
+                        if is_new:
+                            new_count += 1
+
+                    mark_player_scraped(session, player.player_tag, games=new_count)
+                    batch_battles += new_count
+                    stats["total_new_battles"] += new_count
+
+                    if new_count > 0:
+                        logger.info(
+                            "  %s (%s): %d new battles",
+                            player.player_name or tag, tag, new_count,
+                        )
+
+                    time.sleep(DELAY_BETWEEN_PLAYERS)
+
+                except NotFoundError:
+                    logger.warning("Player %s not found (404), deactivating.", tag)
+                    player.active = 0
+                    session.commit()
+                    stats["deactivated"] += 1
+                    CORPUS_PLAYERS_DEACTIVATED.inc()
+
+                except AuthError as e:
+                    logger.error("API auth failed — check CR_API_KEY: %s", e)
+                    stats["auth_error"] = True
+                    break
+
+                except (RateLimitError, ServerError, ConnectionError_) as e:
+                    logger.warning("Battle fetch transient error for %s: %s", tag, e)
+                    stats["battle_errors"] += 1
+
+                except Exception as e:
+                    logger.warning("Battle fetch unexpected error for %s: %s", tag, e)
+                    stats["battle_errors"] += 1
+
+            if stats["auth_error"]:
+                break
+
+            logger.info(
+                "Batch %d: %d new battles from %d players. Starting replay scrape...",
+                batch_start // effective_concurrency + 1,
+                batch_battles, len(batch),
+            )
+
+            # --- Phase 2: Scrape replays from RoyaleAPI (concurrent) ---
+            # Filter to active players only (some may have been deactivated above)
+            active_batch = [p for p in batch if p.active == 1]
+            if not active_batch:
+                continue
+
+            tasks = [
+                _replay_worker(pages[i], active_batch[i], stagger_secs=i * 2)
+                for i in range(len(active_batch))
+            ]
+
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.warning("Replay worker error: %s", result)
+                    stats["replay_errors"] += 1
+                    continue
+
+                player, tag, count = result
+
+                if count == -1:
+                    consecutive_auth_failures += 1
+                    stats["replay_errors"] += 1
+                    if consecutive_auth_failures >= 3:
+                        logger.error(
+                            "RoyaleAPI session expired — 3 consecutive auth "
+                            "failures. Stopping combined scrape."
+                        )
+                        stats["session_expired"] = True
+                else:
+                    consecutive_auth_failures = 0
+                    if count > 0:
+                        mark_player_scraped(session, player.player_tag, replays=count)
+                        stats["total_replays"] += count
+                        logger.info(
+                            "  %s (%s): %d replays",
+                            player.player_name or tag, tag, count,
+                        )
+
+                stats["total_players"] += 1
+
+            # Periodic metric flush after each batch
+            flush_metrics("corpus_combined")
+            logger.info(
+                "Progress: %d/%d players, %d battles, %d replays so far",
+                stats["total_players"], len(players),
+                stats["total_new_battles"], stats["total_replays"],
+            )
+
+        # Cleanup
+        for page in pages:
+            await page.close()
+        await context.close()
+
+    # Record metrics
+    if stats["auth_error"] or stats["session_expired"]:
+        outcome = "failed"
+    elif stats["battle_errors"] + stats["replay_errors"] > 0:
+        outcome = "partial"
+    else:
+        outcome = "success"
+    SCRAPE_RUNS.labels(scrape_type="combined", outcome=outcome).inc()
+
+    logger.info(
+        "Combined scrape: %d players, %d battles, %d replays, "
+        "%d battle errors, %d replay errors%s%s",
+        stats["total_players"],
+        stats["total_new_battles"],
+        stats["total_replays"],
+        stats["battle_errors"],
+        stats["replay_errors"],
+        " — STOPPED: auth error" if stats["auth_error"] else "",
+        " — STOPPED: session expired" if stats["session_expired"] else "",
+    )
+    return stats
+
+
+def run_scrape_corpus_combined(
+    session: Session,
+    api: ClashRoyaleAPI,
+    browser_ws: str | None = None,
+    state_path: str | None = None,
+    limit: int = 200,
+    replays_per_player: int = 25,
+    max_pages: int = 2,
+    concurrency: int = 12,
+) -> dict:
+    """Synchronous wrapper for scrape_corpus_combined."""
+    return asyncio.run(
+        scrape_corpus_combined(
+            session, api, browser_ws, state_path, limit,
+            replays_per_player, max_pages, concurrency,
+        )
+    )
