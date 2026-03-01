@@ -93,9 +93,10 @@ groups:
         labels:
           severity: warning
 
-      # Battle scraper silent — no new battles in 1 hour
-      # Uses sum of two non-overlapping 30m windows to avoid restart artifacts
-      # from a single increase() spanning a counter reset.
+      # Battle scraper silent — no fetch cycles completed in 20 minutes
+      # Checks scrape_runs_total (increments on every fetch, even with 0 new battles).
+      # Uses noDataState: OK to avoid false alarms on container restarts (counter
+      # resets cause Prometheus to report no data until the second scrape).
       - uid: scraper-silent
         title: Battle Scraper Silent
         condition: C
@@ -103,11 +104,11 @@ groups:
         data:
           - refId: A
             relativeTimeRange:
-              from: 3600
+              from: 1200
               to: 0
             datasourceUid: prometheus
             model:
-              expr: increase(battles_scraped_total[30m]) + increase(battles_scraped_total[30m] offset 30m)
+              expr: increase(scrape_runs_total{scrape_type="battles"}[20m])
               instant: true
           - refId: C
             datasourceUid: __expr__
@@ -118,9 +119,9 @@ groups:
                 - evaluator:
                     type: lt
                     params: [1]
-        for: 30m
+        for: 10m
         annotations:
-          summary: "No new battles scraped in 1+ hours. Corpus scrape may be stuck or API may be down."
+          summary: "No battle fetch cycles completed in 20+ minutes. Scraper process may be down."
         labels:
           severity: warning
 

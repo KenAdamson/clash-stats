@@ -37,7 +37,8 @@ logger = logging.getLogger(__name__)
 ROYALEAPI_BASE = "https://royaleapi.com"
 DEFAULT_BROWSER_CDP = "http://cr-browser:9223"
 DEFAULT_SESSION_PATH = "/app/data/royaleapi_session.json"
-FETCH_DELAY = 3  # seconds between page navigations
+FETCH_DELAY = 1.5  # seconds between page navigations
+POST_LOAD_WAIT = 1000  # ms to wait after page load before extracting links
 REPLAY_FETCH_DELAY = 1.5  # seconds between XHR replay fetches (no page nav)
 
 
@@ -240,10 +241,19 @@ def store_replay_data(session: Session, battle_id: str, data: dict) -> None:
 async def _navigate_authenticated(page, url: str) -> None:
     """Navigate to a RoyaleAPI URL, detecting auth failures.
 
-    Raises SessionExpiredError if redirected to login page.
+    Raises SessionExpiredError if redirected to login page or if
+    Cloudflare blocks with ERR_BLOCKED_BY_RESPONSE (stale cookies).
     Circuit opens after 3 consecutive auth failures (5 min cooldown).
     """
-    await page.goto(url, wait_until="load", timeout=60000)
+    try:
+        await page.goto(url, wait_until="load", timeout=60000)
+    except Exception as e:
+        if "ERR_BLOCKED_BY_RESPONSE" in str(e):
+            SESSION_EXPIRY.inc()
+            raise SessionExpiredError(
+                "Cloudflare blocked navigation (stale cookies) — re-login required"
+            ) from e
+        raise
     await _wait_for_cloudflare(page)
 
     if "/login" in page.url:
@@ -363,6 +373,10 @@ async def start_login(browser_ws: str | None = None) -> None:
     The user completes Google SSO by interacting with the browser
     via noVNC at http://<host>:6080.
 
+    Clears stale cookies for royaleapi.com first so Cloudflare
+    can issue a fresh challenge instead of blocking on expired
+    cf_clearance.
+
     Args:
         browser_ws: CDP endpoint URL for the Chromium browser.
     """
@@ -375,11 +389,15 @@ async def start_login(browser_ws: str | None = None) -> None:
         contexts = browser.contexts
         if contexts:
             context = contexts[0]
+            # Clear stale cookies to avoid ERR_BLOCKED_BY_RESPONSE from
+            # expired cf_clearance / session cookies
+            await context.clear_cookies()
+            logger.info("Cleared stale browser cookies.")
             page = context.pages[0] if context.pages else await context.new_page()
         else:
             context = await browser.new_context(viewport={"width": 1280, "height": 720})
             page = await context.new_page()
-        await page.goto(f"{ROYALEAPI_BASE}/login", wait_until="networkidle")
+        await page.goto(f"{ROYALEAPI_BASE}/login", wait_until="load", timeout=60000)
         logger.info("Navigated to RoyaleAPI login page. Complete login via noVNC.")
 
 
@@ -464,7 +482,7 @@ async def fetch_replays(
             Battle.replay_fetched == 0,
             Battle.battle_type.in_(["PvP", "pathOfLegend", "riverRacePvP"]),
         )
-        .filter(Battle.player_tag.like(f"%{tag_clean}%"))
+        .filter(Battle.player_tag == f"#{tag_clean}")
         .order_by(Battle.battle_time.desc())
         .limit(limit)
         .all()
@@ -514,8 +532,10 @@ async def fetch_replays(
             return -1
 
         # Paginate through battle pages to collect all replay links
-        await page.wait_for_timeout(3000)
-        replay_links = await _paginate_and_extract_links(page, tag_clean, max_pages=max_pages)
+        await page.wait_for_timeout(POST_LOAD_WAIT)
+        replay_links = await _paginate_and_extract_links(
+            page, tag_clean, unfetched, max_pages=max_pages,
+        )
         logger.info("Found %d replay links for %s.", len(replay_links), tag_clean)
 
         for battle in unfetched:
@@ -649,7 +669,7 @@ async def fetch_replays_for_player(
             Battle.replay_fetched == 0,
             Battle.battle_type.in_(["PvP", "pathOfLegend", "riverRacePvP"]),
         )
-        .filter(Battle.player_tag.like(f"%{tag_clean}%"))
+        .filter(Battle.player_tag == f"#{tag_clean}")
         .order_by(Battle.battle_time.desc())
         .limit(limit)
         .all()
@@ -675,8 +695,10 @@ async def fetch_replays_for_player(
         return -1
 
     # Paginate to discover replay links
-    await page.wait_for_timeout(3000)
-    replay_links = await _paginate_and_extract_links(page, tag_clean, max_pages=max_pages)
+    await page.wait_for_timeout(POST_LOAD_WAIT)
+    replay_links = await _paginate_and_extract_links(
+        page, tag_clean, unfetched, max_pages=max_pages,
+    )
     logger.info("Found %d replay links for %s.", len(replay_links), tag_clean)
 
     for battle in unfetched:
@@ -771,16 +793,21 @@ async def fetch_replays_for_player(
 
 
 async def _paginate_and_extract_links(
-    page, tag: str, max_pages: int = 5,
+    page, tag: str, unfetched: list | None = None, max_pages: int = 5,
 ) -> list[dict]:
-    """Follow pagination on the battles page to collect all replay links.
+    """Follow pagination on the battles page to collect replay links.
 
     RoyaleAPI shows ~5 battles per page with cursor-based pagination
     (next page link: /battles/history?before={timestamp}).
 
+    Exits early when all unfetched battles have been matched (avoids
+    crawling pages that can't contain anything we need).
+
     Args:
         page: Playwright page.
         tag: Player tag (for logging).
+        unfetched: List of Battle objects we're looking for. When all are
+            matched, pagination stops regardless of max_pages.
         max_pages: Safety cap on pages to traverse.
 
     Returns:
@@ -788,13 +815,42 @@ async def _paginate_and_extract_links(
     """
     all_links = []
 
+    # Build a set of (player_tag, opponent_tag, player_crowns, opponent_crowns)
+    # for fast matching so we know when to stop paginating
+    unmatched = set()
+    if unfetched:
+        for b in unfetched:
+            key = (
+                (b.player_tag or "").lstrip("#"),
+                (b.opponent_tag or "").lstrip("#"),
+                b.player_crowns,
+                b.opponent_crowns,
+            )
+            unmatched.add(key)
+
     for page_num in range(max_pages):
         links = await _extract_replay_links(page)
         all_links.extend(links)
+
+        # Check how many unfetched battles this page matched
+        for link in links:
+            key = (
+                link.get("team_tags", "").lstrip("#"),
+                link.get("opponent_tags", "").lstrip("#"),
+                link.get("team_crowns"),
+                link.get("opponent_crowns"),
+            )
+            unmatched.discard(key)
+
         logger.info(
-            "Page %d: %d replay buttons for %s (total: %d)",
-            page_num + 1, len(links), tag, len(all_links),
+            "Page %d: %d replay buttons for %s (total: %d, %d unmatched)",
+            page_num + 1, len(links), tag, len(all_links), len(unmatched),
         )
+
+        # Early exit: all unfetched battles have been found
+        if unfetched and not unmatched:
+            logger.info("All unfetched battles matched — skipping remaining pages for %s.", tag)
+            break
 
         # Find the "next page" pagination link
         next_link = await page.query_selector(

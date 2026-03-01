@@ -14,10 +14,11 @@ from tracker.models import Base
 ALEMBIC_DIR = Path(__file__).parent / "alembic"
 
 
-def _set_sqlite_wal_mode(dbapi_conn, connection_record):
-    """Enable WAL mode for concurrent read/write access."""
+def _set_sqlite_pragmas(dbapi_conn, connection_record):
+    """Enable WAL mode and set busy timeout for concurrent access."""
     cursor = dbapi_conn.cursor()
     cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA busy_timeout=5000")
     cursor.close()
 
 
@@ -31,7 +32,7 @@ def get_engine(db_path: str) -> Engine:
         SQLAlchemy Engine instance.
     """
     engine = create_engine(f"sqlite:///{db_path}", echo=False)
-    event.listen(engine, "connect", _set_sqlite_wal_mode)
+    event.listen(engine, "connect", _set_sqlite_pragmas)
     return engine
 
 

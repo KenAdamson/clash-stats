@@ -62,6 +62,12 @@ def fetch_and_store(
 
         print(f"  ✓ Fetched {len(battles)} battles, {new_count} NEW")
         print(f"  ✓ Total tracked: {analytics.get_total_battles(session):,} battles")
+
+        # Tilt detection after every fetch
+        if new_count > 0:
+            from tracker.ml.tilt_detector import detect_tilt, print_tilt_warning
+            tilt_status = detect_tilt(session)
+            print_tilt_warning(tilt_status)
     except Exception as e:
         print(f"  ✗ Error fetching battles: {e}")
 
@@ -146,6 +152,10 @@ Environment variables:
     parser.add_argument("--concurrency", type=int, default=1, metavar="N",
                         help="Number of parallel browser tabs for replay scraping (default: 1)")
     # ML Phase 0 (ADR-001, ADR-003)
+    parser.add_argument("--tilt-check", action="store_true",
+                        help="Check recent games for tilt patterns")
+    parser.add_argument("--train-tcn", action="store_true",
+                        help="Train TCN embedding model (ADR-003 Phase 1)")
     parser.add_argument("--build-features", action="store_true",
                         help="Extract ML feature vectors for all replay games")
     parser.add_argument("--train-embeddings", action="store_true",
@@ -154,6 +164,19 @@ Environment variables:
                         help="Show game cluster profiles")
     parser.add_argument("--similar", type=str, metavar="BATTLE_ID",
                         help="Find games most similar to the given battle")
+    parser.add_argument("--embed-new", action="store_true",
+                        help="Embed new games using trained TCN (inference only, no retraining)")
+    parser.add_argument("--mark-stale-replays", action="store_true",
+                        help="Mark unfetched battles older than 7 days as permanently missed")
+    parser.add_argument("--manifold", action="store_true",
+                        help="Profile the 3-leg TCN embedding manifold")
+    # Temporal analysis
+    parser.add_argument("--matchup-dive", type=str, metavar="ARCHETYPE",
+                        help="Deep temporal analysis against an archetype (e.g. 'Hog Cycle')")
+    parser.add_argument("--broken-cycle", type=str, nargs="+", metavar="A:B",
+                        help="Detect broken synergy pairs (kebab-case, e.g. miner:graveyard)")
+    parser.add_argument("--min-trophies", type=int, metavar="N",
+                        help="Minimum opponent trophies (used with --matchup-dive)")
 
     parser.add_argument("--api-key", type=str, help="CR API key")
     parser.add_argument("--player-tag", type=str, help="Player tag (without #)")
@@ -176,7 +199,8 @@ Environment variables:
                 print("       Or set CR_API_KEY and CR_PLAYER_TAG environment variables")
                 return 1
             fetch_and_store(api_key, player_tag.replace("#", ""), session, api_url=api_url)
-            from tracker.metrics import flush_metrics
+            from tracker.metrics import SCRAPE_RUNS, flush_metrics
+            SCRAPE_RUNS.labels(scrape_type="battles", outcome="success").inc()
             flush_metrics("fetch")
 
         export_fmt = args.export
@@ -402,6 +426,19 @@ Environment variables:
                   f"{n_cards} card interactions, {n_subs} sub-archetypes")
             print(f"  ✓ Results cached for dashboard")
 
+        if args.tilt_check:
+            from tracker.ml.tilt_detector import detect_tilt, print_tilt_warning
+            tilt_status = detect_tilt(session)
+            if tilt_status.level == "none":
+                print(f"\n  {tilt_status.message}")
+            else:
+                print_tilt_warning(tilt_status)
+
+        if args.train_tcn:
+            from pathlib import Path
+            from tracker.ml.training import train_tcn
+            train_tcn(session, model_dir=Path(args.db).parent / "ml_models")
+
         if args.build_features:
             from tracker.ml.card_metadata import CardVocabulary
             from tracker.ml.features import build_feature_matrix
@@ -462,6 +499,56 @@ Environment variables:
                               f"{pct:>9} {r['similarity']:>7.3f} "
                               f"{r.get('archetype', '?'):>22}")
 
+        if args.embed_new:
+            from pathlib import Path
+            from tracker.ml.training import embed_new
+            embed_new(session, model_dir=Path(args.db).parent / "ml_models")
+
+        if args.mark_stale_replays:
+            from tracker.corpus_scraper import mark_stale_replays
+            count = mark_stale_replays(session)
+            print(f"  ✓ Marked {count:,} stale battles as permanently missed")
+
+        if args.manifold:
+            from tracker.ml.cluster_profiler import profile_manifold
+            data = profile_manifold(session)
+            if "error" in data:
+                print(f"\n  ✗ {data['error']}")
+            elif export_fmt:
+                export_data(data, export_fmt, export_out)
+            else:
+                reporting.print_manifold(data)
+
+        if args.matchup_dive:
+            from tracker.temporal_analysis import matchup_deep_dive
+            data = matchup_deep_dive(session, args.matchup_dive, min_trophies=args.min_trophies)
+            if "error" in data and data.get("game_count", -1) == 0:
+                print(f"\n  ✗ {data['error']}")
+            elif "error" in data:
+                print(f"\n  ✗ {data['error']}")
+                if "known" in data:
+                    print(f"    Known archetypes: {', '.join(data['known'][:10])}...")
+            elif export_fmt:
+                export_data(data, export_fmt, export_out)
+            else:
+                reporting.print_matchup_dive(data)
+
+        if args.broken_cycle:
+            from tracker.temporal_analysis import broken_cycle
+            pairs = []
+            for spec in args.broken_cycle:
+                parts = spec.split(":")
+                if len(parts) != 2:
+                    print(f"  ✗ Invalid pair format '{spec}' — use card-a:card-b")
+                    continue
+                pairs.append((parts[0], parts[1]))
+            if pairs:
+                results = broken_cycle(session, pairs)
+                if export_fmt:
+                    export_data(results, export_fmt, export_out)
+                else:
+                    reporting.print_broken_cycle(results)
+
         # Default: show help + db status
         has_action = any([
             args.fetch, args.stats, args.deck_stats, args.crowns,
@@ -472,8 +559,9 @@ Environment variables:
             args.corpus_stats, args.corpus_add_priority,
             args.corpus_discover, args.corpus_locations, args.corpus_nemeses,
             args.sim_matchups, args.sim_interactions, args.sim_full,
-            args.build_features, args.train_embeddings,
-            args.clusters, args.similar,
+            args.tilt_check, args.train_tcn, args.build_features, args.train_embeddings,
+            args.clusters, args.similar, args.embed_new, args.manifold,
+            args.matchup_dive, args.broken_cycle, args.mark_stale_replays,
         ])
         if not has_action:
             parser.print_help()

@@ -11,13 +11,15 @@ PATH=/usr/local/bin:/usr/bin:/bin
 # Refresh simulation results after corpus scrape (every 6h, offset 2h)
 0 2,8,14,20 * * * root /app/sim_refresh.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 
-# --- Replay scrapes staggered to avoid 429s from RoyaleAPI ---
-# Personal replays at :05 and :35
-5,35 * * * * root /app/replay_wrapper.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
-# Priority corpus replays at :00/:15/:30/:45 (small batch, 4 tabs)
-*/15 * * * * root /app/corpus_replays_priority.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
-# Full corpus replays at :10 and :40 (big batch, 5 tabs — offset from priority)
-10,40 * * * * root /app/corpus_replays.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
+# --- Replay scrapes ---
+# Personal replays every 15 min (offset from corpus to avoid 429s)
+5,20,35,50 * * * * root /app/replay_wrapper.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
+# Corpus replays every 15 min (200 players, 8 tabs, 2 pages)
+*/15 * * * * root /app/corpus_replays.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
+
+# --- ML training ---
+# Weekly: retrain TCN on full corpus (Sunday 4am UTC)
+0 4 * * 0 root /app/tcn_train.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 
 # --- Discovery jobs ---
 # Hourly: add opponents I've lost to into the corpus

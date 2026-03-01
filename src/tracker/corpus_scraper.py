@@ -45,6 +45,52 @@ logger = logging.getLogger(__name__)
 MAX_REPLAYS_PER_RUN = 5000  # per invocation; real throttle is RoyaleAPI/Cloudflare
 DELAY_BETWEEN_PLAYERS = 2   # seconds between CR API calls per player
 
+# Replay staleness: battles older than this are unlikely to still be on RoyaleAPI.
+# RoyaleAPI's battle page typically only shows the last ~24-48h of games.
+STALE_REPLAY_DAYS = 2
+
+
+def mark_stale_replays(session: Session, max_age_days: int = STALE_REPLAY_DAYS) -> int:
+    """Mark old unfetched battles as permanently missed (replay_fetched=2).
+
+    RoyaleAPI only keeps replays for recent battles. Unfetched battles older
+    than max_age_days will never be found, so mark them to stop wasting
+    pagination cycles looking for them.
+
+    Args:
+        session: SQLAlchemy session.
+        max_age_days: Age threshold in days.
+
+    Returns:
+        Number of battles marked as stale.
+    """
+    from datetime import datetime, timedelta, timezone
+    cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+    # battle_time is stored as "20260228T200232.000Z" — lexicographic compare works
+    cutoff_str = cutoff.strftime("%Y%m%dT%H%M%S.000Z")
+
+    from sqlalchemy import update
+    from sqlalchemy.exc import OperationalError
+    try:
+        result = session.execute(
+            update(Battle)
+            .where(
+                Battle.replay_fetched == 0,
+                Battle.battle_type.in_(["PvP", "pathOfLegend", "riverRacePvP"]),
+                Battle.battle_time < cutoff_str,
+            )
+            .values(replay_fetched=2)
+        )
+        count = result.rowcount
+        session.commit()
+        if count > 0:
+            logger.info("Marked %d stale battles as replay_fetched=2 (older than %d days).", count, max_age_days)
+        return count
+    except OperationalError as e:
+        session.rollback()
+        logger.warning("Stale replay marking skipped (database locked): %s", e)
+        return 0
+
 
 def scrape_corpus_battles(
     session: Session,
@@ -196,6 +242,9 @@ async def scrape_corpus_replays(
         "ROYALEAPI_SESSION_PATH", DEFAULT_SESSION_PATH
     )
 
+    # Mark battles too old for RoyaleAPI as permanently missed
+    mark_stale_replays(session)
+
     # Filter to players with unfetched battles
     all_players = get_corpus_players(session, active_only=True, limit=limit)
     players = []
@@ -206,7 +255,7 @@ async def scrape_corpus_replays(
             .filter(
                 Battle.replay_fetched == 0,
                 Battle.battle_type.in_(["PvP", "pathOfLegend", "riverRacePvP"]),
-                Battle.player_tag.like(f"%{tag}%"),
+                Battle.player_tag == f"#{tag}",
                 Battle.corpus == "top_ladder",
             )
             .count()

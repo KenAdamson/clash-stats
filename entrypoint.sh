@@ -48,11 +48,18 @@ chmod +x /app/publish_wrapper.sh
 # Build replay wrapper with baked-in env vars for crond
 cat > /app/replay_wrapper.sh << EOF
 #!/bin/sh
+LOCKFILE=/tmp/replay_personal.lock
+if [ -f "\$LOCKFILE" ]; then
+    echo "replay_personal: previous run still active, skipping"
+    exit 0
+fi
+trap 'rm -f "\$LOCKFILE"' EXIT
+touch "\$LOCKFILE"
 export CR_PLAYER_TAG="${CR_PLAYER_TAG}"
 export BROWSER_WS_URL="${BROWSER_WS_URL:-http://cr-browser:9223}"
 export ROYALEAPI_SESSION_PATH="${ROYALEAPI_SESSION_PATH:-/app/data/royaleapi_session.json}"
 export PYTHONUNBUFFERED=1
-clash-stats --fetch-replays --player-tag "${CR_PLAYER_TAG}" --db ${DB_PATH}
+clash-stats --fetch-replays --player-tag "${CR_PLAYER_TAG}" --replays-per-player 25 --db ${DB_PATH}
 EOF
 chmod +x /app/replay_wrapper.sh
 
@@ -68,6 +75,13 @@ chmod +x /app/corpus_update.sh
 
 cat > /app/corpus_scrape.sh << EOF
 #!/bin/sh
+LOCKFILE=/tmp/corpus_scrape.lock
+if [ -f "\$LOCKFILE" ]; then
+    echo "corpus_scrape: previous run still active, skipping"
+    exit 0
+fi
+trap 'rm -f "\$LOCKFILE"' EXIT
+touch "\$LOCKFILE"
 export CR_API_KEY="${CR_API_KEY}"
 [ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
 export PYTHONUNBUFFERED=1
@@ -85,23 +99,20 @@ chmod +x /app/sim_refresh.sh
 
 cat > /app/corpus_replays.sh << EOF
 #!/bin/sh
+LOCKFILE=/tmp/corpus_replays.lock
+if [ -f "\$LOCKFILE" ]; then
+    echo "corpus_replays: previous run still active, skipping"
+    exit 0
+fi
+trap 'rm -f "\$LOCKFILE"' EXIT
+touch "\$LOCKFILE"
 export BROWSER_WS_URL="${BROWSER_WS_URL:-http://cr-browser:9223}"
 export ROYALEAPI_SESSION_PATH="${ROYALEAPI_SESSION_PATH:-/app/data/royaleapi_session.json}"
 export REPLAYS_PER_PLAYER="${REPLAYS_PER_PLAYER:-25}"
 export PYTHONUNBUFFERED=1
-clash-stats --corpus-replays --corpus-limit 50 --concurrency 5 --db ${DB_PATH}
+clash-stats --corpus-replays --corpus-limit 200 --concurrency 12 --max-pages 2 --db ${DB_PATH}
 EOF
 chmod +x /app/corpus_replays.sh
-
-cat > /app/corpus_replays_priority.sh << EOF
-#!/bin/sh
-export BROWSER_WS_URL="${BROWSER_WS_URL:-http://cr-browser:9223}"
-export ROYALEAPI_SESSION_PATH="${ROYALEAPI_SESSION_PATH:-/app/data/royaleapi_session.json}"
-export REPLAYS_PER_PLAYER="${REPLAYS_PER_PLAYER:-25}"
-export PYTHONUNBUFFERED=1
-clash-stats --corpus-replays --corpus-limit 6 --concurrency 4 --max-pages 2 --db ${DB_PATH}
-EOF
-chmod +x /app/corpus_replays_priority.sh
 
 # Network discovery: mine opponent tags and add to corpus
 cat > /app/corpus_discover.sh << EOF
@@ -132,6 +143,14 @@ clash-stats --corpus-nemeses --player-tag "${CR_PLAYER_TAG}" --db ${DB_PATH}
 EOF
 chmod +x /app/corpus_nemeses.sh
 
+# TCN retraining
+cat > /app/tcn_train.sh << EOF
+#!/bin/sh
+export PYTHONUNBUFFERED=1
+clash-stats --train-tcn --db ${DB_PATH}
+EOF
+chmod +x /app/tcn_train.sh
+
 PUSH_DEST="${STATS_REPO_URL:-origin}/${STATS_BRANCH:-stats}"
 echo "=== cr-tracker starting ==="
 echo "  Player tag: #${CR_PLAYER_TAG}"
@@ -140,9 +159,9 @@ echo "  Schedule:   every minute (crond)"
 echo "  Database:   ${DB_PATH}"
 echo "  Dashboard:  http://0.0.0.0:8078"
 echo "  Stats push: every 5 min → ${PUSH_DEST}"
-echo "  Replays:    every 30 min (if session active)"
+echo "  Replays:    every 15 min (personal + corpus)"
 echo "  Corpus bat: every 30m (200 players, ~7 min/run)"
-echo "  Corpus rep: every 15m priority (4 tabs), every 30m full (5 tabs, 50 players)"
+echo "  Corpus rep: every 15m (200 players, 12 tabs, 2 pages)"
 echo "  Discovery:  daily 3am opponent network + weekly Mon 7am regional leaderboards"
 echo "  Metrics:    http://0.0.0.0:8001/metrics (Prometheus)"
 echo "  noVNC:      http://0.0.0.0:6080 (browser sidecar)"
