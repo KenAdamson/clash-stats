@@ -344,3 +344,183 @@ def print_archetype_stats(session: Session) -> None:
     for a in stats:
         print(f"  {a['archetype']:28} {a['total']:4} games  {a['win_rate']:5.1f}% WR  ({a['wins']}W-{a['losses']}L)")
     print()
+
+
+def print_manifold(data: dict) -> None:
+    """Print manifold leg profiles and comparisons."""
+    print()
+    print("=" * 70)
+    print(f"TCN MANIFOLD ANALYSIS — {data['total_games']:,} games, 3 legs")
+    print("=" * 70)
+
+    legs = data.get("legs", [])
+    for leg in legs:
+        name = leg["leg_name"].upper()
+        n = leg["game_count"]
+        wr = leg["win_rate"]
+        print()
+        print(f"  LEG: {name}  ({n:,} games, {wr:.1%} WR)")
+        print("  " + "─" * 50)
+
+        # Duration / economy
+        dur = leg.get("avg_duration")
+        dur_str = f"{dur}s" if dur else "N/A"
+        print(f"    Duration:      {dur_str}  |  "
+              f"Leak: {leg['avg_player_leak']:.1f}e (team) / {leg['avg_opponent_leak']:.1f}e (opp)")
+        print(f"    Crown diff:    {leg['avg_crown_diff']:+.2f}")
+
+        # Phase distribution
+        pf = leg.get("avg_phase_fraction", {})
+        print(f"    Phases:        "
+              f"reg {pf.get('regular', 0):.0%}  "
+              f"dbl {pf.get('double', 0):.0%}  "
+              f"OT {pf.get('overtime', 0):.0%}  "
+              f"OT2x {pf.get('ot_double', 0):.0%}")
+
+        # Tempo
+        print(f"    Tempo:         "
+              f"{leg['avg_plays_per_game']:.0f} plays/game, "
+              f"median gap {leg['median_inter_play_gap']} ticks")
+
+        # Spatial
+        print(f"    Aggression:    {leg['aggression_index']:.1%} plays in opponent half")
+        ld = leg.get("lane_distribution", {})
+        print(f"    Lanes:         "
+              f"L {ld.get('left', 0):.0%}  "
+              f"R {ld.get('right', 0):.0%}  "
+              f"C {ld.get('center', 0):.0%}")
+
+        # Card types
+        ct = leg.get("card_type_distribution", {})
+        print(f"    Card types:    "
+              f"troop {ct.get('troop', 0):.0%}  "
+              f"spell {ct.get('spell', 0):.0%}  "
+              f"bldg {ct.get('building', 0):.0%}")
+
+        # Action-reaction
+        alt = leg.get("alternation_rate", 0)
+        style = "reactive" if alt > 0.55 else "committed" if alt < 0.45 else "balanced"
+        print(f"    Play style:    {alt:.1%} alternation ({style})")
+
+        # Top cards
+        team_cards = leg.get("top_cards_team", [])
+        if team_cards:
+            cards_str = ", ".join(c["card"] for c in team_cards[:6])
+            print(f"    Top team:      {cards_str}")
+        opp_cards = leg.get("top_cards_opp", [])
+        if opp_cards:
+            cards_str = ", ".join(c["card"] for c in opp_cards[:6])
+            print(f"    Top opp:       {cards_str}")
+
+    # Comparisons
+    comparisons = data.get("comparisons", [])
+    if comparisons:
+        print()
+        print("  KEY DIFFERENCES")
+        print("  " + "─" * 50)
+        for c in comparisons:
+            print(f"    → {c}")
+
+    print()
+
+
+def print_matchup_dive(data: dict) -> None:
+    """Print full matchup deep dive analysis."""
+    print()
+    print("=" * 70)
+    print(f"MATCHUP DEEP DIVE: vs {data['archetype']}")
+    print("=" * 70)
+    print()
+
+    print(f"  Games:       {data['game_count']} ({data['win_count']}W / {data['loss_count']}L)")
+    print(f"  Win Rate:    {data['win_rate']}%")
+    if data.get("avg_duration"):
+        print(f"  Avg Duration: {data['avg_duration']}s")
+    print(f"  Avg Leak:    {data['avg_leak_win']}e (wins) / {data['avg_leak_loss']}e (losses)")
+    if data.get("trophy_filter"):
+        print(f"  Trophy Filter: >= {data['trophy_filter']}")
+
+    # Opening analysis
+    opening = data.get("opening", {})
+    w = opening.get("win", {})
+    l = opening.get("loss", {})
+    if w.get("count") or l.get("count"):
+        print()
+        print("  OPENING (~30s)")
+        print(f"  {'':18} {'WINS':>20} {'LOSSES':>20}")
+        print(f"  {'First play tick':<18} {w.get('avg_first_play_tick', 'N/A'):>20} {l.get('avg_first_play_tick', 'N/A'):>20}")
+        print(f"  {'Avg plays':<18} {w.get('avg_plays', 'N/A'):>20} {l.get('avg_plays', 'N/A'):>20}")
+        print(f"  {'Aggression':<18} {w.get('aggression_index', 0):>19.1%} {l.get('aggression_index', 0):>19.1%}")
+
+        for label, group in [("Win", w), ("Loss", l)]:
+            cards = group.get("first_card_team", [])
+            if cards:
+                print(f"\n  {label} first cards:")
+                for c in cards[:5]:
+                    print(f"    {c['card']:28} {c['count']:>3}x ({c['pct']}%)")
+
+    # Phase profile
+    phases = data.get("phases", {}).get("phases", {})
+    if phases:
+        print()
+        print("  PHASE BREAKDOWN")
+        print(f"  {'Phase':<12} {'Win plays/100t':>15} {'Loss plays/100t':>16} {'Win opp spells':>15}")
+        print("  " + "─" * 62)
+        for phase in ("regular", "double", "overtime", "ot_double"):
+            pd = phases.get(phase, {})
+            wp = pd.get("win", {})
+            lp = pd.get("loss", {})
+            w_rate = wp.get("plays_per_100_ticks", 0)
+            l_rate = lp.get("plays_per_100_ticks", 0)
+            w_spell = wp.get("opp_card_type_mix", {}).get("spell", 0)
+            print(f"  {phase:<12} {w_rate:>15.2f} {l_rate:>16.2f} {w_spell:>14.0%}")
+
+    # Push timing
+    pushes = data.get("push_timing", {})
+    wp = pushes.get("win", {})
+    lp = pushes.get("loss", {})
+    if wp or lp:
+        print()
+        print("  PUSH TIMING")
+        print(f"  {'':18} {'WINS':>20} {'LOSSES':>20}")
+        w_fpt = wp.get("avg_first_push_tick")
+        l_fpt = lp.get("avg_first_push_tick")
+        print(f"  {'First push tick':<18} {(str(w_fpt) if w_fpt else 'N/A'):>20} {(str(l_fpt) if l_fpt else 'N/A'):>20}")
+        print(f"  {'Avg pushes/game':<18} {wp.get('avg_push_count', 0):>20.2f} {lp.get('avg_push_count', 0):>20.2f}")
+        print(f"  {'Avg push size':<18} {wp.get('avg_push_size', 0):>20.1f} {lp.get('avg_push_size', 0):>20.1f}")
+
+    # Notable patterns
+    patterns = data.get("notable_patterns", [])
+    if patterns:
+        print()
+        print("  NOTABLE PATTERNS")
+        for p in patterns:
+            print(f"    → {p}")
+
+    print()
+
+
+def print_broken_cycle(results: list[dict]) -> None:
+    """Print broken cycle analysis results."""
+    print()
+    print("=" * 70)
+    print("BROKEN CYCLE ANALYSIS")
+    print("=" * 70)
+    print()
+
+    if not results:
+        print("  No results.")
+        return
+
+    for r in results:
+        a, b = r["pair"]
+        print(f"  {a} + {b}  (window: {r['window_ticks']} ticks)")
+        print(f"    Games where {a} played: {r['total_games']}")
+        print(f"    Intact (B within window): {r['intact_count']}  "
+              f"WR {r['intact_win_rate']}%")
+        print(f"    Broken (B missing/late):  {r['broken_count']}  "
+              f"WR {r['broken_win_rate']}%")
+        delta = r["delta_pp"]
+        direction = "+" if delta >= 0 else ""
+        print(f"    Delta: {direction}{delta}pp")
+        print()

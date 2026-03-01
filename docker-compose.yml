@@ -1,6 +1,8 @@
 services:
   cr-tracker:
-    build: .
+    build:
+      context: .
+      network: host
     container_name: cr-tracker
     restart: unless-stopped
     env_file: .env
@@ -13,6 +15,10 @@ services:
       - ./data:/app/data
       - ./.git:/app/.git:rw
       - ~/.ssh/id_ed25519:/root/.ssh/id_ed25519:ro
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "109"  # render group GID for Intel GPU access
     depends_on:
       - cr-browser
     networks:

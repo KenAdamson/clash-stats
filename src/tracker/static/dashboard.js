@@ -475,9 +475,11 @@ function renderSimulation(data) {
     }
 }
 
-// ─── Embeddings 3D scatter plot (Plotly) ─────────────────────────
+// ─── Embeddings 3D scatter plot (Plotly) + Timeline slider ───────
 
 let embeddingData = null;  // store for click lookups
+let embeddingDates = [];   // sorted unique personal dates for slider
+let embeddingPlotInit = false;
 
 async function fetchEmbeddings() {
     try {
@@ -486,9 +488,101 @@ async function fetchEmbeddings() {
         const data = await resp.json();
         embeddingData = data.points;
         renderEmbeddingChart(data.points);
+        initTimelineSlider(data.points);
     } catch (e) {
         // No embeddings yet — hide section
     }
+}
+
+// Parse "20260228T035121.000Z" to Date
+function parseBattleTime(bt) {
+    if (!bt || bt.length < 15) return null;
+    const y = bt.slice(0, 4), m = bt.slice(4, 6), d = bt.slice(6, 8);
+    const h = bt.slice(9, 11), mn = bt.slice(11, 13), s = bt.slice(13, 15);
+    return new Date(`${y}-${m}-${d}T${h}:${mn}:${s}Z`);
+}
+
+function formatSliderDate(date) {
+    return date.toLocaleDateString("en-US", { month: "short", day: "numeric" }) +
+        " " + date.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false });
+}
+
+function initTimelineSlider(points) {
+    // Collect all dates from personal games
+    const personalPoints = points.filter(p => p.corpus === "personal" && p.battle_time);
+    if (personalPoints.length < 2) return;  // no slider needed for <2 games
+
+    const dates = personalPoints
+        .map(p => parseBattleTime(p.battle_time))
+        .filter(d => d)
+        .sort((a, b) => a - b);
+    if (dates.length < 2) return;
+
+    embeddingDates = dates;
+
+    const control = document.getElementById("timeline-control");
+    control.style.display = "";
+
+    const slider = document.getElementById("timeline-slider");
+    slider.min = 0;
+    slider.max = dates.length - 1;
+    slider.value = dates.length - 1;
+
+    document.getElementById("timeline-min-label").textContent = formatSliderDate(dates[0]);
+    document.getElementById("timeline-max-label").textContent = formatSliderDate(dates[dates.length - 1]);
+    document.getElementById("timeline-date").textContent = `All ${dates.length} personal games`;
+
+    slider.addEventListener("input", onTimelineSlide);
+    document.getElementById("timeline-reset").addEventListener("click", () => {
+        slider.value = dates.length - 1;
+        onTimelineSlide();
+    });
+}
+
+function onTimelineSlide() {
+    const slider = document.getElementById("timeline-slider");
+    const idx = parseInt(slider.value);
+    const cutoffDate = embeddingDates[idx];
+
+    const showing = idx + 1;
+    const total = embeddingDates.length;
+    const label = showing === total
+        ? `All ${total} personal games`
+        : `${showing} of ${total} games — through ${formatSliderDate(cutoffDate)}`;
+    document.getElementById("timeline-date").textContent = label;
+
+    // Filter personal points by date
+    updateEmbeddingVisibility(cutoffDate);
+}
+
+function updateEmbeddingVisibility(cutoffDate) {
+    if (!embeddingData) return;
+
+    const personal = embeddingData.filter(p => p.corpus === "personal");
+    const visible = personal.filter(p => {
+        const d = parseBattleTime(p.battle_time);
+        return d && d <= cutoffDate;
+    });
+
+    const personalWins = visible.filter(p => p.result === "win");
+    const personalLosses = visible.filter(p => p.result === "loss");
+
+    // Update traces 2 and 3 (personal wins and losses) via Plotly.restyle
+    Plotly.restyle("embeddingPlot", {
+        x: [personalWins.map(p => p.x)],
+        y: [personalWins.map(p => p.y)],
+        z: [personalWins.map(p => p.z)],
+        text: [personalWins.map(p => `${p.opponent || "?"} — ${p.result} (${formatSliderDate(parseBattleTime(p.battle_time))})`)],
+        customdata: [personalWins.map(p => p.battle_id)],
+    }, [2]);
+
+    Plotly.restyle("embeddingPlot", {
+        x: [personalLosses.map(p => p.x)],
+        y: [personalLosses.map(p => p.y)],
+        z: [personalLosses.map(p => p.z)],
+        text: [personalLosses.map(p => `${p.opponent || "?"} — ${p.result} (${formatSliderDate(parseBattleTime(p.battle_time))})`)],
+        customdata: [personalLosses.map(p => p.battle_id)],
+    }, [3]);
 }
 
 function renderEmbeddingChart(points) {
@@ -510,7 +604,10 @@ function renderEmbeddingChart(points) {
         x: arr.map(p => p.x),
         y: arr.map(p => p.y),
         z: arr.map(p => p.z),
-        text: arr.map(p => `${p.opponent || "?"} — ${p.result} (${p.corpus})`),
+        text: arr.map(p => {
+            const dateStr = p.battle_time ? formatSliderDate(parseBattleTime(p.battle_time)) : "";
+            return `${p.opponent || "?"} — ${p.result}${dateStr ? " (" + dateStr + ")" : ""}`;
+        }),
         customdata: arr.map(p => p.battle_id),
         hovertemplate: "%{text}<extra></extra>",
         marker: {
@@ -522,7 +619,7 @@ function renderEmbeddingChart(points) {
     });
 
     const data = [
-        makeTrace(corpusWins,     "Corpus Wins",   "rgb(52, 211, 153)",  2.5, 0.25, false),
+        makeTrace(corpusWins,     "Corpus Wins",    "rgb(52, 211, 153)",  2.5, 0.25, false),
         makeTrace(corpusLosses,   "Corpus Losses",  "rgb(248, 113, 113)", 2.5, 0.25, false),
         makeTrace(personalWins,   "My Wins",        "rgb(52, 211, 153)",  5,   0.9,  true),
         makeTrace(personalLosses, "My Losses",      "rgb(248, 113, 113)", 5,   0.9,  true),
@@ -560,6 +657,7 @@ function renderEmbeddingChart(points) {
     };
 
     Plotly.newPlot("embeddingPlot", data, layout, config);
+    embeddingPlotInit = true;
 
     // Click handler — customdata carries battle_id directly
     document.getElementById("embeddingPlot").on("plotly_click", function(eventData) {
@@ -624,10 +722,52 @@ function renderSimilarPanel(battleId, data) {
     document.getElementById("similar-tables").innerHTML = html;
 }
 
+// ─── Tilt detection ─────────────────────────────────────────────
+
+async function fetchTilt() {
+    try {
+        const resp = await fetch("/api/tilt");
+        if (!resp.ok) return;
+        const data = await resp.json();
+        renderTiltBanner(data);
+    } catch (e) {
+        // Tilt detection not available
+    }
+}
+
+function renderTiltBanner(data) {
+    const banner = document.getElementById("tilt-banner");
+
+    if (data.level === "none") {
+        banner.style.display = "none";
+        return;
+    }
+
+    banner.style.display = "flex";
+    banner.className = "tilt-banner tilt-" + data.level;
+
+    const icons = { warning: "\u26a0\ufe0f", tilting: "\ud83d\udd34", severe: "\ud83d\uded1" };
+    const labels = { warning: "TILT WARNING", tilting: "TILTING", severe: "TILT \u2014 STOP PLAYING" };
+
+    document.getElementById("tilt-icon").textContent = icons[data.level] || "";
+    document.getElementById("tilt-label").textContent = labels[data.level] || data.level.toUpperCase();
+    document.getElementById("tilt-message").textContent = data.message;
+
+    const stats = [`${data.recent_record}`,
+        `Streak: ${data.consecutive_losses}L`,
+        `Leak: ${data.avg_leak} avg / ${data.max_leak} max`];
+    if (data.embedding_matches > 0) {
+        stats.push(`TCN tilt matches: ${data.embedding_matches}`);
+    }
+    document.getElementById("tilt-stats").textContent = stats.join("  \u00b7  ");
+}
+
 // ─── Init & poll ────────────────────────────────────────────────
 
 fetchAll();
+fetchTilt();
 fetchSimulation();
 fetchEmbeddings();
 setInterval(fetchAll, POLL_INTERVAL);
+setInterval(fetchTilt, POLL_INTERVAL);
 setInterval(fetchSimulation, POLL_INTERVAL);

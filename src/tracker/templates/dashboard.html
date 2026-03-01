@@ -38,6 +38,16 @@
         </div>
     </header>
 
+    <!-- Tilt Detection Banner -->
+    <section id="tilt-banner" class="tilt-banner" style="display:none">
+        <div class="tilt-icon" id="tilt-icon"></div>
+        <div class="tilt-content">
+            <div class="tilt-label" id="tilt-label"></div>
+            <div class="tilt-message" id="tilt-message"></div>
+            <div class="tilt-stats" id="tilt-stats"></div>
+        </div>
+    </section>
+
     <!-- Trophy Progression -->
     <section class="card full-width">
         <h2>Trophy Progression</h2>
@@ -96,6 +106,18 @@
     <!-- Game Embeddings (ML Phase 0) -->
     <section class="card full-width" id="embeddings-section" style="display:none">
         <h2>Game Embeddings <span class="sub-header">UMAP 3D projection — click a point for similar games</span></h2>
+        <div class="timeline-control" id="timeline-control" style="display:none">
+            <div class="timeline-header">
+                <span class="timeline-label">Timeline</span>
+                <span class="timeline-date" id="timeline-date">All games</span>
+                <button class="timeline-btn" id="timeline-reset" title="Reset to all">All</button>
+            </div>
+            <input type="range" id="timeline-slider" class="timeline-slider" min="0" max="100" value="100">
+            <div class="timeline-range">
+                <span id="timeline-min-label"></span>
+                <span id="timeline-max-label"></span>
+            </div>
+        </div>
         <div id="embeddingPlot" class="embedding-chart"></div>
         <div id="similar-panel" class="similar-panel" style="display:none">
             <h3>Similar Games to <span id="similar-ref"></span></h3>

@@ -1,1 +1,1 @@
-"""ML Phase 0: Feature engineering, UMAP embeddings, and clustering."""
+"""ML: Feature engineering, UMAP/TCN embeddings, and clustering."""

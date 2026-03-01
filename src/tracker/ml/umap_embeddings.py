@@ -142,6 +142,31 @@ class EmbeddingPipeline:
         logger.info("Loaded UMAP models from %s", path)
 
 
+    def reduce_to_3d(self, embeddings_high: np.ndarray) -> np.ndarray:
+        """Reduce arbitrary high-dim embeddings to 3D for visualization.
+
+        Fits a new UMAP(n_components=3) on the input. Used to project
+        TCN 128-dim embeddings to 3D for the Plotly scatter plot.
+
+        Args:
+            embeddings_high: Shape (n_games, high_dim).
+
+        Returns:
+            Shape (n_games, 3) coordinates.
+        """
+        reducer = UMAP(**UMAP_3D_PARAMS)
+        embeddings_3d = reducer.fit_transform(embeddings_high)
+
+        # Save the reducer for this dimensionality
+        self.model_dir.mkdir(parents=True, exist_ok=True)
+        path = self.model_dir / "umap_3d_standalone.pkl"
+        with open(path, "wb") as f:
+            pickle.dump(reducer, f)
+        logger.info("Saved standalone 3D UMAP reducer to %s", path)
+
+        return embeddings_3d
+
+
 def train_embeddings(
     session: Session,
     battle_ids: list[str],

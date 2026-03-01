@@ -83,6 +83,65 @@ header h1 {
     color: var(--text-dim);
 }
 
+/* Tilt detection banner */
+.tilt-banner {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 1rem 1.5rem;
+    border-radius: 12px;
+    margin-bottom: 1rem;
+    animation: tilt-pulse 3s ease-in-out infinite;
+}
+
+.tilt-banner.tilt-warning {
+    background: rgba(251, 191, 36, 0.12);
+    border: 1px solid rgba(251, 191, 36, 0.4);
+}
+
+.tilt-banner.tilt-tilting {
+    background: rgba(248, 113, 113, 0.12);
+    border: 1px solid rgba(248, 113, 113, 0.4);
+}
+
+.tilt-banner.tilt-severe {
+    background: rgba(248, 113, 113, 0.2);
+    border: 2px solid rgba(248, 113, 113, 0.6);
+}
+
+@keyframes tilt-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.85; }
+}
+
+.tilt-icon {
+    font-size: 2rem;
+    flex-shrink: 0;
+}
+
+.tilt-label {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-weight: 700;
+}
+
+.tilt-warning .tilt-label { color: var(--yellow); }
+.tilt-tilting .tilt-label { color: var(--red); }
+.tilt-severe .tilt-label { color: var(--red); }
+
+.tilt-message {
+    font-size: 0.95rem;
+    font-weight: 500;
+    margin-top: 0.15rem;
+}
+
+.tilt-stats {
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    margin-top: 0.25rem;
+}
+
 /* Cards */
 .card {
     background: var(--card-bg);
@@ -301,6 +360,99 @@ summary {
 #card-threat-table tbody {
     max-height: 500px;
     overflow-y: auto;
+}
+
+/* Timeline slider control — reusable filter component */
+.timeline-control {
+    margin-bottom: 0.75rem;
+    padding: 0.75rem 1rem;
+    background: rgba(79, 140, 255, 0.05);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+
+.timeline-header {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 0.5rem;
+}
+
+.timeline-label {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-dim);
+    font-weight: 600;
+}
+
+.timeline-date {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--text);
+    flex: 1;
+}
+
+.timeline-btn {
+    background: rgba(79, 140, 255, 0.15);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    padding: 0.2rem 0.6rem;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.timeline-btn:hover {
+    background: rgba(79, 140, 255, 0.3);
+    color: var(--text);
+}
+
+.timeline-slider {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 100%;
+    height: 6px;
+    background: var(--border);
+    border-radius: 3px;
+    outline: none;
+    cursor: pointer;
+}
+
+.timeline-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: 2px solid var(--card-bg);
+    box-shadow: 0 0 6px rgba(79, 140, 255, 0.5);
+    cursor: pointer;
+    transition: box-shadow 0.15s;
+}
+
+.timeline-slider::-webkit-slider-thumb:hover {
+    box-shadow: 0 0 12px rgba(79, 140, 255, 0.8);
+}
+
+.timeline-slider::-moz-range-thumb {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: 2px solid var(--card-bg);
+    box-shadow: 0 0 6px rgba(79, 140, 255, 0.5);
+    cursor: pointer;
+}
+
+.timeline-range {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.7rem;
+    color: var(--text-dim);
+    margin-top: 0.25rem;
 }
 
 /* Embeddings scatter plot */

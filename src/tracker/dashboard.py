@@ -147,6 +147,26 @@ def create_app(db_path: str | None = None) -> Flask:
         finally:
             session.close()
 
+    @app.route("/api/tilt")
+    def api_tilt():
+        """Return current tilt detection status."""
+        session = get_session(engine)
+        try:
+            from tracker.ml.tilt_detector import detect_tilt
+            status = detect_tilt(session)
+            return jsonify({
+                "level": status.level,
+                "consecutive_losses": status.consecutive_losses,
+                "recent_record": status.recent_record,
+                "avg_leak": status.avg_leak_recent,
+                "max_leak": status.max_leak_recent,
+                "tilt_game_count": status.tilt_game_count,
+                "embedding_matches": status.embedding_matches,
+                "message": status.message,
+            })
+        finally:
+            session.close()
+
     @app.route("/api/embeddings")
     def api_embeddings():
         """Return 3D embeddings for scatter plot visualization."""
@@ -169,7 +189,7 @@ def create_app(db_path: str | None = None) -> Flask:
 
             battle_ids = [r[0] for r in rows]
             battles = session.execute(
-                select(Battle.battle_id, Battle.result, Battle.corpus, Battle.opponent_name)
+                select(Battle.battle_id, Battle.result, Battle.corpus, Battle.opponent_name, Battle.battle_time)
                 .where(Battle.battle_id.in_(battle_ids))
             ).all()
             meta = {b[0]: b for b in battles}
@@ -190,6 +210,7 @@ def create_app(db_path: str | None = None) -> Flask:
                     "result": b[1] if b else None,
                     "corpus": b[2] if b else None,
                     "opponent": b[3] if b else None,
+                    "battle_time": b[4] if b else None,
                 })
 
             return jsonify({"points": points, "count": len(points)})
@@ -210,6 +231,98 @@ def create_app(db_path: str | None = None) -> Flask:
                 "corpus": results["corpus"],
                 "personal": results["personal"],
             })
+        finally:
+            session.close()
+
+    @app.route("/api/manifold")
+    def api_manifold():
+        """Profile the 3-leg TCN embedding manifold."""
+        session = get_session(engine)
+        try:
+            from tracker.ml.cluster_profiler import profile_manifold
+            data = profile_manifold(session)
+            if "error" in data:
+                return jsonify(data), 404
+            return jsonify(data)
+        finally:
+            session.close()
+
+    @app.route("/api/temporal/matchup/<archetype>")
+    def api_temporal_matchup(archetype: str):
+        """Full temporal deep dive against an archetype."""
+        session = get_session(engine)
+        try:
+            from tracker.temporal_analysis import matchup_deep_dive
+            min_trophies = request.args.get("min_trophies", type=int)
+            data = matchup_deep_dive(session, archetype, min_trophies=min_trophies)
+            if "error" in data and data.get("game_count", -1) == 0:
+                return jsonify(data), 404
+            return jsonify(data)
+        finally:
+            session.close()
+
+    @app.route("/api/temporal/opening")
+    def api_temporal_opening():
+        """Opening analysis (~30s) with optional filters."""
+        session = get_session(engine)
+        try:
+            from tracker.temporal_analysis import opening_analysis
+            archetype = request.args.get("archetype")
+            min_trophies = request.args.get("min_trophies", type=int)
+            data = opening_analysis(session, archetype=archetype, min_trophies=min_trophies)
+            return jsonify(data)
+        finally:
+            session.close()
+
+    @app.route("/api/temporal/phases")
+    def api_temporal_phases():
+        """Phase profile with optional filters."""
+        session = get_session(engine)
+        try:
+            from tracker.temporal_analysis import phase_profile
+            archetype = request.args.get("archetype")
+            result = request.args.get("result")
+            min_trophies = request.args.get("min_trophies", type=int)
+            data = phase_profile(
+                session, archetype=archetype, result=result,
+                min_trophies=min_trophies,
+            )
+            return jsonify(data)
+        finally:
+            session.close()
+
+    @app.route("/api/temporal/pushes")
+    def api_temporal_pushes():
+        """Push timing analysis with optional filters."""
+        session = get_session(engine)
+        try:
+            from tracker.temporal_analysis import push_timing
+            archetype = request.args.get("archetype")
+            result = request.args.get("result")
+            data = push_timing(session, archetype=archetype, result=result)
+            return jsonify(data)
+        finally:
+            session.close()
+
+    @app.route("/api/temporal/cycle")
+    def api_temporal_cycle():
+        """Broken cycle detection."""
+        session = get_session(engine)
+        try:
+            from tracker.temporal_analysis import broken_cycle
+            pairs_raw = request.args.get("pairs", "")
+            window = request.args.get("window", 200, type=int)
+            if not pairs_raw:
+                return jsonify({"error": "pairs parameter required (e.g. miner:graveyard,witch:executioner)"}), 400
+            pairs = []
+            for spec in pairs_raw.split(","):
+                parts = spec.strip().split(":")
+                if len(parts) == 2:
+                    pairs.append((parts[0], parts[1]))
+            if not pairs:
+                return jsonify({"error": "No valid pairs parsed"}), 400
+            data = broken_cycle(session, pairs, window_ticks=window)
+            return jsonify(data)
         finally:
             session.close()
 
