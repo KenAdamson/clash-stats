@@ -676,9 +676,49 @@ async function fetchSimilar(battleId) {
         if (!resp.ok) return;
         const data = await resp.json();
         renderSimilarPanel(battleId, data);
+        drawSimilarityLines(data);
     } catch (e) {
         console.error("Failed to fetch similar games:", e);
     }
+}
+
+function drawSimilarityLines(data) {
+    const ref = data.ref_coords;
+    if (!ref || ref.x == null) return;
+
+    const allSimilar = [...(data.personal || []), ...(data.corpus || [])];
+    const valid = allSimilar.filter(s => s.x != null);
+    if (valid.length === 0) return;
+
+    // Build line segments: for each similar game, a line from ref → target with a null gap
+    const xs = [], ys = [], zs = [], texts = [];
+    for (const s of valid) {
+        xs.push(ref.x, s.x, null);
+        ys.push(ref.y, s.y, null);
+        zs.push(ref.z, s.z, null);
+        texts.push("", `${s.opponent_name || "?"} (${s.result || "?"})`, "");
+    }
+
+    const lineTrace = {
+        type: "scatter3d",
+        mode: "lines",
+        name: "Similar",
+        x: xs, y: ys, z: zs,
+        text: texts,
+        hoverinfo: "text",
+        showlegend: false,
+        line: { color: "rgba(79, 140, 255, 0.5)", width: 1 },
+    };
+
+    const plotEl = document.getElementById("embeddingPlot");
+    const nTraces = plotEl.data.length;
+
+    // Remove previous similarity lines trace (always the 5th+ trace if it exists)
+    if (nTraces > 4) {
+        Plotly.deleteTraces("embeddingPlot", Array.from({length: nTraces - 4}, (_, i) => 4 + i));
+    }
+
+    Plotly.addTraces("embeddingPlot", lineTrace);
 }
 
 function similarRows(games) {

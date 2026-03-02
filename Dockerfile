@@ -14,13 +14,21 @@ ARG PIP_INDEX_URL=http://192.168.7.58:8081/simple/
 ARG PIP_TRUSTED_HOST=192.168.7.58
 ARG PYTORCH_INDEX=http://192.168.7.58:8081/whl/xpu
 
-# Copy source and install in one step
+# Layer 1: torch (rarely changes, ~2GB, cached unless pyproject.toml changes)
 COPY pyproject.toml .
+RUN pip install --no-cache-dir torch --index-url ${PYTORCH_INDEX}
+
+# Layer 2: remaining Python deps (cached unless pyproject.toml changes)
+# Create minimal package structure so pip install works for deps only
+RUN mkdir -p /app/src/tracker && \
+    echo '__version__ = "0.0.0"' > /app/src/tracker/__init__.py && \
+    pip install --no-cache-dir ".[ml]" && \
+    apt-get purge -y --auto-remove build-essential && \
+    rm -rf /var/lib/apt/lists/*
+
+# Layer 3: actual source (changes often, but deps are cached above)
 COPY src/ /app/src/
-RUN pip install --no-cache-dir torch --index-url ${PYTORCH_INDEX} \
-    && pip install --no-cache-dir ".[ml]" \
-    && apt-get purge -y --auto-remove build-essential \
-    && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir --no-deps .
 
 # Create data directory for SQLite volume mount
 RUN mkdir -p /app/data

@@ -230,6 +230,7 @@ def create_app(db_path: str | None = None) -> Flask:
                 "reference": battle_id,
                 "corpus": results["corpus"],
                 "personal": results["personal"],
+                "ref_coords": results.get("ref_coords"),
             })
         finally:
             session.close()

@@ -50,6 +50,21 @@ def _enrich_results(session: Session, results: list[dict]) -> None:
             r["battle_time"] = b[6]
             r["corpus"] = b[7]
 
+    # Add 3D embedding coordinates for visualization lines
+    emb_rows = session.execute(
+        select(GameEmbedding.battle_id, GameEmbedding.embedding_3d)
+        .where(GameEmbedding.battle_id.in_(result_ids))
+    ).all()
+    emb_map = {r[0]: from_blob(r[1], 3) for r in emb_rows if r[1]}
+    for r in results:
+        coords = emb_map.get(r["battle_id"])
+        if coords is not None:
+            r["x"] = float(coords[0])
+            r["y"] = float(coords[1])
+            r["z"] = float(coords[2])
+        else:
+            r["x"] = r["y"] = r["z"] = None
+
     # Opponent deck cards and archetype
     deck_cards = session.execute(
         select(DeckCard.battle_id, DeckCard.card_name, DeckCard.card_variant)
@@ -181,4 +196,18 @@ def find_similar(
     _enrich_results(session, corpus_results)
     _enrich_results(session, personal_results)
 
-    return {"corpus": corpus_results, "personal": personal_results}
+    # Reference point 3D coordinates for visualization lines
+    ref_emb = session.execute(
+        select(GameEmbedding.embedding_3d)
+        .where(GameEmbedding.battle_id == battle_id)
+    ).scalar_one_or_none()
+    ref_coords = None
+    if ref_emb is not None:
+        c = from_blob(ref_emb, 3)
+        ref_coords = {"x": float(c[0]), "y": float(c[1]), "z": float(c[2])}
+
+    return {
+        "corpus": corpus_results,
+        "personal": personal_results,
+        "ref_coords": ref_coords,
+    }
