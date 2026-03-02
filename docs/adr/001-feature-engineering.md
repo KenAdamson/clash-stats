@@ -1,6 +1,6 @@
 # ADR-001: Feature Engineering from Replay Events
 
-**Status:** Proposed
+**Status:** Implemented
 **Date:** 2026-02-22
 **Depends on:** Replay scraper (`replays.py`, migration 003)
 

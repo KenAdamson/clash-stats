@@ -1,8 +1,8 @@
 # ADR-003: Game State Embedding Model
 
-**Status:** Proposed
+**Status:** Phase 0 + Phase 1 Implemented
 **Date:** 2026-02-22
-**Updated:** 2026-02-23
+**Updated:** 2026-03-01
 **Depends on:** ADR-001 (Feature Engineering), ADR-007 (Training Data Pipeline)
 
 ## Context
