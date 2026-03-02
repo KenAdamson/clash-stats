@@ -286,8 +286,8 @@ function renderStreaks(data) {
     // Crown distribution doughnut
     renderCrownChart(data.crown_distribution);
 
-    // Time of day chart
-    renderTimeChart(data.time_of_day);
+    // Time of day chart with traffic overlay
+    renderTimeChart(data.time_of_day, data.corpus_traffic);
 }
 
 function renderRollingCol(id, stats) {
@@ -342,42 +342,78 @@ function renderCrownChart(dist) {
     });
 }
 
-function renderTimeChart(timeData) {
+function renderTimeChart(timeData, corpusTraffic) {
     if (!timeData || timeData.length === 0) return;
     const ctx = document.getElementById("timeChart").getContext("2d");
+
+    // Build traffic lookup by hour
+    const trafficByHour = {};
+    if (corpusTraffic) {
+        for (const t of corpusTraffic) trafficByHour[t.hour] = t.traffic_index;
+    }
+
+    const datasets = [{
+        label: "Win Rate %",
+        data: timeData.map(t => t.win_rate),
+        backgroundColor: timeData.map(t =>
+            t.win_rate >= 55 ? "rgba(52, 211, 153, 0.7)" :
+            t.win_rate >= 45 ? "rgba(251, 191, 36, 0.7)" :
+            "rgba(248, 113, 113, 0.7)"
+        ),
+        borderRadius: 4,
+        yAxisID: "y",
+    }];
+
+    if (corpusTraffic && corpusTraffic.length > 0) {
+        datasets.push({
+            label: "Global Traffic",
+            data: timeData.map(t => trafficByHour[t.hour] ?? null),
+            type: "line",
+            borderColor: "rgba(79, 140, 255, 0.6)",
+            backgroundColor: "rgba(79, 140, 255, 0.1)",
+            borderWidth: 2,
+            pointRadius: 0,
+            fill: true,
+            tension: 0.4,
+            yAxisID: "y1",
+        });
+    }
 
     if (timeChart) timeChart.destroy();
     timeChart = new Chart(ctx, {
         type: "bar",
         data: {
             labels: timeData.map(t => `${String(t.hour).padStart(2, "0")}:00`),
-            datasets: [{
-                label: "Win Rate %",
-                data: timeData.map(t => t.win_rate),
-                backgroundColor: timeData.map(t =>
-                    t.win_rate >= 55 ? "rgba(52, 211, 153, 0.7)" :
-                    t.win_rate >= 45 ? "rgba(251, 191, 36, 0.7)" :
-                    "rgba(248, 113, 113, 0.7)"
-                ),
-                borderRadius: 4,
-            }],
+            datasets,
         },
         options: {
             responsive: true,
             maintainAspectRatio: false,
             plugins: {
-                legend: { display: false },
+                legend: {
+                    display: corpusTraffic && corpusTraffic.length > 0,
+                    labels: { boxWidth: 12, padding: 8, font: { size: 11 } },
+                },
                 tooltip: {
                     callbacks: {
                         afterLabel: (item) => {
-                            const t = timeData[item.dataIndex];
-                            return `${t.wins}W / ${t.total} games`;
+                            if (item.datasetIndex === 0) {
+                                const t = timeData[item.dataIndex];
+                                return `${t.wins}W / ${t.total} games`;
+                            }
+                            return "Relative corpus activity";
                         },
                     },
                 },
             },
             scales: {
                 y: { beginAtZero: true, max: 100, title: { display: true, text: "WR %" } },
+                y1: {
+                    position: "right",
+                    beginAtZero: true,
+                    max: 100,
+                    display: false,
+                },
             },
         },
     });

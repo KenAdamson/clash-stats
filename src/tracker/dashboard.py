@@ -137,12 +137,14 @@ def create_app(db_path: str | None = None) -> Flask:
             rolling_10 = analytics.get_rolling_stats(session, 10, ladder_only=lo)
             crowns = analytics.get_crown_distribution(session, ladder_only=lo)
             time_of_day = analytics.get_time_of_day_stats(session, ladder_only=lo)
+            corpus_traffic = analytics.get_corpus_traffic_by_hour(session)
             return jsonify({
                 "streaks": streaks,
                 "rolling_35": rolling_35,
                 "rolling_10": rolling_10,
                 "crown_distribution": crowns,
                 "time_of_day": time_of_day,
+                "corpus_traffic": corpus_traffic,
             })
         finally:
             session.close()

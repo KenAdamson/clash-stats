@@ -406,6 +406,33 @@ def get_time_of_day_stats(session: Session, ladder_only: bool = False) -> list[d
     return [row._asdict() for row in session.execute(stmt).all()]
 
 
+def get_corpus_traffic_by_hour(session: Session) -> list[dict]:
+    """Get corpus battle volume by hour of day (UTC).
+
+    Returns normalized 0-100 traffic index for overlay on WR chart.
+    """
+    hour_expr = cast(func.substr(Battle.battle_time, 10, 2), Integer)
+    stmt = (
+        select(
+            hour_expr.label("hour"),
+            func.count().label("total"),
+        )
+        .where(Battle.battle_time.isnot(None))
+        .where(Battle.corpus != "personal")
+        .group_by(hour_expr)
+        .order_by(hour_expr)
+    )
+    rows = [row._asdict() for row in session.execute(stmt).all()]
+    if not rows:
+        return rows
+    counts = [r["total"] for r in rows]
+    lo, hi = min(counts), max(counts)
+    spread = hi - lo if hi > lo else 1
+    for r in rows:
+        r["traffic_index"] = round((r["total"] - lo) / spread * 100, 1)
+    return rows
+
+
 def get_streaks(session: Session, ladder_only: bool = False) -> dict:
     """Detect win/loss streaks from battle history.
 
