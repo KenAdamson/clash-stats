@@ -466,7 +466,7 @@ function renderSimulation(data) {
                         <td>${c.avg_elixir}</td>
                     </tr>`;
                 }).join("");
-                return `<details open><summary>${wc} (${clusters.length} sub-types)</summary>
+                return `<details><summary>${wc} (${clusters.length} sub-types)</summary>
                     <table class="matchup-table sub-table">
                         <thead><tr><th>Signature Cards</th><th>Games</th><th>Variants</th><th>WR</th><th>Avg Elixir</th></tr></thead>
                         <tbody>${rows}</tbody>
