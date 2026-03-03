@@ -542,6 +542,7 @@ async def fetch_replays(
         )
         logger.info("Found %d replay links for %s.", len(replay_links), tag_clean)
 
+        consecutive_403s = 0
         for battle in unfetched:
             link = _match_replay_link(battle, replay_links)
             if not link:
@@ -563,6 +564,21 @@ async def fetch_replays(
                     REPLAYS_FAILED.labels(error_type="rate_limited").inc()
                     await asyncio.sleep(wait)
                     continue
+
+                if status == 403:
+                    consecutive_403s += 1
+                    wait = min(REPLAY_FETCH_DELAY * (2 ** consecutive_403s), 30.0)
+                    logger.warning(
+                        "403 fetching %s — backoff %.1fs (streak %d)",
+                        battle.battle_id, wait, consecutive_403s,
+                    )
+                    stats["failed_transient"] += 1
+                    REPLAYS_FAILED.labels(error_type="http_403").inc()
+                    await asyncio.sleep(wait)
+                    continue
+
+                # Reset 403 streak on any non-403 response
+                consecutive_403s = 0
 
                 if status == 200:
                     data = parse_replay_html(html)
@@ -705,6 +721,7 @@ async def fetch_replays_for_player(
     )
     logger.info("Found %d replay links for %s.", len(replay_links), tag_clean)
 
+    consecutive_403s = 0
     for battle in unfetched:
         link = _match_replay_link(battle, replay_links)
         if not link:
@@ -724,6 +741,21 @@ async def fetch_replays_for_player(
                 REPLAYS_FAILED.labels(error_type="rate_limited").inc()
                 await asyncio.sleep(wait)
                 continue
+
+            if status == 403:
+                consecutive_403s += 1
+                wait = min(REPLAY_FETCH_DELAY * (2 ** consecutive_403s), 30.0)
+                logger.warning(
+                    "403 fetching %s — backoff %.1fs (streak %d)",
+                    battle.battle_id, wait, consecutive_403s,
+                )
+                stats["failed_transient"] += 1
+                REPLAYS_FAILED.labels(error_type="http_403").inc()
+                await asyncio.sleep(wait)
+                continue
+
+            # Reset 403 streak on any non-403 response
+            consecutive_403s = 0
 
             if status == 200:
                 data = parse_replay_html(html)
