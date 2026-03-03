@@ -321,6 +321,9 @@ async def _fetch_replay_page(page, url: str) -> tuple:
                 raise CloudflareBlockError("Cloudflare challenge in XHR response")
             return status, body, retry_seconds
 
+    if status == 403 and body and "just a moment" in body.lower():
+        raise CloudflareBlockError("Cloudflare challenge in 403 response")
+
     return status, body, retry_seconds
 
 
