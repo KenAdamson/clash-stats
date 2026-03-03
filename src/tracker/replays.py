@@ -500,18 +500,16 @@ async def fetch_replays(
     async with async_playwright() as p:
         browser = await p.chromium.connect_over_cdp(cdp_url)
 
-        contexts = browser.contexts
-        if contexts:
-            context = contexts[0]
-            page = context.pages[0] if context.pages else await context.new_page()
-            owns_context = False
-        else:
-            context = await browser.new_context(
-                storage_state=save_path,
-                viewport={"width": 1280, "height": 720},
-            )
-            page = await context.new_page()
-            owns_context = True
+        # Always create a dedicated context from the session file.
+        # Never reuse the browser's default context (contexts[0]) — its
+        # cookies go stale because it doesn't navigate to RoyaleAPI.
+        # The corpus scraper keeps the session file fresh via save-back.
+        context = await browser.new_context(
+            storage_state=save_path,
+            viewport={"width": 1280, "height": 720},
+        )
+        page = await context.new_page()
+        owns_context = True
 
         # Navigate to player battles page
         battles_url = f"{ROYALEAPI_BASE}/player/{tag_clean}/battles"
@@ -530,6 +528,12 @@ async def fetch_replays(
             if owns_context:
                 await context.close()
             return -1
+
+        # Navigation succeeded — save refreshed cookies back to session file
+        try:
+            await context.storage_state(path=save_path)
+        except Exception:
+            pass  # Non-critical; best-effort refresh
 
         # Paginate through battle pages to collect all replay links
         await page.wait_for_timeout(POST_LOAD_WAIT)

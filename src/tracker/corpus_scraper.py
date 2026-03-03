@@ -370,6 +370,13 @@ async def scrape_corpus_replays(
                 stats["total_players"], len(players), stats["total_replays"],
             )
 
+        # Save refreshed cookies before closing context
+        if not stats["session_expired"]:
+            try:
+                await context.storage_state(path=save_path)
+            except Exception:
+                pass
+
         # Cleanup
         for page in pages:
             await page.close()
@@ -646,6 +653,13 @@ async def scrape_corpus_combined(
                 stats["total_players"], len(players),
                 stats["total_new_battles"], stats["total_replays"],
             )
+
+        # Save refreshed cookies before closing context
+        if not stats["session_expired"]:
+            try:
+                await context.storage_state(path=save_path)
+            except Exception:
+                pass
 
         # Cleanup
         for page in pages:
