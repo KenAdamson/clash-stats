@@ -112,6 +112,12 @@ SCRAPE_RUNS = Counter(
     ["scrape_type", "outcome"],  # type=battles|replays, outcome=success|partial|failed
 )
 
+RATE_LIMIT_BACKOFF = Histogram(
+    "rate_limit_backoff_seconds",
+    "Total backoff time before a request succeeds after 429s",
+    buckets=(1, 2, 4, 8, 16, 32, 64, 128),
+)
+
 
 def _read_accumulated() -> dict:
     """Read accumulated metrics from the shared JSON file."""
@@ -188,6 +194,7 @@ BATCH_METRIC_NAMES = {
     "corpus_players_deactivated",
     "circuit_breaker_trips",
     "scrape_runs",
+    "rate_limit_backoff_seconds",
 }
 
 
@@ -213,6 +220,7 @@ _METRIC_TYPE_MAP = {
     "corpus_players_deactivated": ("counter", "Players deactivated (404)"),
     "circuit_breaker_trips": ("counter", "Circuit breaker trip events"),
     "scrape_runs": ("counter", "Scrape run completions"),
+    "rate_limit_backoff_seconds": ("histogram", "Total backoff time after 429s"),
 }
 
 

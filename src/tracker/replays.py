@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import re
 import time
 from pathlib import Path
@@ -26,6 +27,7 @@ from tenacity import (
 
 from tracker.metrics import (
     CIRCUIT_BREAKER_TRIPS,
+    RATE_LIMIT_BACKOFF,
     REPLAYS_FAILED,
     REPLAYS_FETCHED,
     SESSION_EXPIRY,
@@ -556,17 +558,35 @@ async def fetch_replays(
                 replay_url = f"{ROYALEAPI_BASE}{link}"
                 logger.info("Fetching replay: %s", replay_url)
 
-                status, html, retry_after = await _fetch_replay_page(page, replay_url)
-
-                if status == 429:
-                    wait = retry_after if retry_after > 0 else 30.0
-                    logger.warning(
-                        "429 rate-limited fetching %s — backing off %.0fs",
-                        battle.battle_id, wait,
+                # Retry loop for 429 rate limits: exponential backoff
+                # 1s, 2s, 4s, 8s, 16s, 32s, 32s, 32s (max 8 attempts)
+                total_backoff = 0.0
+                for attempt in range(8):
+                    status, html, retry_after = await _fetch_replay_page(
+                        page, replay_url,
                     )
-                    REPLAYS_FAILED.labels(error_type="rate_limited").inc()
+                    if status != 429:
+                        break
+                    if retry_after > 0:
+                        wait = retry_after
+                    else:
+                        wait = min(2 ** attempt, 32) + random.uniform(0, 1)
+                    total_backoff += wait
+                    logger.warning(
+                        "429 fetching %s — attempt %d/8, backoff %.1fs (total %.1fs)",
+                        battle.battle_id, attempt + 1, wait, total_backoff,
+                    )
                     await asyncio.sleep(wait)
+                else:
+                    # Exhausted all 8 retries
+                    REPLAYS_FAILED.labels(error_type="rate_limited").inc()
+                    RATE_LIMIT_BACKOFF.observe(total_backoff)
+                    stats["failed_transient"] += 1
                     continue
+
+                # Record backoff time if we retried at least once
+                if total_backoff > 0:
+                    RATE_LIMIT_BACKOFF.observe(total_backoff)
 
                 if status == 403:
                     consecutive_403s += 1
@@ -733,17 +753,36 @@ async def fetch_replays_for_player(
 
         try:
             replay_url = f"{ROYALEAPI_BASE}{link}"
-            status, html, retry_after = await _fetch_replay_page(page, replay_url)
 
-            if status == 429:
-                wait = retry_after if retry_after > 0 else 30.0
-                logger.warning(
-                    "429 rate-limited fetching %s — backing off %.0fs",
-                    battle.battle_id, wait,
+            # Retry loop for 429 rate limits: exponential backoff
+            # 1s, 2s, 4s, 8s, 16s, 32s, 32s, 32s (max 8 attempts)
+            total_backoff = 0.0
+            for attempt in range(8):
+                status, html, retry_after = await _fetch_replay_page(
+                    page, replay_url,
                 )
-                REPLAYS_FAILED.labels(error_type="rate_limited").inc()
+                if status != 429:
+                    break
+                if retry_after > 0:
+                    wait = retry_after
+                else:
+                    wait = min(2 ** attempt, 32) + random.uniform(0, 1)
+                total_backoff += wait
+                logger.warning(
+                    "429 fetching %s — attempt %d/8, backoff %.1fs (total %.1fs)",
+                    battle.battle_id, attempt + 1, wait, total_backoff,
+                )
                 await asyncio.sleep(wait)
+            else:
+                # Exhausted all 8 retries
+                REPLAYS_FAILED.labels(error_type="rate_limited").inc()
+                RATE_LIMIT_BACKOFF.observe(total_backoff)
+                stats["failed_transient"] += 1
                 continue
+
+            # Record backoff time if we retried at least once
+            if total_backoff > 0:
+                RATE_LIMIT_BACKOFF.observe(total_backoff)
 
             if status == 403:
                 consecutive_403s += 1
