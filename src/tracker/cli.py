@@ -143,6 +143,10 @@ Environment variables:
                         help="Run Monte Carlo matchup analysis (ADR-002)")
     parser.add_argument("--sim-interactions", action="store_true",
                         help="Show card interaction matrix (P(win|card))")
+    parser.add_argument("--sim-elixir", type=str, nargs="?", const="all", metavar="ARCHETYPE",
+                        help="Elixir economy analysis (optionally vs ARCHETYPE, e.g. 'Hog Cycle')")
+    parser.add_argument("--sim-hands", action="store_true",
+                        help="Opening hand analysis — first-card win rates")
     parser.add_argument("--sim-full", action="store_true",
                         help="Run full simulation suite and cache results")
     parser.add_argument("--corpus-limit", type=int, default=20, metavar="N",
@@ -444,6 +448,91 @@ Environment variables:
                 print(f"{card:<28} {data['total']:>6} "
                       f"{data['win_rate']:>5.1%} {ci:>16}")
 
+        if args.sim_elixir:
+            from tracker.simulation.elixir_economy import (
+                build_exchange_distributions,
+                compute_matchup_elixir_profile,
+            )
+            archetype_filter = None if args.sim_elixir == "all" else args.sim_elixir
+
+            if archetype_filter and player_tag:
+                # Detailed matchup profile
+                profile = compute_matchup_elixir_profile(
+                    session, player_tag, archetype_filter,
+                )
+                if profile:
+                    print(f"\nElixir Economy vs {profile['archetype']}")
+                    print(f"  Games: {profile['total_games']} "
+                          f"({profile['wins']}W-{profile['losses']}L, "
+                          f"{profile['win_rate']:.0%} WR)")
+                    if profile["avg_leak_wins"] is not None:
+                        print(f"  Avg elixir leak (wins):   {profile['avg_leak_wins']:.1f}")
+                    if profile["avg_leak_losses"] is not None:
+                        print(f"  Avg elixir leak (losses): {profile['avg_leak_losses']:.1f}")
+
+                    # Card performance comparison
+                    w_perf = profile["card_performance_wins"]
+                    l_perf = profile["card_performance_losses"]
+                    all_cards = sorted(set(w_perf.keys()) | set(l_perf.keys()))
+                    if all_cards:
+                        print(f"\n  {'Card':<24} {'Win net_e':>10} {'Loss net_e':>10} {'Delta':>8}")
+                        print(f"  {'─' * 56}")
+                        rows = []
+                        for card in all_cards:
+                            w = w_perf.get(card, {}).get("mean_net", None)
+                            l = l_perf.get(card, {}).get("mean_net", None)
+                            delta = (w or 0) - (l or 0)
+                            rows.append((card, w, l, delta))
+                        rows.sort(key=lambda r: r[3], reverse=True)
+                        for card, w, l, delta in rows:
+                            w_str = f"{w:>+.1f}" if w is not None else "   -"
+                            l_str = f"{l:>+.1f}" if l is not None else "   -"
+                            d_str = f"{delta:>+.1f}"
+                            print(f"  {card:<24} {w_str:>10} {l_str:>10} {d_str:>8}")
+                else:
+                    print(f"  Not enough games vs {archetype_filter} with replay data.")
+            else:
+                # Global exchange distributions
+                dists = build_exchange_distributions(
+                    session, player_tag=player_tag, min_exchanges=10,
+                )
+                print(f"\nElixir Exchange Distributions")
+                print(f"  Games: {dists['games_processed']}, "
+                      f"Exchanges: {dists['total_exchanges']}")
+                print(f"\n  {'Card':<24} {'Plays':>6} {'Net e':>7} "
+                      f"{'Std':>5} {'WR':>6}  Top Responses")
+                print(f"  {'─' * 80}")
+                for card, data in dists["card_distributions"].items():
+                    o = data["overall"]
+                    resps = ", ".join(r[0] for r in o["top_responses"][:3])
+                    print(f"  {card:<24} {o['total_plays']:>6} "
+                          f"{o['mean_net_elixir']:>+6.1f} {o['std_net_elixir']:>5.1f} "
+                          f"{o['win_rate']:>5.0%}  {resps}")
+
+        if args.sim_hands:
+            from tracker.simulation.opening_hand import analyze_opening_hands
+            if not player_tag:
+                print("Error: --player-tag required for opening hand analysis")
+            else:
+                results = analyze_opening_hands(session, player_tag)
+                if "error" in results:
+                    print(f"  Error: {results['error']}")
+                else:
+                    print(f"\nOpening Hand Analysis ({results['games_analyzed']} games)")
+                    print(f"  Deck: {', '.join(results['deck_cards'])}")
+                    cd = results["cost_distribution"]
+                    print(f"  Hand cost range: {cd['min_hand']}-{cd['max_hand']}e "
+                          f"(avg {cd['mean_hand']}e)")
+                    print(f"  Cheapest hand: {', '.join(cd['cheapest_possible'])}")
+                    print(f"  Heaviest hand: {', '.join(cd['most_expensive'])}")
+
+                    print(f"\n  First-Card Win Rates:")
+                    print(f"  {'Card':<24} {'Games':>6} {'WR':>6} {'Cost':>5}")
+                    print(f"  {'─' * 44}")
+                    for card, data in results["opener_performance"].items():
+                        print(f"  {card:<24} {data['total']:>6} "
+                              f"{data['win_rate']:>5.0%} {data['avg_cost']:>5.1f}e")
+
         if args.sim_full:
             from tracker.simulation.runner import run_full_simulation
             results = run_full_simulation(session, player_tag=player_tag)
@@ -587,7 +676,8 @@ Environment variables:
             args.corpus_combined,
             args.corpus_stats, args.corpus_add_priority,
             args.corpus_discover, args.corpus_locations, args.corpus_nemeses,
-            args.sim_matchups, args.sim_interactions, args.sim_full,
+            args.sim_matchups, args.sim_interactions, args.sim_elixir,
+            args.sim_hands, args.sim_full,
             args.tilt_check, args.train_tcn, args.build_features, args.train_embeddings,
             args.clusters, args.similar, args.embed_new, args.manifold,
             args.matchup_dive, args.broken_cycle, args.mark_stale_replays,
