@@ -68,11 +68,11 @@ Database migrations are managed by Alembic. The `database.py` module auto-detect
 
 These data points inform what analytics matter:
 
-- **Play style:** 1-2 games/day surgical precision, NOT volume grinding. ~1.35 games/day lifetime average.
+- **Play style:** ~17 games/day in the current active stretch (434 games in 25 days). The ~1.35 games/day lifetime average is misleading — it includes an 8-9 year break from the game.
 - **Efficiency:** ~2,800 games to 10,900+ trophies. Peers at same range: 10,000-15,000+ games.
 - **Three-crown rate:** ~73% lifetime (overwhelmingly wins by destruction, not chip)
 - **Matchup data matters.** Both problem matchups and hard counters exist — the tracker should surface these from real battle data rather than relying on assumptions.
-- **Tilt pattern:** Rare but devastating. Not wired for volume — wired for precision.
+- **Tilt pattern:** Rare but devastating.
 
 ## API Reference
 
@@ -85,7 +85,7 @@ These data points inform what analytics matter:
 
 **Auth:** Bearer token in Authorization header. Key from developer.clashroyale.com.
 
-**Rate limits:** Be respectful. Polling every 2-4 hours is plenty for 1-2 games/day. The proxy has its own limits.
+**Rate limits:** Be respectful. The proxy has its own limits.
 
 **Player tag encoding:** Tags start with `#` which must be URL-encoded as `%23`. The current code handles this.
 
@@ -104,7 +104,7 @@ Dependencies: `torch`, `numpy`, `scikit-learn`, `umap-learn`, `hdbscan`, `pandas
 
 ## Future Vision
 
-The endgame is a unified analytics platform that runs as a Docker container with a lightweight web dashboard. Data-driven competitive advantage for a player who's already proving that precision beats volume.
+The endgame is a unified analytics platform that runs as a Docker container with a lightweight web dashboard. Data-driven competitive advantage.
 
 Priorities:
 1. ~~Fix the Evo tracking gap in the tracker (deck hash + schema)~~ Done
@@ -186,7 +186,7 @@ clash-stats/
 - Dependencies managed via `pyproject.toml`, installed with `pip install .[ml]` in the Dockerfile
 - SQLite database lives on a Docker volume mount (`./data:/app/data`) so it survives container rebuilds
 - Environment variables via `.env` file: `CR_API_KEY`, `CR_PLAYER_TAG`
-- BusyBox crond schedule: poll every 4 hours (1-2 games/day play rate, 25-game API window means zero risk of missing games)
+- BusyBox crond schedule: poll every minute for near-realtime dashboard updates
 - Container runs `--fetch` on schedule and keeps the DB accessible for ad-hoc analytics via `docker exec`
 - Logging to stdout so Docker's log driver captures it
 
