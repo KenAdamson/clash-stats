@@ -162,7 +162,11 @@ def arena_to_screen(arena_x: float, arena_y: float) -> tuple[float, float]:
     """Map arena coordinates to normalized screen coordinates.
 
     Arena Y=0 is opponent side (screen top), Y=31500 is player side (screen bottom).
-    The screen has a slight perspective effect but we use linear mapping as baseline.
+
+    The Y mapping uses a quadratic correction for perspective foreshortening:
+    the arena appears compressed near the player side (bottom of screen) due
+    to the 3D-ish camera angle. Empirical fit from SharpJedi game calibration:
+      screen_y = -0.0512*norm_y^2 + 0.6094*norm_y + 0.1204
 
     Returns:
         (screen_x, screen_y) in [0, 1] normalized coordinates.
@@ -171,10 +175,12 @@ def arena_to_screen(arena_x: float, arena_y: float) -> tuple[float, float]:
     norm_x = (arena_x - ARENA_X_MIN) / (ARENA_X_MAX - ARENA_X_MIN)
     norm_y = (arena_y - ARENA_Y_MIN) / (ARENA_Y_MAX - ARENA_Y_MIN)
 
-    # Map to screen arena region
+    # Map X linearly to screen arena region
     screen_x = SCREEN_ARENA_LEFT + norm_x * (SCREEN_ARENA_RIGHT - SCREEN_ARENA_LEFT)
-    # Y is inverted: arena Y=0 (opponent) -> screen top, Y=31500 (player) -> screen bottom
-    screen_y = SCREEN_ARENA_TOP + norm_y * (SCREEN_ARENA_BOTTOM - SCREEN_ARENA_TOP)
+
+    # Map Y with quadratic perspective correction
+    # Coefficients from empirical calibration (replay position vs visual position)
+    screen_y = -0.0512 * norm_y**2 + 0.6094 * norm_y + 0.1204
 
     return (screen_x, screen_y)
 
