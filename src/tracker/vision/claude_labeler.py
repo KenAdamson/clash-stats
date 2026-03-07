@@ -44,22 +44,39 @@ COST_PER_INPUT_MTOK = {"claude-haiku-4-5-20251001": 0.80, "claude-sonnet-4-6": 3
 COST_PER_OUTPUT_MTOK = {"claude-haiku-4-5-20251001": 4.00, "claude-sonnet-4-6": 15.00}
 
 
-SYSTEM_PROMPT = """\
+_SYSTEM_PROMPT_TEMPLATE = """\
 You are a Clash Royale visual analysis system. You receive gameplay frames from \
 replay recordings along with predicted unit positions derived from replay event data.
+
+VALID CARD NAMES for this game:
+  Player deck: {player_deck}
+  Opponent deck: {opponent_deck}
+  Valid sub-units: Skeleton (spawned by Witch, Tombstone, or Graveyard)
 
 Your job:
 1. CONFIRM or REJECT each predicted unit — is it actually visible in the frame?
 2. REFINE bounding boxes — adjust coordinates to tightly fit the visible unit.
-3. ADD missing units — spawned sub-units (Witch skeletons, Graveyard skeletons, \
-Tombstone skeletons, Goblin Drill goblins), spell visual effects, and any troops \
-the predictions missed.
+3. ADD missing sub-units (Skeleton only). Do NOT add towers or cards not listed above.
 4. READ replay-exclusive signals visible at the top of the screen:
    - Opponent's elixir count (purple bar, top-left, 0-10)
-   - Opponent's 4 hand cards (card icons at top-center)
+   - Opponent's 4 hand cards — MUST be from the opponent deck list above. \
+If you cannot identify a card icon, use "Unknown".
    - Whether a card is highlighted/selected (glowing border = about to be played)
 
+CRITICAL RULES:
+- Do NOT list towers (King Tower, Princess Tower) as units. Ignore all towers.
+- Every card_name MUST be from the deck lists above, or "Skeleton".
+- Opponent hand cards MUST come from the opponent deck list above, or "Unknown".
+
 Return ONLY valid JSON matching the schema below. No markdown, no explanation."""
+
+
+def _build_system_prompt(player_deck: list[str], opponent_deck: list[str]) -> str:
+    """Build the system prompt with game-specific deck constraints."""
+    return _SYSTEM_PROMPT_TEMPLATE.format(
+        player_deck=", ".join(player_deck),
+        opponent_deck=", ".join(opponent_deck),
+    )
 
 LABEL_SCHEMA = """\
 {
@@ -100,6 +117,7 @@ Bbox coordinates are normalized [0,1] relative to the full image: [x1, y1, x2, y
 Team is "friendly" (blue, bottom) or "opponent" (red, top).
 Status: "confirmed" (prediction correct), "adjusted" (bbox refined), "rejected" (not visible).
 Actions: "walking", "attacking", "deploying", "dying", "idle", "ability".
+
 """
 
 
@@ -188,18 +206,19 @@ def refine_single_frame(
     Returns:
         Refined label dict, or None on failure.
     """
+    player_deck = label.get("player_deck", [])
+    opponent_deck = label.get("opponent_deck", [])
     user_content = build_user_message(
-        frame_path, label,
-        label.get("player_deck", []),
-        label.get("opponent_deck", []),
+        frame_path, label, player_deck, opponent_deck,
     )
+    system_prompt = _build_system_prompt(player_deck, opponent_deck)
 
     for attempt in range(MAX_RETRIES):
         try:
             response = client.messages.create(
                 model=model,
                 max_tokens=2048,
-                system=SYSTEM_PROMPT,
+                system=system_prompt,
                 messages=[{"role": "user", "content": user_content}],
             )
 
