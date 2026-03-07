@@ -1,10 +1,9 @@
 """Integration test for SAMv2 tracking with real replay frames.
 
 Tests the full pipeline:
-  1. Prepare a frame window from the SharpJedi recording
-  2. Create spawn prompts from replay event data
-  3. Send to SAMv2 sidecar for tracking
-  4. Verify we get reasonable bounding boxes back
+  1. For each unit, prepare a short frame window (~50 frames / 5 seconds)
+  2. Track single unit per window for speed and accuracy
+  3. Merge results across windows
 
 Requires:
   - SAMv2 sidecar running (docker compose up cr-samv2)
@@ -12,7 +11,9 @@ Requires:
 """
 
 import json
+import os
 import sys
+import time
 from pathlib import Path
 
 # Add src to path
@@ -20,14 +21,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from tracker.vision.samv2_client import (
     SpawnPrompt,
-    prepare_frame_window,
     track_units,
-    cleanup_window,
 )
 from tracker.vision.replay_guided_labels import arena_to_screen
 from tracker.vision.card_properties import get_properties
 
 REPLAY_DIR = Path("replays/ScreenRecording_03-06-2026 16-24-20_1")
+WINDOW_DIR = Path("replays/_samv2_test_window")
+CONTAINER_WINDOW_DIR = "/app/replays/_samv2_test_window"
 FPS = 10.0
 TICKS_PER_SECOND = 20
 
@@ -51,134 +52,133 @@ def make_spawn_bbox(arena_x: int, arena_y: int, card_name: str) -> tuple:
     return (round(x1, 4), round(y1, 4), round(x2, 4), round(y2, 4))
 
 
-def test_track_early_game():
-    """Track the first few units spawned in the SharpJedi game.
-
-    Events at start of game:
-      tick=132 (6.6s)  opponent baby-dragon   x=1500 y=14500
-      tick=171 (8.6s)  opponent graveyard      x=2500 y=25500
-      tick=202 (10.1s) team     executioner    x=499  y=26499
-      tick=228 (11.4s) team     goblin-curse   x=3500 y=25500
-      tick=307 (15.3s) team     bats           x=2500 y=18500
-    """
-    # Larger window: frame 60 to frame 200 (~14 seconds)
-    # Covers first 5 spawn events:
-    #   tick=132 (6.6s)  opponent baby-dragon   x=1500 y=14500  → frame 66
-    #   tick=171 (8.6s)  opponent graveyard      x=2500 y=25500  → frame 86 (spell, skip)
-    #   tick=202 (10.1s) team     executioner    x=499  y=26499  → frame 101
-    #   tick=228 (11.4s) team     goblin-curse   x=3500 y=25500  → frame 114 (spell, skip)
-    #   tick=307 (15.3s) team     bats           x=2500 y=18500  → frame 154
-    window_start = 60
-    window_end = 200
-
-    prompts = [
-        SpawnPrompt(
-            object_id=1,
-            card_name="Baby Dragon",
-            team="opponent",
-            spawn_frame=tick_to_frame(132),  # frame 66
-            bbox=make_spawn_bbox(1500, 14500, "Baby Dragon"),
-        ),
-        SpawnPrompt(
-            object_id=2,
-            card_name="Executioner",
-            team="friendly",
-            spawn_frame=tick_to_frame(202),  # frame 101
-            bbox=make_spawn_bbox(499, 26499, "Executioner"),
-        ),
-        SpawnPrompt(
-            object_id=3,
-            card_name="Bats",
-            team="friendly",
-            spawn_frame=tick_to_frame(307),  # frame 154
-            bbox=make_spawn_bbox(2500, 18500, "Bats"),
-        ),
-    ]
-
-    print(f"\n=== SAMv2 Tracking Test: Early Game Window ===")
-    print(f"Frames: {window_start}-{window_end} ({window_end - window_start + 1} frames)")
-    print(f"Prompts:")
-    for p in prompts:
-        print(f"  #{p.object_id} {p.card_name} ({p.team}) @ frame {p.spawn_frame}, bbox={p.bbox}")
-
-    # Prepare frame window
-    # The frames need to be accessible from inside the container at /app/replays/...
-    # Since we volume-mount ./replays:/app/replays, use that path
-    container_source = Path("/app/replays/ScreenRecording_03-06-2026 16-24-20_1")
-
-    # Create window dir under replays so it's visible inside container
-    window_dir = Path("replays/_samv2_test_window")
-    window_dir.mkdir(parents=True, exist_ok=True)
-
-    # Clean any previous test
-    for f in window_dir.glob("*.jpg"):
+def prepare_window(start_frame: int, end_frame: int) -> int:
+    """Create hardlinked frame window. Returns number of frames linked."""
+    WINDOW_DIR.mkdir(parents=True, exist_ok=True)
+    for f in WINDOW_DIR.glob("*.jpg"):
         f.unlink()
 
-    # Create hardlinks with SAMv2-compatible naming
-    # (symlinks don't work because they resolve to host paths inside the container)
-    import os
     idx = 0
-    for frame_num in range(window_start, window_end + 1):
+    for frame_num in range(start_frame, end_frame + 1):
         src = REPLAY_DIR / f"frame_{frame_num:04d}.jpg"
         if not src.exists():
-            print(f"  WARNING: Missing frame {frame_num}")
             continue
-        dst = window_dir / f"{idx:05d}.jpg"
-        if dst.exists():
-            dst.unlink()
+        dst = WINDOW_DIR / f"{idx:05d}.jpg"
         os.link(src, dst)
         idx += 1
+    return idx
 
-    print(f"\nPrepared {idx} frames in {window_dir}")
 
-    # Container sees these at /app/replays/_samv2_test_window
-    container_window_dir = "/app/replays/_samv2_test_window"
+def track_single_unit(
+    card_name: str,
+    team: str,
+    spawn_tick: int,
+    arena_x: int,
+    arena_y: int,
+    window_seconds: float = 5.0,
+) -> list:
+    """Track a single unit in a short window after its spawn.
 
-    # Adjust prompts for container path
-    results = track_units(
-        frame_dir=Path(container_window_dir),
-        prompts=prompts,
-        window_start_frame=window_start,
-        confidence_threshold=0.1,
-        timeout=600,
+    Returns list of tracking results.
+    """
+    spawn_frame = tick_to_frame(spawn_tick)
+    # Start window a few frames before spawn to give SAMv2 context
+    window_start = max(1, spawn_frame - 3)
+    window_end = spawn_frame + int(window_seconds * FPS)
+
+    bbox = make_spawn_bbox(arena_x, arena_y, card_name)
+    prompt = SpawnPrompt(
+        object_id=1,
+        card_name=card_name,
+        team=team,
+        spawn_frame=spawn_frame,
+        bbox=bbox,
     )
 
-    print(f"\n=== Results: {len(results)} tracking points ===")
+    n_frames = prepare_window(window_start, window_end)
+    print(f"\n  Tracking {card_name} ({team}): frames {window_start}-{window_end} ({n_frames} frames)")
+    print(f"    Spawn frame: {spawn_frame}, bbox: {bbox}")
 
-    # Group by object
-    by_object = {}
-    for r in results:
-        by_object.setdefault(r.object_id, []).append(r)
+    t0 = time.time()
+    results = track_units(
+        frame_dir=Path(CONTAINER_WINDOW_DIR),
+        prompts=[prompt],
+        window_start_frame=window_start,
+        confidence_threshold=0.1,
+        timeout=120,
+    )
+    elapsed = time.time() - t0
 
-    for obj_id, obj_results in sorted(by_object.items()):
-        prompt = next(p for p in prompts if p.object_id == obj_id)
-        print(f"\n  #{obj_id} {prompt.card_name} ({prompt.team}):")
-        print(f"    Tracked in {len(obj_results)} frames")
-        if obj_results:
-            first = obj_results[0]
-            last = obj_results[-1]
-            print(f"    First: frame {first.frame_number}, bbox={first.bbox}, conf={first.confidence:.3f}")
-            print(f"    Last:  frame {last.frame_number}, bbox={last.bbox}, conf={last.confidence:.3f}")
+    print(f"    Got {len(results)} tracking points in {elapsed:.1f}s ({elapsed/max(n_frames,1):.2f}s/frame)")
 
-            # Show every 10th frame
-            for r in obj_results[::10]:
-                print(f"    frame {r.frame_number:4d}: bbox=({r.bbox[0]:.3f},{r.bbox[1]:.3f},{r.bbox[2]:.3f},{r.bbox[3]:.3f}) conf={r.confidence:.3f}")
+    if results:
+        first = results[0]
+        last = results[-1]
+        print(f"    First: frame {first.frame_number}, bbox=({first.bbox[0]:.3f},{first.bbox[1]:.3f},{first.bbox[2]:.3f},{first.bbox[3]:.3f}), conf={first.confidence:.3f}")
+        print(f"    Last:  frame {last.frame_number}, bbox=({last.bbox[0]:.3f},{last.bbox[1]:.3f},{last.bbox[2]:.3f},{last.bbox[3]:.3f}), conf={last.confidence:.3f}")
 
-    # Save full results
+        # Show movement: first vs last bbox center
+        cx1 = (first.bbox[0] + first.bbox[2]) / 2
+        cy1 = (first.bbox[1] + first.bbox[3]) / 2
+        cx2 = (last.bbox[0] + last.bbox[2]) / 2
+        cy2 = (last.bbox[1] + last.bbox[3]) / 2
+        dx = cx2 - cx1
+        dy = cy2 - cy1
+        print(f"    Movement: dx={dx:+.4f}, dy={dy:+.4f}")
+
+    return results
+
+
+def test_track_units_individually():
+    """Track each unit in the SharpJedi game in its own short window.
+
+    SharpJedi troop events (first half):
+      tick=132 (6.6s)   opponent baby-dragon   x=1500 y=14500
+      tick=202 (10.1s)  team     executioner    x=499  y=26499
+      tick=307 (15.3s)  team     bats           x=2500 y=18500
+      tick=521 (26.1s)  opponent ice-wizard     x=1500 y=6500
+      tick=863 (43.1s)  opponent valkyrie       x=2499 y=4500
+      tick=1144 (57.2s) team     pekka          x=8499 y=20499
+    """
+    print("=== SAMv2 Per-Unit Tracking Test ===")
+
+    all_results = []
+
+    # Baby Dragon — flies from behind opponent king tower toward bridge
+    results = track_single_unit("Baby Dragon", "opponent", 132, 1500, 14500, window_seconds=8.0)
+    all_results.extend(results)
+
+    # Executioner — walks from player side toward bridge
+    results = track_single_unit("Executioner", "friendly", 202, 499, 26499, window_seconds=8.0)
+    all_results.extend(results)
+
+    # Bats — fast flyers, tiny, move quickly to bridge
+    results = track_single_unit("Bats", "friendly", 307, 2500, 18500, window_seconds=5.0)
+    all_results.extend(results)
+
+    # Ice Wizard — opponent deploys near king tower
+    results = track_single_unit("Ice Wizard", "opponent", 521, 1500, 6500, window_seconds=8.0)
+    all_results.extend(results)
+
+    # Valkyrie — melee, walks toward bridge
+    results = track_single_unit("Valkyrie", "opponent", 863, 2499, 4500, window_seconds=8.0)
+    all_results.extend(results)
+
+    # PEKKA — big unit, should be easy to track
+    results = track_single_unit("P.E.K.K.A", "friendly", 1144, 8499, 20499, window_seconds=8.0)
+    all_results.extend(results)
+
+    # Save all results
     output_path = Path("replays/_samv2_test_results.json")
     with open(output_path, "w") as f:
         json.dump(
             [{"object_id": r.object_id, "card_name": r.card_name, "team": r.team,
               "frame_number": r.frame_number, "bbox": list(r.bbox), "confidence": r.confidence}
-             for r in results],
+             for r in all_results],
             f, indent=2,
         )
-    print(f"\nFull results saved to {output_path}")
-
-    # Cleanup
-    # Don't clean up yet so we can inspect
-    # cleanup_window(window_dir)
+    print(f"\n=== Total: {len(all_results)} tracking points saved to {output_path} ===")
 
 
 if __name__ == "__main__":
-    test_track_early_game()
+    test_track_units_individually()
