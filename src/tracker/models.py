@@ -99,6 +99,9 @@ class Battle(Base):
     # Added in migration v3 (ADR-007)
     corpus: Mapped[str] = mapped_column(String, default="personal")
 
+    # Added in migration v4 (ADR-009)
+    video_path: Mapped[Optional[str]] = mapped_column(String, default=None)
+
     # Relationship
     deck_cards: Mapped[list["DeckCard"]] = relationship(
         back_populates="battle", cascade="all, delete-orphan"
