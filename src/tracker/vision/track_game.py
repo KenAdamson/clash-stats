@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session
 from tracker.ml.card_metadata import kebab_to_title
 from tracker.models import Battle, ReplayEvent
 from tracker.vision.card_properties import get_properties
-from tracker.vision.replay_guided_labels import arena_to_screen
+from tracker.vision.replay_guided_labels import arena_to_screen, estimate_unit_position
 from tracker.vision.samv2_client import SpawnPrompt, TrackingResult, track_units
 
 logger = logging.getLogger(__name__)
@@ -34,9 +34,28 @@ SKIP_TRACKING = {
     "Miner",  # burrows underground, appears ~1s later at target position
 }
 
+# Units too small/fast for reliable SAMv2 tracking
+UNRELIABLE_TRACKING = {
+    "Bats",  # 5 tiny fast-moving units, SAMv2 locks on static features
+}
+
 TICKS_PER_SECOND = 20
 DEFAULT_FPS = 10.0
 DEFAULT_WINDOW_SECONDS = 8.0  # track each unit for 8 seconds after spawn
+
+# Tower screen positions (normalized) for overlap detection
+# SAMv2 grabs towers when spawn bbox overlaps them
+_TOWER_POSITIONS = [
+    (0.5000, 0.1301, 0.08),  # opponent king tower, radius
+    (0.2120, 0.1875, 0.06),  # opponent princess L
+    (0.7880, 0.1875, 0.06),  # opponent princess R
+    (0.5000, 0.6705, 0.08),  # friendly king tower
+    (0.2120, 0.6216, 0.06),  # friendly princess L
+    (0.7880, 0.6216, 0.06),  # friendly princess R
+]
+
+# How many seconds to delay prompt when spawn overlaps a tower
+TOWER_OVERLAP_DELAY_SEC = 1.5
 
 
 @dataclass
@@ -58,6 +77,14 @@ class GameTrackingConfig:
 def tick_to_frame(tick: int, fps: float = DEFAULT_FPS) -> int:
     """Convert a replay tick to a frame number."""
     return round(tick / TICKS_PER_SECOND * fps)
+
+
+def _overlaps_tower(screen_x: float, screen_y: float) -> bool:
+    """Check if a screen position overlaps any tower."""
+    for tx, ty, radius in _TOWER_POSITIONS:
+        if abs(screen_x - tx) < radius and abs(screen_y - ty) < radius:
+            return True
+    return False
 
 
 def make_spawn_bbox(arena_x: int, arena_y: int, card_name: str) -> tuple:
@@ -149,18 +176,62 @@ def track_full_game(
     for i, event in enumerate(troop_events):
         card_name = kebab_to_title(event.card_name)
         team = "friendly" if event.side == "team" else "opponent"
+
+        if card_name in UNRELIABLE_TRACKING:
+            logger.info(
+                "[%d/%d] Skipping %s (%s) — unreliable tracking",
+                i + 1, len(troop_events), card_name, team,
+            )
+            continue
+
         spawn_frame = tick_to_frame(event.game_tick, config.fps)
+        prompt_frame = spawn_frame
 
-        # Window: a few frames before spawn to end of tracking period
-        window_start = max(1, spawn_frame - 3)
-        window_end = spawn_frame + int(config.window_seconds * config.fps)
+        # Check if spawn position overlaps a tower — if so, delay the prompt
+        # until the unit has walked clear of the tower zone
+        screen_x, screen_y = arena_to_screen(event.arena_x, event.arena_y)
+        props = get_properties(card_name)
+        if _overlaps_tower(screen_x, screen_y) and props.walk_speed > 0:
+            # Walk forward in 0.5s steps until clear of tower (max 5s)
+            cleared = False
+            for step in range(1, 11):  # up to 5 seconds
+                delay_sec = step * 0.5
+                est_x, est_y, _ = estimate_unit_position(
+                    event.arena_x, event.arena_y,
+                    event.side, props, delay_sec,
+                )
+                sx, sy = arena_to_screen(int(est_x), int(est_y))
+                if not _overlaps_tower(sx, sy):
+                    cleared = True
+                    break
 
-        bbox = make_spawn_bbox(event.arena_x, event.arena_y, card_name)
+            if not cleared:
+                # Unit walks directly through tower center — can't get a clean prompt
+                logger.warning(
+                    "[%d/%d] Skipping %s (%s) — spawn path stays over tower",
+                    i + 1, len(troop_events), card_name, team,
+                )
+                continue
+
+            delay_frames = int(delay_sec * config.fps)
+            prompt_frame = spawn_frame + delay_frames
+            bbox = make_spawn_bbox(int(est_x), int(est_y), card_name)
+            logger.info(
+                "  Tower overlap at spawn — delaying prompt by %.1fs (%d frames) to frame %d",
+                delay_sec, delay_frames, prompt_frame,
+            )
+        else:
+            bbox = make_spawn_bbox(event.arena_x, event.arena_y, card_name)
+
+        # Window: a few frames before prompt to end of tracking period
+        window_start = max(1, prompt_frame - 3)
+        window_end = prompt_frame + int(config.window_seconds * config.fps)
+
         prompt = SpawnPrompt(
             object_id=1,  # single object per window
             card_name=card_name,
             team=team,
-            spawn_frame=spawn_frame,
+            spawn_frame=prompt_frame,
             bbox=bbox,
         )
 
