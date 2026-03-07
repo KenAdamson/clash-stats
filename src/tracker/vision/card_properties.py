@@ -27,6 +27,7 @@ class CardVisualProps:
     bbox_size: tuple[float, float]  # (width, height) in normalized screen coords
     is_ranged: bool = False
     range_tiles: float = 0.0  # attack range in tiles
+    is_flying: bool = False  # flying units render offset from their hitbox
     spawn_units: Optional[str] = None  # e.g. "skeleton" for Witch/Graveyard
     spawn_count: int = 0
     spawn_interval_sec: float = 0.0
@@ -57,7 +58,7 @@ CARD_PROPERTIES: dict[str, CardVisualProps] = {
     "Executioner": CardVisualProps("troop", 1000, 15.0, MEDIUM, is_ranged=True, range_tiles=4.5),
     "P.E.K.K.A": CardVisualProps("troop", 750, 20.0, XLARGE),
     "Goblin Curse": CardVisualProps("spell", 0, 8.0, SPELL_MEDIUM),
-    "Bats": CardVisualProps("troop", 1500, 6.0, TINY),  # 5 bats, fast flyers
+    "Bats": CardVisualProps("troop", 1500, 6.0, TINY, is_flying=True),  # 5 bats, fast flyers
     "Graveyard": CardVisualProps("spell", 0, 10.0, SPELL_LARGE,
                                  spawn_units="skeleton", spawn_count=15, spawn_interval_sec=0.5),
     "Miner": CardVisualProps("troop", 1000, 15.0, SMALL),  # tunnels to position
@@ -69,8 +70,8 @@ CARD_PROPERTIES: dict[str, CardVisualProps] = {
     "Golem": CardVisualProps("troop", 500, 25.0, XLARGE),
     "Giant": CardVisualProps("troop", 750, 20.0, LARGE),
     "Royal Giant": CardVisualProps("troop", 750, 18.0, LARGE, is_ranged=True, range_tiles=5.0),
-    "Lava Hound": CardVisualProps("troop", 500, 20.0, LARGE),  # flying
-    "Balloon": CardVisualProps("troop", 1000, 15.0, MEDIUM),  # flying
+    "Lava Hound": CardVisualProps("troop", 500, 20.0, LARGE, is_flying=True),
+    "Balloon": CardVisualProps("troop", 1000, 15.0, MEDIUM, is_flying=True),
     "Sparky": CardVisualProps("troop", 750, 20.0, LARGE, is_ranged=True, range_tiles=4.5),
     "X-Bow": CardVisualProps("building", 0, 40.0, BUILDING, is_ranged=True, range_tiles=11.5),
     "Mortar": CardVisualProps("building", 0, 30.0, BUILDING, is_ranged=True, range_tiles=11.5),
@@ -80,8 +81,8 @@ CARD_PROPERTIES: dict[str, CardVisualProps] = {
     "Musketeer": CardVisualProps("troop", 1000, 14.0, MEDIUM, is_ranged=True, range_tiles=6.0),
     "Ice Wizard": CardVisualProps("troop", 1000, 12.0, MEDIUM, is_ranged=True, range_tiles=5.5),
     "Electro Wizard": CardVisualProps("troop", 1000, 12.0, MEDIUM, is_ranged=True, range_tiles=5.0),
-    "Baby Dragon": CardVisualProps("troop", 1000, 12.0, MEDIUM, is_ranged=True, range_tiles=3.5),
-    "Inferno Dragon": CardVisualProps("troop", 1000, 12.0, MEDIUM, is_ranged=True, range_tiles=4.0),
+    "Baby Dragon": CardVisualProps("troop", 1000, 12.0, MEDIUM, is_ranged=True, range_tiles=3.5, is_flying=True),
+    "Inferno Dragon": CardVisualProps("troop", 1000, 12.0, MEDIUM, is_ranged=True, range_tiles=4.0, is_flying=True),
     "Night Witch": CardVisualProps("troop", 1000, 10.0, MEDIUM,
                                    spawn_units="bat", spawn_count=2, spawn_interval_sec=5.0),
     "Mother Witch": CardVisualProps("troop", 1000, 8.0, MEDIUM, is_ranged=True, range_tiles=5.5),
@@ -96,8 +97,11 @@ CARD_PROPERTIES: dict[str, CardVisualProps] = {
     "Goblins": CardVisualProps("troop", 1500, 5.0, TINY),
     "Spear Goblins": CardVisualProps("troop", 1500, 5.0, TINY, is_ranged=True, range_tiles=5.0),
     "Goblin Gang": CardVisualProps("troop", 1500, 5.0, TINY),
-    "Minions": CardVisualProps("troop", 1500, 5.0, TINY),
-    "Minion Horde": CardVisualProps("troop", 1500, 5.0, TINY),
+    "Minions": CardVisualProps("troop", 1500, 5.0, TINY, is_flying=True),
+    "Minion Horde": CardVisualProps("troop", 1500, 5.0, TINY, is_flying=True),
+    "Mega Minion": CardVisualProps("troop", 1000, 12.0, SMALL, is_ranged=True, range_tiles=2.0, is_flying=True),
+    "Flying Machine": CardVisualProps("troop", 1000, 10.0, SMALL, is_ranged=True, range_tiles=6.0, is_flying=True),
+    "Electro Dragon": CardVisualProps("troop", 1000, 12.0, MEDIUM, is_ranged=True, range_tiles=3.5, is_flying=True),
     "Fire Spirit": CardVisualProps("troop", 1500, 3.0, TINY),
     "Ice Spirit": CardVisualProps("troop", 1500, 3.0, TINY),
     "Electro Spirit": CardVisualProps("troop", 1500, 3.0, TINY),
