@@ -184,12 +184,26 @@ async def track_objects(req: TrackRequest):
             x2 = prompt.bbox[2] * img_w
             y2 = prompt.bbox[3] * img_h
 
-            predictor.add_new_points_or_box(
-                inference_state=state,
-                frame_idx=frame_idx,
-                obj_id=prompt.object_id,
-                box=np.array([x1, y1, x2, y2]),
-            )
+            # For large units, add center point to anchor the mask
+            bbox_area_norm = (prompt.bbox[2] - prompt.bbox[0]) * (prompt.bbox[3] - prompt.bbox[1])
+            if bbox_area_norm > 0.008:
+                cx = (x1 + x2) / 2
+                cy = (y1 + y2) / 2
+                predictor.add_new_points_or_box(
+                    inference_state=state,
+                    frame_idx=frame_idx,
+                    obj_id=prompt.object_id,
+                    box=np.array([x1, y1, x2, y2]),
+                    points=np.array([[cx, cy]]),
+                    labels=np.array([1]),
+                )
+            else:
+                predictor.add_new_points_or_box(
+                    inference_state=state,
+                    frame_idx=frame_idx,
+                    obj_id=prompt.object_id,
+                    box=np.array([x1, y1, x2, y2]),
+                )
             logger.info(
                 "Registered object %d (%s:%s) at frame %d",
                 prompt.object_id, prompt.card_name, prompt.team,
@@ -201,8 +215,12 @@ async def track_objects(req: TrackRequest):
         prompt_lookup = {p.object_id: p for p in req.prompts}
         # Track spawn frames to filter backward propagation
         spawn_frame_idx = {p.object_id: p.spawn_frame - 1 for p in req.prompts}
-        # Track initial bbox size for sanity checking (detect mask explosion)
+        # Track initial bbox size from PROMPT for sanity checking (detect mask explosion)
         initial_bbox_area = {}
+        for p in req.prompts:
+            pw = p.bbox[2] - p.bbox[0]
+            ph = p.bbox[3] - p.bbox[1]
+            initial_bbox_area[p.object_id] = pw * ph
 
         for frame_idx, obj_ids, masks in predictor.propagate_in_video(state):
             frame_num = frame_idx + 1  # back to 1-indexed
@@ -241,10 +259,9 @@ async def track_objects(req: TrackRequest):
                     )
                     continue
 
-                # Track initial bbox area and reject if it grows > 5x
-                if obj_id not in initial_bbox_area:
-                    initial_bbox_area[obj_id] = bbox_area
-                elif bbox_area > initial_bbox_area[obj_id] * 5:
+                # Reject if bbox area exceeds 2.5x the prompt bbox area
+                prompt_area = initial_bbox_area.get(obj_id, bbox_area)
+                if bbox_area > prompt_area * 2.5:
                     logger.warning(
                         "Object %d bbox exploded (%.4f -> %.4f) at frame %d, skipping",
                         obj_id, initial_bbox_area[obj_id], bbox_area, frame_num,
