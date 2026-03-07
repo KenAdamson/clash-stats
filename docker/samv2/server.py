@@ -7,10 +7,13 @@ Accepts tracking requests with:
 Returns per-frame masks and bounding boxes for each tracked object.
 
 Designed to run on Intel Arc GPU via IPEX (XPU device).
+Supports concurrent tracking via a predictor pool.
 """
 
+import asyncio
 import logging
 import os
+import queue
 import time
 from pathlib import Path
 from typing import Optional
@@ -44,10 +47,14 @@ torch.nn.Linear.forward = _safe_linear_forward
 logger = logging.getLogger("samv2-tracker")
 logging.basicConfig(level=logging.INFO)
 
-app = FastAPI(title="SAMv2 Tracker", version="0.1.0")
+# Number of concurrent predictor instances (1 is optimal on XPU —
+# concurrent sessions cause memory bandwidth contention and 3x slowdown)
+POOL_SIZE = int(os.environ.get("SAMV2_POOL_SIZE", "1"))
 
-# Global predictor — initialized once on startup
-predictor = None
+app = FastAPI(title="SAMv2 Tracker", version="0.2.0")
+
+# Predictor pool — thread-safe queue of predictor instances
+predictor_pool: queue.Queue = queue.Queue()
 device = None
 
 
@@ -89,11 +96,10 @@ class TrackResponse(BaseModel):
 
 @app.on_event("startup")
 async def load_model():
-    """Load SAMv2 model on startup."""
-    global predictor, device
+    """Load SAMv2 predictor pool on startup."""
+    global device
 
     # Detect best available device
-    # XPU (Intel Arc) works with the Linear dtype monkey-patch above
     if hasattr(torch, "xpu") and torch.xpu.is_available():
         device = torch.device("xpu")
         logger.info("Using Intel XPU (Arc GPU)")
@@ -107,14 +113,20 @@ async def load_model():
     try:
         from sam2.build_sam import build_sam2_video_predictor
 
-        predictor = build_sam2_video_predictor(
-            "configs/sam2.1/sam2.1_hiera_l.yaml",
-            ckpt_path="/app/checkpoints/sam2.1_hiera_large.pt",
-            device=device,
+        for i in range(POOL_SIZE):
+            pred = build_sam2_video_predictor(
+                "configs/sam2.1/sam2.1_hiera_l.yaml",
+                ckpt_path="/app/checkpoints/sam2.1_hiera_large.pt",
+                device=device,
+            )
+            pred = pred.float()
+            predictor_pool.put(pred)
+            logger.info("Loaded predictor %d/%d (float32)", i + 1, POOL_SIZE)
+
+        logger.info(
+            "SAMv2 predictor pool ready: %d instances on %s",
+            POOL_SIZE, device,
         )
-        # Ensure float32 — XPU can auto-promote to bfloat16 causing dtype mismatches
-        predictor = predictor.float()
-        logger.info("SAMv2 model loaded successfully (float32)")
     except Exception as e:
         logger.error("Failed to load SAMv2: %s", e)
         raise
@@ -125,48 +137,37 @@ async def health():
     """Health check."""
     return {
         "status": "ok",
-        "model_loaded": predictor is not None,
+        "pool_size": POOL_SIZE,
+        "pool_available": predictor_pool.qsize(),
         "device": str(device),
     }
 
 
-@app.post("/track", response_model=TrackResponse)
-async def track_objects(req: TrackRequest):
-    """Track objects through video frames using SAMv2."""
-    if predictor is None:
-        raise HTTPException(503, "Model not loaded")
-
+def _do_tracking(predictor, req: TrackRequest) -> TrackResponse:
+    """Run tracking inference synchronously with a specific predictor instance."""
     frame_dir = Path(req.frame_dir)
-    if not frame_dir.exists():
-        raise HTTPException(404, f"Frame directory not found: {req.frame_dir}")
 
-    # Support both naming conventions: frame_NNNN.jpg and NNNNN.jpg
     frames = sorted(frame_dir.glob("*.jpg"))
     if not frames:
         raise HTTPException(404, f"No frames found in {req.frame_dir}")
 
-    # Get frame dimensions from first frame
     sample = Image.open(frames[0])
     img_w, img_h = sample.size
 
-    end_frame = req.end_frame or len(frames)
     t0 = time.monotonic()
 
-    # Initialize SAMv2 video state
-    # Force FP32 — IPEX promotes to bfloat16 somewhere in the pipeline
     if hasattr(torch, "xpu"):
         torch.xpu.set_fp32_math_mode(torch.xpu.FP32MathMode.FP32)
+
     with torch.inference_mode():
         state = predictor.init_state(
             video_path=str(frame_dir),
             offload_video_to_cpu=True,
         )
-        # Ensure all cached features are float32
         for key in state.get("cached_features", {}):
             feat = state["cached_features"][key]
             if isinstance(feat, torch.Tensor) and feat.dtype == torch.bfloat16:
                 state["cached_features"][key] = feat.float()
-                logger.info("Converted cached feature %s from bf16 to fp32", key)
 
         # Register each prompt at its spawn frame
         for prompt in req.prompts:
@@ -178,13 +179,11 @@ async def track_objects(req: TrackRequest):
                 )
                 continue
 
-            # Convert normalized bbox to pixel coords
             x1 = prompt.bbox[0] * img_w
             y1 = prompt.bbox[1] * img_h
             x2 = prompt.bbox[2] * img_w
             y2 = prompt.bbox[3] * img_h
 
-            # For large units, add center point to anchor the mask
             bbox_area_norm = (prompt.bbox[2] - prompt.bbox[0]) * (prompt.bbox[3] - prompt.bbox[1])
             if bbox_area_norm > 0.008:
                 cx = (x1 + x2) / 2
@@ -210,12 +209,10 @@ async def track_objects(req: TrackRequest):
                 prompt.spawn_frame,
             )
 
-        # Propagate tracking through all frames (forward only from earliest spawn)
+        # Propagate tracking
         results = []
         prompt_lookup = {p.object_id: p for p in req.prompts}
-        # Track spawn frames to filter backward propagation
         spawn_frame_idx = {p.object_id: p.spawn_frame - 1 for p in req.prompts}
-        # Track initial bbox size from PROMPT for sanity checking (detect mask explosion)
         initial_bbox_area = {}
         for p in req.prompts:
             pw = p.bbox[2] - p.bbox[0]
@@ -223,49 +220,34 @@ async def track_objects(req: TrackRequest):
             initial_bbox_area[p.object_id] = pw * ph
 
         for frame_idx, obj_ids, masks in predictor.propagate_in_video(state):
-            frame_num = frame_idx + 1  # back to 1-indexed
+            frame_num = frame_idx + 1
 
             for obj_id, mask in zip(obj_ids, masks):
-                # Skip frames before this object's spawn (backward propagation)
                 if frame_idx < spawn_frame_idx.get(obj_id, 0):
                     continue
 
                 mask_np = mask.cpu().numpy().squeeze()
 
-                # Compute bbox from mask
                 ys, xs = np.where(mask_np > 0.5)
                 if len(xs) == 0:
                     continue
 
-                # Confidence from mask logits (apply sigmoid for probability)
                 mask_probs = 1.0 / (1.0 + np.exp(-mask_np))
                 confidence = float(mask_probs[mask_probs > 0.5].mean()) if (mask_probs > 0.5).any() else 0.0
                 if confidence < req.confidence_threshold:
                     continue
 
-                # Normalized bbox
                 x1 = float(xs.min()) / img_w
                 y1 = float(ys.min()) / img_h
                 x2 = float(xs.max()) / img_w
                 y2 = float(ys.max()) / img_h
 
-                # Bbox sanity check: reject if bbox covers > 15% of screen
-                # (a single unit should never be that large)
                 bbox_area = (x2 - x1) * (y2 - y1)
                 if bbox_area > 0.15:
-                    logger.warning(
-                        "Object %d bbox too large (%.1f%% of screen) at frame %d, skipping",
-                        obj_id, bbox_area * 100, frame_num,
-                    )
                     continue
 
-                # Reject if bbox area exceeds 2.5x the prompt bbox area
                 prompt_area = initial_bbox_area.get(obj_id, bbox_area)
                 if bbox_area > prompt_area * 2.5:
-                    logger.warning(
-                        "Object %d bbox exploded (%.4f -> %.4f) at frame %d, skipping",
-                        obj_id, initial_bbox_area[obj_id], bbox_area, frame_num,
-                    )
                     continue
 
                 prompt = prompt_lookup.get(obj_id)
@@ -290,3 +272,33 @@ async def track_objects(req: TrackRequest):
         objects_tracked=len(req.prompts),
         elapsed_seconds=round(elapsed, 2),
     )
+
+
+@app.post("/track", response_model=TrackResponse)
+async def track_objects(req: TrackRequest):
+    """Track objects through video frames using SAMv2.
+
+    Acquires a predictor from the pool and runs inference in a thread
+    so multiple requests can be processed concurrently.
+    """
+    if predictor_pool.qsize() == 0 and predictor_pool.empty():
+        raise HTTPException(503, "Model not loaded")
+
+    frame_dir = Path(req.frame_dir)
+    if not frame_dir.exists():
+        raise HTTPException(404, f"Frame directory not found: {req.frame_dir}")
+
+    # Acquire predictor from pool (blocks if all in use)
+    try:
+        predictor = predictor_pool.get(timeout=300)
+    except queue.Empty:
+        raise HTTPException(503, "All predictors busy, try again later")
+
+    try:
+        # Run inference in thread pool to allow concurrent requests
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(None, _do_tracking, predictor, req)
+        return response
+    finally:
+        # Always return predictor to pool
+        predictor_pool.put(predictor)
