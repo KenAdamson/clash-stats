@@ -371,9 +371,9 @@ def track_full_game(
     t_wall_start = time.time()
 
     if config.concurrency <= 1:
-        # Sequential mode (backward compatible)
+        # Sequential mode
         for task in tasks:
-            _, results, elapsed = _execute_task(task, config, slot=0)
+            _, results, elapsed = _execute_task_with_slot(task, config, slot=0)
             all_results.extend(results)
             total_time += elapsed
     else:
