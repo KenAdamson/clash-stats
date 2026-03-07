@@ -72,6 +72,8 @@ class GameTrackingConfig:
     host_replay_base: str = "replays"
     # Working directory for SAMv2-compatible frame windows
     window_dir: Optional[Path] = None
+    # Downscale factor for frames (0.5 = half resolution, ~24% faster)
+    downscale: float = 1.0
 
 
 def tick_to_frame(tick: int, fps: float = DEFAULT_FPS) -> int:
@@ -106,8 +108,17 @@ def prepare_window(
     window_dir: Path,
     start_frame: int,
     end_frame: int,
+    downscale: float = 1.0,
 ) -> int:
-    """Create hardlinked SAMv2-compatible frame window. Returns frame count."""
+    """Create SAMv2-compatible frame window. Returns frame count.
+
+    Args:
+        source_dir: directory with frame_NNNN.jpg files.
+        window_dir: output directory for sequential NNNNN.jpg files.
+        start_frame: first frame number (inclusive).
+        end_frame: last frame number (inclusive).
+        downscale: resize factor (0.5 = half resolution). 1.0 = hardlink original.
+    """
     window_dir.mkdir(parents=True, exist_ok=True)
     for f in window_dir.glob("*.jpg"):
         f.unlink()
@@ -118,7 +129,14 @@ def prepare_window(
         if not src.exists():
             continue
         dst = window_dir / f"{idx:05d}.jpg"
-        os.link(src, dst)
+        if downscale == 1.0:
+            os.link(src, dst)
+        else:
+            from PIL import Image
+            img = Image.open(src)
+            w, h = img.size
+            img = img.resize((int(w * downscale), int(h * downscale)), Image.LANCZOS)
+            img.save(dst, quality=85)
         idx += 1
     return idx
 
@@ -235,7 +253,10 @@ def track_full_game(
             bbox=bbox,
         )
 
-        n_frames = prepare_window(config.frame_dir, window_dir, window_start, window_end)
+        n_frames = prepare_window(
+            config.frame_dir, window_dir, window_start, window_end,
+            downscale=config.downscale,
+        )
         if n_frames == 0:
             logger.warning(
                 "No frames for %s spawn at frame %d, skipping",
