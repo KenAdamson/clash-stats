@@ -45,23 +45,25 @@ export STATS_REMOTE="${STATS_REMOTE:-origin}"
 EOF
 chmod +x /app/publish_wrapper.sh
 
-# Build replay wrapper with baked-in env vars for crond
-cat > /app/replay_wrapper.sh << EOF
+# Build personal combined wrapper: fetch battles + replays in one atomic pass
+cat > /app/personal_combined.sh << EOF
 #!/bin/sh
-LOCKFILE=/tmp/replay_personal.lock
+LOCKFILE=/tmp/personal_combined.lock
 if [ -f "\$LOCKFILE" ]; then
-    echo "replay_personal: previous run still active, skipping"
+    echo "personal_combined: previous run still active, skipping"
     exit 0
 fi
 trap 'rm -f "\$LOCKFILE"' EXIT
 touch "\$LOCKFILE"
+export CR_API_KEY="${CR_API_KEY}"
 export CR_PLAYER_TAG="${CR_PLAYER_TAG}"
+[ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
 export BROWSER_WS_URL="${BROWSER_WS_URL:-http://cr-browser:9223}"
 export ROYALEAPI_SESSION_PATH="${ROYALEAPI_SESSION_PATH:-/app/data/royaleapi_session.json}"
 export PYTHONUNBUFFERED=1
-clash-stats --fetch-replays --player-tag "${CR_PLAYER_TAG}" --replays-per-player 25 --db ${DB_PATH}
+clash-stats --personal-combined --player-tag "${CR_PLAYER_TAG}" --replays-per-player 25 --db ${DB_PATH}
 EOF
-chmod +x /app/replay_wrapper.sh
+chmod +x /app/personal_combined.sh
 
 # Build corpus wrapper scripts for crond
 cat > /app/corpus_update.sh << EOF
@@ -175,12 +177,11 @@ PUSH_DEST="${STATS_REPO_URL:-origin}/${STATS_BRANCH:-stats}"
 echo "=== cr-tracker starting ==="
 echo "  Player tag: #${CR_PLAYER_TAG}"
 echo "  API:        ${CR_API_URL:-https://api.clashroyale.com/v1}"
-echo "  Schedule:   every minute (crond)"
+echo "  Personal:   every 2 min combined (battles + replays, atomic)"
 echo "  Database:   ${DB_PATH}"
 echo "  Dashboard:  http://0.0.0.0:8078"
 echo "  Stats push: every 5 min → ${PUSH_DEST}"
-echo "  Replays:    every 15 min (personal)"
-echo "  Corpus:     every 30m combined (battles + replays, 200 players, 12 tabs)"
+echo "  Corpus:     every 5 min combined (battles + replays, 200 players, 12 tabs)"
 echo "  Discovery:  daily 3am opponent network + weekly Mon 7am regional leaderboards"
 echo "  Metrics:    http://0.0.0.0:8001/metrics (Prometheus)"
 echo "  noVNC:      http://0.0.0.0:6080 (browser sidecar)"

@@ -17,7 +17,7 @@ DB_FILE = "clash_royale_history.db"
 
 def fetch_and_store(
     api_key: str, player_tag: str, session, api_url: str = DEFAULT_API_URL
-) -> None:
+) -> int:
     """Fetch latest battles and store new ones.
 
     Args:
@@ -25,6 +25,9 @@ def fetch_and_store(
         player_tag: Player tag (without '#').
         session: SQLAlchemy session.
         api_url: API base URL.
+
+    Returns:
+        Number of new battles stored, or -1 on error.
     """
     api = ClashRoyaleAPI(api_key, base_url=api_url)
 
@@ -50,7 +53,7 @@ def fetch_and_store(
                 print(f"  ✓ Since last fetch: {', '.join(parts)}")
     except Exception as e:
         print(f"  ✗ Error fetching player: {e}")
-        return
+        return -1
 
     try:
         battles = api.get_battle_log(player_tag)
@@ -68,8 +71,11 @@ def fetch_and_store(
             from tracker.ml.tilt_detector import detect_tilt, print_tilt_warning
             tilt_status = detect_tilt(session)
             print_tilt_warning(tilt_status)
+
+        return new_count
     except Exception as e:
         print(f"  ✗ Error fetching battles: {e}")
+        return -1
 
 
 def main() -> int:
@@ -121,6 +127,8 @@ Environment variables:
                         help="Check if RoyaleAPI login is complete and save session")
     parser.add_argument("--fetch-replays", action="store_true",
                         help="Fetch replay data from RoyaleAPI for recent battles")
+    parser.add_argument("--personal-combined", action="store_true",
+                        help="Fetch battles + replays for personal tag in one pass")
     parser.add_argument("--corpus-update", action="store_true",
                         help="Refresh top-ladder player tags for training corpus")
     parser.add_argument("--corpus-scrape", action="store_true",
@@ -285,6 +293,34 @@ Environment variables:
             from tracker.replays import run_fetch_replays
             count = run_fetch_replays(session, player_tag.replace("#", ""))
             print(f"  ✓ Fetched {count} replays")
+
+        if args.personal_combined:
+            if not api_key or not player_tag:
+                print("Error: --api-key and --player-tag required")
+                print("       Or set CR_API_KEY and CR_PLAYER_TAG environment variables")
+                return 1
+            tag_clean = player_tag.replace("#", "")
+            new_battles = fetch_and_store(api_key, tag_clean, session, api_url=api_url)
+            from tracker.metrics import SCRAPE_RUNS, flush_metrics
+            if new_battles >= 0:
+                SCRAPE_RUNS.labels(scrape_type="battles", outcome="success").inc()
+            # Always attempt replays — even if no NEW battles this cycle,
+            # there may be unfetched replays from previous cycles
+            from tracker.replays import run_fetch_replays
+            replays_per_player = (
+                args.replays_per_player
+                or int(os.environ.get("REPLAYS_PER_PLAYER", "25"))
+            )
+            replay_count = run_fetch_replays(
+                session, tag_clean, limit=replays_per_player,
+            )
+            if replay_count >= 0:
+                SCRAPE_RUNS.labels(scrape_type="personal_replays", outcome="success").inc()
+                print(f"  ✓ Fetched {replay_count} replays")
+            elif replay_count == -1:
+                SCRAPE_RUNS.labels(scrape_type="personal_replays", outcome="session_expired").inc()
+                print("  ✗ RoyaleAPI session expired")
+            flush_metrics("personal_combined")
 
         if args.corpus_update:
             if not api_key:
@@ -672,6 +708,7 @@ Environment variables:
             args.matchups, args.recent, args.streaks, args.rolling,
             args.trophy_history, args.archetypes,
             args.replay_login, args.replay_check, args.fetch_replays,
+            args.personal_combined,
             args.corpus_update, args.corpus_scrape, args.corpus_replays,
             args.corpus_combined,
             args.corpus_stats, args.corpus_add_priority,

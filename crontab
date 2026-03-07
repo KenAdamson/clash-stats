@@ -1,7 +1,9 @@
 PATH=/usr/local/bin:/usr/bin:/bin
 
-# Fetch battles every minute for near-realtime dashboard updates
-* * * * * root /app/fetch.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
+# Personal combined: fetch battles + replays in one atomic pass
+# Every 2 min — aggressive to ensure no replay data is lost
+# Lockfile prevents overlap; personal data is highest priority
+*/2 * * * * root /app/personal_combined.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Publish stats JSON to GitHub every 5 minutes
 */5 * * * * root /app/publish_wrapper.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Combined corpus scrape: battles + replays in one pass
@@ -11,10 +13,6 @@ PATH=/usr/local/bin:/usr/bin:/bin
 0 6 * * 1 root /app/corpus_update.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Refresh simulation results after corpus scrape (every 6h, offset 2h)
 0 2,8,14,20 * * * root /app/sim_refresh.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
-
-# --- Replay scrapes ---
-# Personal replays every 15 min (offset from corpus to avoid 429s)
-5,20,35,50 * * * * root /app/replay_wrapper.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 
 # --- ML training ---
 # Weekly: retrain TCN on full corpus (Sunday 4am UTC)

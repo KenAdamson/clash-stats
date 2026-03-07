@@ -186,8 +186,8 @@ clash-stats/
 - Dependencies managed via `pyproject.toml`, installed with `pip install .[ml]` in the Dockerfile
 - SQLite database lives on a Docker volume mount (`./data:/app/data`) so it survives container rebuilds
 - Environment variables via `.env` file: `CR_API_KEY`, `CR_PLAYER_TAG`
-- BusyBox crond schedule: poll every minute for near-realtime dashboard updates
-- Container runs `--fetch` on schedule and keeps the DB accessible for ad-hoc analytics via `docker exec`
+- BusyBox crond schedule: personal combined (battles + replays) every 2 min, corpus combined every 5 min
+- Container runs `--personal-combined` on schedule and keeps the DB accessible for ad-hoc analytics via `docker exec`
 - Logging to stdout so Docker's log driver captures it
 
 **Health/monitoring:**
