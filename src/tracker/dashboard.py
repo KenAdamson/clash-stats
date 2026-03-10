@@ -74,6 +74,18 @@ def create_app(db_path: str | None = None) -> Flask:
         session = get_session(engine)
         try:
             history = analytics.get_trophy_history(session, ladder_only=_ladder_only())
+            page = request.args.get("page", type=int)
+            per_page = request.args.get("per_page", 1000, type=int)
+            per_page = min(per_page, 5000)
+            if page is not None:
+                start = page * per_page
+                chunk = history[start:start + per_page]
+                return jsonify({
+                    "data": chunk,
+                    "page": page,
+                    "total": len(history),
+                    "has_more": start + per_page < len(history),
+                })
             return jsonify(history)
         finally:
             session.close()
@@ -215,6 +227,18 @@ def create_app(db_path: str | None = None) -> Flask:
                     "battle_time": b[4] if b else None,
                 })
 
+            page = request.args.get("page", type=int)
+            per_page = request.args.get("per_page", 1000, type=int)
+            per_page = min(per_page, 5000)
+            if page is not None:
+                start = page * per_page
+                chunk = points[start:start + per_page]
+                return jsonify({
+                    "points": chunk,
+                    "page": page,
+                    "total": len(points),
+                    "has_more": start + per_page < len(points),
+                })
             return jsonify({"points": points, "count": len(points)})
         finally:
             session.close()

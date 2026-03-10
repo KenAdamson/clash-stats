@@ -22,7 +22,7 @@ ARENA_X_MID = 8750   # left lane < mid, right lane > mid
 ARENA_Y_MID = 15750  # team half < mid, opponent half > mid
 
 # Feature vector version — bump when the extraction logic changes
-FEATURE_VERSION = "v1"
+FEATURE_VERSION = "v2"
 
 
 def extract_game_features(
@@ -34,45 +34,46 @@ def extract_game_features(
 
     Returns None if the game lacks sufficient replay data.
     """
-    # Load battle metadata
     battle = session.execute(
         select(Battle).where(Battle.battle_id == battle_id)
     ).scalar_one_or_none()
     if battle is None:
         return None
 
-    # Load replay events
     events = session.execute(
         select(ReplayEvent)
         .where(ReplayEvent.battle_id == battle_id)
         .order_by(ReplayEvent.game_tick)
     ).scalars().all()
-    if len(events) < 4:
-        return None
 
-    # Load replay summaries (team + opponent)
     summaries = session.execute(
         select(ReplaySummary).where(ReplaySummary.battle_id == battle_id)
     ).scalars().all()
-    summary_by_side = {s.side: s for s in summaries}
 
-    # Load deck cards
     deck_cards = session.execute(
         select(DeckCard).where(DeckCard.battle_id == battle_id)
     ).scalars().all()
+
+    return _extract_features_from_loaded(battle, events, summaries, deck_cards)
+
+
+def _extract_features_from_loaded(
+    battle: Battle,
+    events: list[ReplayEvent],
+    summaries: list[ReplaySummary],
+    deck_cards: list[DeckCard],
+) -> Optional[np.ndarray]:
+    """Extract features from pre-loaded ORM objects (no DB queries)."""
+    if len(events) < 4:
+        return None
+
+    summary_by_side = {s.side: s for s in summaries}
     player_cards = [dc for dc in deck_cards if dc.is_player_deck == 1]
     opponent_cards = [dc for dc in deck_cards if dc.is_player_deck == 0]
-
-    # Build elixir lookup from deck_cards
-    elixir_map: dict[str, int] = {}
-    for dc in deck_cards:
-        if dc.card_elixir is not None:
-            elixir_map[dc.card_name] = dc.card_elixir
 
     features: list[float] = []
 
     # --- Card play counts (24 dim) ---
-    # Player card play counts (8)
     player_card_names = sorted(dc.card_name for dc in player_cards)
     team_events = [e for e in events if e.side == "team"]
     opp_events = [e for e in events if e.side == "opponent"]
@@ -80,17 +81,14 @@ def extract_game_features(
     for card_name in player_card_names[:8]:
         count = sum(1 for e in team_events if e.card_name == card_name and not e.ability_used)
         features.append(float(count))
-    # Pad if fewer than 8 cards
     features.extend([0.0] * (8 - len(player_card_names[:8])))
 
-    # Opponent card play counts (8)
     opponent_card_names = sorted(dc.card_name for dc in opponent_cards)
     for card_name in opponent_card_names[:8]:
         count = sum(1 for e in opp_events if e.card_name == card_name and not e.ability_used)
         features.append(float(count))
     features.extend([0.0] * (8 - len(opponent_card_names[:8])))
 
-    # Player ability uses (4) — up to 4 evo/hero abilities
     player_abilities = [e for e in team_events if e.ability_used]
     ability_names = sorted(set(e.card_name for e in player_abilities))
     for i in range(4):
@@ -99,7 +97,6 @@ def extract_game_features(
         else:
             features.append(0.0)
 
-    # Opponent ability uses (4)
     opp_abilities = [e for e in opp_events if e.ability_used]
     opp_ability_names = sorted(set(e.card_name for e in opp_abilities))
     for i in range(4):
@@ -119,13 +116,12 @@ def extract_game_features(
 
     features.append(total_elixir_player)
     features.append(total_elixir_opp)
-    features.append(total_elixir_player - total_elixir_opp)  # elixir differential
+    features.append(total_elixir_player - total_elixir_opp)
     features.append(float(battle.player_elixir_leaked or 0.0))
     features.append(float(battle.opponent_elixir_leaked or 0.0))
-    features.append(total_elixir_player / max(total_plays_player, 1))  # avg elixir/play
+    features.append(total_elixir_player / max(total_plays_player, 1))
     features.append(total_elixir_opp / max(total_plays_opp, 1))
 
-    # Category ratios (troop/spell/building as fraction of total)
     for attr in ("troop_elixir", "spell_elixir", "building_elixir"):
         val = getattr(team_summary, attr, None) if team_summary else None
         features.append(float(val or 0) / max(total_elixir_player, 1))
@@ -135,17 +131,15 @@ def extract_game_features(
     features.append(total_plays_opp)
 
     max_tick = max(e.game_tick for e in events) if events else 1
-    features.append(total_plays_player / max(max_tick, 1) * 1000)  # play rate (per 1000 ticks)
+    features.append(total_plays_player / max(max_tick, 1) * 1000)
     features.append(total_plays_opp / max(max_tick, 1) * 1000)
 
     first_play_tick = min((e.game_tick for e in team_events), default=0)
-    features.append(float(first_play_tick) / max(max_tick, 1))  # normalized first play
+    features.append(float(first_play_tick) / max(max_tick, 1))
 
-    # Lane split — fraction of player plays on right side
     right_plays = sum(1 for e in team_events if e.arena_x > ARENA_X_MID)
     features.append(right_plays / max(len(team_events), 1))
 
-    # Average play spacing (ticks between consecutive plays)
     team_ticks = sorted(e.game_tick for e in team_events)
     if len(team_ticks) > 1:
         spacings = [team_ticks[i+1] - team_ticks[i] for i in range(len(team_ticks) - 1)]
@@ -153,18 +147,17 @@ def extract_game_features(
     else:
         features.append(0.0)
 
-    # Aggression index — fraction of plays in opponent's half
     aggressive_plays = sum(1 for e in team_events if e.arena_y > ARENA_Y_MID)
     features.append(aggressive_plays / max(len(team_events), 1))
 
     # --- Outcome-adjacent (3 dim) ---
     features.append(float(battle.crown_differential or 0))
-    features.append(float(battle.battle_duration or 180) / 300.0)  # normalized duration
-    features.append(float(battle.player_king_tower_hp or 0) / 10000.0)  # normalized KT HP
+    features.append(float(battle.battle_duration or 180) / 300.0)
+    features.append(float(battle.player_king_tower_hp or 0) / 10000.0)
 
     # --- Matchup context (5 dim) ---
     trophies = battle.player_starting_trophies or 5000
-    features.append(float(trophies) / 10000.0)  # normalized trophy band
+    features.append(float(trophies) / 10000.0)
 
     avg_elixir_player = sum(dc.card_elixir or 0 for dc in player_cards) / max(len(player_cards), 1)
     avg_elixir_opp = sum(dc.card_elixir or 0 for dc in opponent_cards) / max(len(opponent_cards), 1)
@@ -176,7 +169,14 @@ def extract_game_features(
     features.append(float(evo_count))
     features.append(float(hero_count))
 
+    # --- Battle type indicator (1 dim) ---
+    # 1.0 = pathOfLegend, 0.0 = PvP/other — lets UMAP separate populations
+    features.append(1.0 if battle.battle_type == "pathOfLegend" else 0.0)
+
     return np.array(features, dtype=np.float32)
+
+
+CHUNK_SIZE = 1000
 
 
 def build_feature_matrix(
@@ -185,6 +185,9 @@ def build_feature_matrix(
     incremental: bool = True,
 ) -> tuple[list[str], np.ndarray]:
     """Build feature vectors for all games with replay data.
+
+    Bulk-loads battles, events, summaries, and deck_cards in chunks
+    to avoid per-game query overhead.
 
     Args:
         session: DB session.
@@ -201,7 +204,7 @@ def build_feature_matrix(
             SELECT DISTINCT re.battle_id
             FROM replay_events re
             JOIN battles b ON b.battle_id = re.battle_id
-            WHERE b.battle_type = 'PvP'
+            WHERE b.battle_type IN ('PvP', 'pathOfLegend')
             ORDER BY b.battle_time
         """)
     ).scalars().all()
@@ -220,30 +223,73 @@ def build_feature_matrix(
         logger.info("No new battles to process")
         return [], np.array([])
 
-    logger.info("Extracting features for %d games", len(replay_battles))
+    logger.info("Extracting features for %d games (chunk size %d)", len(replay_battles), CHUNK_SIZE)
 
     battle_ids: list[str] = []
     vectors: list[np.ndarray] = []
     skipped = 0
+    processed = 0
 
-    for i, battle_id in enumerate(replay_battles):
-        vec = extract_game_features(session, battle_id, vocab)
-        if vec is not None:
-            battle_ids.append(battle_id)
-            vectors.append(vec)
+    for chunk_start in range(0, len(replay_battles), CHUNK_SIZE):
+        chunk = replay_battles[chunk_start:chunk_start + CHUNK_SIZE]
 
-            # Store to DB
-            session.merge(GameFeature(
-                battle_id=battle_id,
-                feature_vector=to_blob(vec),
-                feature_version=FEATURE_VERSION,
-            ))
-        else:
-            skipped += 1
+        # Bulk-load all data for this chunk
+        battles_by_id: dict[str, Battle] = {}
+        for b in session.execute(
+            select(Battle).where(Battle.battle_id.in_(chunk))
+        ).scalars():
+            battles_by_id[b.battle_id] = b
 
-        if (i + 1) % 500 == 0:
-            session.flush()
-            logger.info("  processed %d / %d games", i + 1, len(replay_battles))
+        events_by_id: dict[str, list[ReplayEvent]] = {bid: [] for bid in chunk}
+        for e in session.execute(
+            select(ReplayEvent)
+            .where(ReplayEvent.battle_id.in_(chunk))
+            .order_by(ReplayEvent.game_tick)
+        ).scalars():
+            events_by_id[e.battle_id].append(e)
+
+        summaries_by_id: dict[str, list[ReplaySummary]] = {bid: [] for bid in chunk}
+        for s in session.execute(
+            select(ReplaySummary).where(ReplaySummary.battle_id.in_(chunk))
+        ).scalars():
+            summaries_by_id[s.battle_id].append(s)
+
+        deck_cards_by_id: dict[str, list[DeckCard]] = {bid: [] for bid in chunk}
+        for dc in session.execute(
+            select(DeckCard).where(DeckCard.battle_id.in_(chunk))
+        ).scalars():
+            deck_cards_by_id[dc.battle_id].append(dc)
+
+        # Extract features from loaded data
+        for battle_id in chunk:
+            battle = battles_by_id.get(battle_id)
+            if battle is None:
+                skipped += 1
+                continue
+
+            vec = _extract_features_from_loaded(
+                battle,
+                events_by_id[battle_id],
+                summaries_by_id[battle_id],
+                deck_cards_by_id[battle_id],
+            )
+            if vec is not None:
+                battle_ids.append(battle_id)
+                vectors.append(vec)
+                session.merge(GameFeature(
+                    battle_id=battle_id,
+                    feature_vector=to_blob(vec),
+                    feature_version=FEATURE_VERSION,
+                ))
+            else:
+                skipped += 1
+
+        session.flush()
+        # Evict loaded objects to keep memory bounded
+        session.expire_all()
+        processed += len(chunk)
+        logger.info("  processed %d / %d games (%d extracted, %d skipped)",
+                     processed, len(replay_battles), len(vectors), skipped)
 
     session.commit()
 

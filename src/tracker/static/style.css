@@ -515,3 +515,16 @@ summary {
     .battle-time { display: none; }
     header { flex-direction: column; align-items: flex-start; }
 }
+
+/* Section loading spinners (BigPipe) */
+.section-spinner {
+    color: var(--text-dim);
+    font-size: 0.85rem;
+    padding: 0.5rem 0;
+    text-align: center;
+    animation: pulse-dim 1.2s ease-in-out infinite;
+}
+@keyframes pulse-dim {
+    0%, 100% { opacity: 0.5; }
+    50% { opacity: 1; }
+}
