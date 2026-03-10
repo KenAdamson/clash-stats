@@ -11,6 +11,7 @@ services:
       - FETCH_INTERVAL=14400  # 4 hours in seconds
       - BROWSER_WS_URL=http://cr-browser:9223
       - ROYALEAPI_SESSION_PATH=/app/data/royaleapi_session.json
+      - DATABASE_URL=mysql+pymysql://clash_stats:clash_stats_pw_2026@192.168.7.59/clash_stats
     volumes:
       - ./data:/app/data
       - ./.git:/app/.git:rw

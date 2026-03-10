@@ -21,25 +21,26 @@ depends_on: Union[str, Sequence[str], None] = None
 def _column_exists(table: str, column: str) -> bool:
     """Check if a column already exists on a table (idempotent migrations)."""
     conn = op.get_bind()
-    result = conn.execute(sa.text(f"PRAGMA table_info({table})"))
-    columns = {row[1] for row in result}
+    insp = sa.inspect(conn)
+    try:
+        columns = {c["name"] for c in insp.get_columns(table)}
+    except Exception:
+        return False
     return column in columns
 
 
 def _table_exists(table: str) -> bool:
     """Check if a table already exists."""
     conn = op.get_bind()
-    result = conn.execute(sa.text(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name=:name"
-    ), {"name": table})
-    return result.fetchone() is not None
+    insp = sa.inspect(conn)
+    return table in insp.get_table_names()
 
 
 def upgrade() -> None:
     # Add corpus provenance column to battles
     if not _column_exists("battles", "corpus"):
         op.add_column("battles", sa.Column(
-            "corpus", sa.String, server_default="personal",
+            "corpus", sa.String(32), server_default="personal",
         ))
         op.create_index("idx_battles_corpus", "battles", ["corpus"])
 
@@ -47,9 +48,9 @@ def upgrade() -> None:
     if not _table_exists("player_corpus"):
         op.create_table(
             "player_corpus",
-            sa.Column("player_tag", sa.String, primary_key=True),
-            sa.Column("player_name", sa.String),
-            sa.Column("source", sa.String, nullable=False),
+            sa.Column("player_tag", sa.String(32), primary_key=True),
+            sa.Column("player_name", sa.String(64)),
+            sa.Column("source", sa.String(32), nullable=False),
             sa.Column("trophy_range_low", sa.Integer),
             sa.Column("trophy_range_high", sa.Integer),
             sa.Column("games_scraped", sa.Integer, server_default="0"),

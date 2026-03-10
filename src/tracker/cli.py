@@ -13,6 +13,8 @@ from tracker.database import get_session, init_db
 from tracker.export import export_data
 
 DB_FILE = os.environ.get("CR_DB_PATH", "data/clash_royale_history.db")
+# If DATABASE_URL is set it takes precedence over --db for all operations.
+_DATABASE_URL = os.environ.get("DATABASE_URL")
 
 
 def fetch_and_store(
@@ -212,8 +214,19 @@ Environment variables:
     player_tag = args.player_tag or os.environ.get("CR_PLAYER_TAG")
     api_url = args.api_url or os.environ.get("CR_API_URL", DEFAULT_API_URL)
 
-    engine = init_db(args.db)
+    # DATABASE_URL env var overrides --db (enables MariaDB backend)
+    _db_ref = _DATABASE_URL or args.db
+    engine = init_db(_db_ref)
     session = get_session(engine)
+
+    # model_dir lives next to the DB file for SQLite; fall back to data/ml_models
+    # when using a URL-based backend (MariaDB).
+    from pathlib import Path
+    _model_dir = (
+        Path("data/ml_models")
+        if ("://" in _db_ref)
+        else Path(args.db).parent / "ml_models"
+    )
 
     try:
         if args.fetch:
@@ -597,9 +610,8 @@ Environment variables:
                 print_tilt_warning(tilt_status)
 
         if args.train_tcn:
-            from pathlib import Path
             from tracker.ml.training import train_tcn
-            train_tcn(session, model_dir=Path(args.db).parent / "ml_models")
+            train_tcn(session, model_dir=_model_dir)
 
         if args.build_features:
             from tracker.ml.card_metadata import CardVocabulary
@@ -613,7 +625,6 @@ Environment variables:
                 print("  · No new games to process")
 
         if args.train_embeddings:
-            from pathlib import Path
             from tracker.ml.features import load_feature_matrix
             from tracker.ml.umap_embeddings import train_embeddings
             battle_ids, features = load_feature_matrix(session)
@@ -621,8 +632,7 @@ Environment variables:
                 print(f"  ✗ Need at least 20 games with features (have {len(battle_ids)})")
                 print("    Run --build-features first")
             else:
-                model_dir = Path(args.db).parent / "ml_models"
-                train_embeddings(session, battle_ids, features, model_dir=model_dir)
+                train_embeddings(session, battle_ids, features, model_dir=_model_dir)
                 print(f"  ✓ Embeddings trained: {len(battle_ids)} games, "
                       f"UMAP 15d + 3d, HDBSCAN clustered")
 
@@ -662,19 +672,16 @@ Environment variables:
                               f"{r.get('archetype', '?'):>22}")
 
         if args.embed_new:
-            from pathlib import Path
             from tracker.ml.training import embed_new
-            embed_new(session, model_dir=Path(args.db).parent / "ml_models")
+            embed_new(session, model_dir=_model_dir)
 
         if args.train_wp:
-            from pathlib import Path
             from tracker.ml.wp_training import train_wp
-            train_wp(session, model_dir=Path(args.db).parent / "ml_models")
+            train_wp(session, model_dir=_model_dir)
 
         if args.wp_infer:
-            from pathlib import Path
             from tracker.ml.wp_training import infer_wp
-            infer_wp(session, model_dir=Path(args.db).parent / "ml_models")
+            infer_wp(session, model_dir=_model_dir)
 
         if args.wp:
             from tracker.ml.wp_storage import WinProbability

@@ -301,18 +301,32 @@ class WPTrainer:
                 wpa[1:] = np.diff(wp_curve)
                 criticality = np.abs(wpa)
 
-                # Store per-tick records
+                # Store per-tick records — dialect-aware upsert so re-runs
+                # never hit UNIQUE constraint violations.
+                dialect = session.bind.dialect.name
+                if dialect == "mysql":
+                    _upsert_sql = sa_text("""
+                        INSERT INTO win_probability
+                            (battle_id, game_tick, win_prob, wpa, criticality, event_index, model_version)
+                        VALUES (:bid, :tick, :wp, :wpa, :crit, :eidx, :ver)
+                        ON DUPLICATE KEY UPDATE
+                            win_prob=VALUES(win_prob), wpa=VALUES(wpa),
+                            criticality=VALUES(criticality), event_index=VALUES(event_index)
+                    """)
+                else:
+                    _upsert_sql = sa_text("""
+                        INSERT OR REPLACE INTO win_probability
+                            (battle_id, game_tick, win_prob, wpa, criticality, event_index, model_version)
+                        VALUES (:bid, :tick, :wp, :wpa, :crit, :eidx, :ver)
+                    """)
                 for j in range(seq_len):
                     game_tick = events[j][1] if j < len(events) else j
-                    session.add(WinProbability(
-                        battle_id=bid,
-                        game_tick=game_tick,
-                        win_prob=float(wp_curve[j]),
-                        wpa=float(wpa[j]),
-                        criticality=float(criticality[j]),
-                        event_index=j,
-                        model_version=WP_MODEL_VERSION,
-                    ))
+                    session.execute(_upsert_sql, {
+                        "bid": bid, "tick": game_tick,
+                        "wp": float(wp_curve[j]), "wpa": float(wpa[j]),
+                        "crit": float(criticality[j]), "eidx": j,
+                        "ver": WP_MODEL_VERSION,
+                    })
 
                 # Compute summary
                 card_wpa: dict[str, float] = defaultdict(float)
@@ -407,11 +421,6 @@ def infer_wp(session: Session, model_dir: Optional[Path] = None) -> None:
         {"min_events": MIN_EVENTS},
     ).scalars().all()
     battle_ids = list(battle_ids)[:len(dataset)]
-
-    # Clear old data
-    session.execute(sa_text("DELETE FROM win_probability WHERE model_version = :v"), {"v": WP_MODEL_VERSION})
-    session.execute(sa_text("DELETE FROM game_wp_summary WHERE model_version = :v"), {"v": WP_MODEL_VERSION})
-    session.commit()
 
     trainer = WPTrainer.__new__(WPTrainer)
     trainer.model = model
