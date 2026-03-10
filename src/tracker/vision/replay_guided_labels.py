@@ -46,6 +46,12 @@ SCREEN_ARENA_BOTTOM = 0.82  # above player info bar
 # Ticks per second (from replay event timing)
 TICKS_PER_SECOND = 20
 
+# Flying unit sprite offset: visual sprite renders above and slightly behind
+# the shadow/hitbox on the ground. Spells target the shadow position.
+# Values are in normalized screen coordinates (empirical from replay observation).
+FLYING_SPRITE_OFFSET_Y = -0.06  # upward on screen (negative Y = toward top)
+FLYING_SPRITE_OFFSET_X = 0.0    # no significant lateral shift
+
 
 @dataclass
 class PredictedUnit:
@@ -62,9 +68,14 @@ class PredictedUnit:
     time_since_play: float   # seconds since this card was played
     level: Optional[int] = None
     is_evo: bool = False
+    is_flying: bool = False
     card_elixir: Optional[int] = None
     play_tick: int = 0
     notes: str = ""
+    # Flying units: hitbox is at shadow (ground), sprite renders offset upward.
+    # screen_bbox is always the hitbox/shadow position (where spells target).
+    # sprite_bbox is the visual render position (where the detector sees the unit).
+    sprite_bbox: Optional[tuple[float, float, float, float]] = None
 
 
 @dataclass
@@ -134,7 +145,9 @@ class PredictedFrameLabel:
             key = f"{unit.card_name}:{unit.team}"
             if key not in class_map:
                 continue
-            x1, y1, x2, y2 = unit.screen_bbox
+            # For flying units, use sprite_bbox (visual position) for detector training
+            bbox = unit.sprite_bbox if unit.sprite_bbox else unit.screen_bbox
+            x1, y1, x2, y2 = bbox
             x_center = (x1 + x2) / 2
             y_center = (y1 + y2) / 2
             width = x2 - x1
@@ -149,7 +162,11 @@ def arena_to_screen(arena_x: float, arena_y: float) -> tuple[float, float]:
     """Map arena coordinates to normalized screen coordinates.
 
     Arena Y=0 is opponent side (screen top), Y=31500 is player side (screen bottom).
-    The screen has a slight perspective effect but we use linear mapping as baseline.
+
+    The Y mapping uses a quadratic correction for perspective foreshortening:
+    the arena appears compressed near the player side (bottom of screen) due
+    to the 3D-ish camera angle. Empirical fit from SharpJedi game calibration:
+      screen_y = -0.0512*norm_y^2 + 0.6094*norm_y + 0.1204
 
     Returns:
         (screen_x, screen_y) in [0, 1] normalized coordinates.
@@ -158,10 +175,12 @@ def arena_to_screen(arena_x: float, arena_y: float) -> tuple[float, float]:
     norm_x = (arena_x - ARENA_X_MIN) / (ARENA_X_MAX - ARENA_X_MIN)
     norm_y = (arena_y - ARENA_Y_MIN) / (ARENA_Y_MAX - ARENA_Y_MIN)
 
-    # Map to screen arena region
+    # Map X linearly to screen arena region
     screen_x = SCREEN_ARENA_LEFT + norm_x * (SCREEN_ARENA_RIGHT - SCREEN_ARENA_LEFT)
-    # Y is inverted: arena Y=0 (opponent) -> screen top, Y=31500 (player) -> screen bottom
-    screen_y = SCREEN_ARENA_TOP + norm_y * (SCREEN_ARENA_BOTTOM - SCREEN_ARENA_TOP)
+
+    # Map Y with quadratic perspective correction
+    # Coefficients from empirical calibration (replay position vs visual position)
+    screen_y = -0.0512 * norm_y**2 + 0.6094 * norm_y + 0.1204
 
     return (screen_x, screen_y)
 
@@ -438,6 +457,15 @@ def generate_frame_labels(
         deck_key = f"{card_name}:{team_label}"
         card_info = deck_info.get(deck_key, {})
 
+        # Compute sprite_bbox for flying units (visual render offset from shadow)
+        sprite_bbox = None
+        if props.is_flying:
+            sx1 = max(0.0, x1 + FLYING_SPRITE_OFFSET_X)
+            sy1 = max(0.0, y1 + FLYING_SPRITE_OFFSET_Y)
+            sx2 = min(1.0, x2 + FLYING_SPRITE_OFFSET_X)
+            sy2 = min(1.0, y2 + FLYING_SPRITE_OFFSET_Y)
+            sprite_bbox = (round(sx1, 4), round(sy1, 4), round(sx2, 4), round(sy2, 4))
+
         unit = PredictedUnit(
             card_name=card_name,
             team=team_label,
@@ -450,8 +478,10 @@ def generate_frame_labels(
             time_since_play=round(elapsed_sec, 2),
             level=card_info.get("level"),
             is_evo=card_info.get("is_evo", False),
+            is_flying=props.is_flying,
             card_elixir=card_info.get("elixir"),
             play_tick=event.game_tick,
+            sprite_bbox=sprite_bbox,
         )
 
         label.units.append(unit)

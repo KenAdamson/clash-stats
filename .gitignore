@@ -7,3 +7,4 @@ __pycache__/
 data/
 .env
 src/cycle_sim/
+.env.anthropic

@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 UMAP_15D_PARAMS = dict(
     n_components=15,
     n_neighbors=30,
-    min_dist=0.0,
+    min_dist=0.1,
     metric="euclidean",
     random_state=42,
 )

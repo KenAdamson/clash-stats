@@ -1,6 +1,7 @@
-/* Clash Royale Analytics Dashboard — Chart.js + vanilla fetch */
+/* Clash Royale Analytics Dashboard — BigPipe + paginated data loading */
 
 const POLL_INTERVAL = 3 * 60 * 1000; // 3 minutes
+const PAGE_SIZE = 1000;
 
 // Chart.js global defaults for dark theme
 Chart.defaults.color = "#8b8fa3";
@@ -12,6 +13,10 @@ let archetypeChart = null;
 let crownChart = null;
 let timeChart = null;
 
+// Accumulated data for paginated endpoints
+let trophyHistory = [];
+let trophyTotal = 0;
+
 // ─── Helpers ────────────────────────────────────────────────────
 
 function wrClass(wr) {
@@ -22,7 +27,6 @@ function wrClass(wr) {
 
 function formatBattleTime(bt) {
     if (!bt || bt.length < 15) return bt || "";
-    // "20260214T180000.000Z" → "Feb 14 18:00"
     const y = bt.slice(0, 4), m = bt.slice(4, 6), d = bt.slice(6, 8);
     const h = bt.slice(9, 11), mn = bt.slice(11, 13);
     const date = new Date(`${y}-${m}-${d}T${h}:${mn}:00Z`);
@@ -36,21 +40,130 @@ function formatShortDate(bt) {
     return `${parseInt(m)}/${parseInt(d)}`;
 }
 
-// ─── Data fetching ──────────────────────────────────────────────
+// ─── Section loading state ──────────────────────────────────────
 
-async function fetchAll() {
-    const [overview, trophyHistory, matchups, recent, streaks] = await Promise.all([
-        fetch("/api/overview").then(r => r.json()),
-        fetch("/api/trophy-history").then(r => r.json()),
-        fetch("/api/matchups").then(r => r.json()),
-        fetch("/api/recent").then(r => r.json()),
-        fetch("/api/streaks").then(r => r.json()),
-    ]);
-    renderOverview(overview);
-    renderTrophyChart(trophyHistory);
-    renderMatchups(matchups);
-    renderRecentBattles(recent);
-    renderStreaks(streaks);
+function sectionLoading(sectionId) {
+    const el = document.getElementById(sectionId);
+    if (el) {
+        let spinner = el.querySelector(".section-spinner");
+        if (!spinner) {
+            spinner = document.createElement("div");
+            spinner.className = "section-spinner";
+            spinner.textContent = "Loading...";
+            el.appendChild(spinner);
+        }
+        spinner.style.display = "";
+    }
+}
+
+function sectionReady(sectionId) {
+    const el = document.getElementById(sectionId);
+    if (el) {
+        const spinner = el.querySelector(".section-spinner");
+        if (spinner) spinner.style.display = "none";
+    }
+}
+
+function sectionProgress(sectionId, loaded, total) {
+    const el = document.getElementById(sectionId);
+    if (!el) return;
+    let spinner = el.querySelector(".section-spinner");
+    if (!spinner) {
+        spinner = document.createElement("div");
+        spinner.className = "section-spinner";
+        el.appendChild(spinner);
+    }
+    spinner.style.display = "";
+    spinner.textContent = `Loading ${loaded.toLocaleString()} / ${total.toLocaleString()}...`;
+}
+
+// ─── BigPipe: independent section fetchers ──────────────────────
+
+async function fetchOverview() {
+    try {
+        const data = await fetch("/api/overview").then(r => r.json());
+        renderOverview(data);
+    } catch (e) {
+        console.error("Overview fetch failed:", e);
+    }
+}
+
+async function fetchTrophyHistory() {
+    try {
+        sectionLoading("trophy-section");
+        trophyHistory = [];
+        trophyTotal = 0;
+        let page = 0;
+        let hasMore = true;
+
+        while (hasMore) {
+            const resp = await fetch(`/api/trophy-history?page=${page}&per_page=${PAGE_SIZE}`);
+            const data = await resp.json();
+            trophyHistory.push(...data.data);
+            trophyTotal = data.total;
+            hasMore = data.has_more;
+            page++;
+
+            // Render progressively — first page renders the chart, subsequent pages extend it
+            if (page === 1) {
+                renderTrophyChart(trophyHistory);
+            } else {
+                updateTrophyChart(trophyHistory);
+            }
+            if (hasMore) {
+                sectionProgress("trophy-section", trophyHistory.length, trophyTotal);
+            }
+        }
+        sectionReady("trophy-section");
+    } catch (e) {
+        console.error("Trophy history fetch failed:", e);
+        sectionReady("trophy-section");
+    }
+}
+
+async function fetchMatchups() {
+    try {
+        sectionLoading("matchups-section");
+        const data = await fetch("/api/matchups").then(r => r.json());
+        renderMatchups(data);
+        sectionReady("matchups-section");
+    } catch (e) {
+        console.error("Matchups fetch failed:", e);
+        sectionReady("matchups-section");
+    }
+}
+
+async function fetchRecent() {
+    try {
+        sectionLoading("recent-section");
+        const data = await fetch("/api/recent").then(r => r.json());
+        renderRecentBattles(data);
+        sectionReady("recent-section");
+    } catch (e) {
+        console.error("Recent fetch failed:", e);
+        sectionReady("recent-section");
+    }
+}
+
+async function fetchStreaks() {
+    try {
+        sectionLoading("streaks-section");
+        const data = await fetch("/api/streaks").then(r => r.json());
+        renderStreaks(data);
+        sectionReady("streaks-section");
+    } catch (e) {
+        console.error("Streaks fetch failed:", e);
+        sectionReady("streaks-section");
+    }
+}
+
+// Fire all sections independently — each renders as soon as its data arrives
+function fetchAll() {
+    fetchOverview();
+    fetchTrophyHistory();
+    fetchMatchups();
+    fetchRecent();
+    fetchStreaks();
     document.getElementById("last-updated").textContent = new Date().toLocaleTimeString();
 }
 
@@ -95,26 +208,19 @@ function renderOverview(data) {
 
 // ─── Trophy chart ───────────────────────────────────────────────
 
-function renderTrophyChart(history) {
-    const ctx = document.getElementById("trophyChart").getContext("2d");
-
-    const labels = history.map(h => formatShortDate(h.battle_time));
-    const dataPoints = history.map(h => h.trophies);
-    const colors = history.map(h =>
-        h.result === "win" ? "#34d399" : h.result === "loss" ? "#f87171" : "#8b8fa3"
-    );
-
-    if (trophyChart) trophyChart.destroy();
-    trophyChart = new Chart(ctx, {
+function buildTrophyChartConfig(history) {
+    return {
         type: "line",
         data: {
-            labels,
+            labels: history.map(h => formatShortDate(h.battle_time)),
             datasets: [{
                 label: "Trophies",
-                data: dataPoints,
+                data: history.map(h => h.trophies),
                 borderColor: "#4f8cff",
                 borderWidth: 2,
-                pointBackgroundColor: colors,
+                pointBackgroundColor: history.map(h =>
+                    h.result === "win" ? "#34d399" : h.result === "loss" ? "#f87171" : "#8b8fa3"
+                ),
                 pointRadius: history.length > 100 ? 1 : 3,
                 pointHoverRadius: 5,
                 fill: {
@@ -127,6 +233,7 @@ function renderTrophyChart(history) {
         options: {
             responsive: true,
             maintainAspectRatio: false,
+            animation: false,
             plugins: {
                 legend: { display: false },
                 tooltip: {
@@ -145,21 +252,34 @@ function renderTrophyChart(history) {
                 },
             },
             scales: {
-                x: {
-                    ticks: { maxTicksLimit: 15 },
-                },
-                y: {
-                    beginAtZero: false,
-                },
+                x: { ticks: { maxTicksLimit: 15 } },
+                y: { beginAtZero: false },
             },
         },
-    });
+    };
+}
+
+function renderTrophyChart(history) {
+    const ctx = document.getElementById("trophyChart").getContext("2d");
+    if (trophyChart) trophyChart.destroy();
+    trophyChart = new Chart(ctx, buildTrophyChartConfig(history));
+}
+
+function updateTrophyChart(history) {
+    if (!trophyChart) return renderTrophyChart(history);
+    const ds = trophyChart.data.datasets[0];
+    ds.data = history.map(h => h.trophies);
+    ds.pointBackgroundColor = history.map(h =>
+        h.result === "win" ? "#34d399" : h.result === "loss" ? "#f87171" : "#8b8fa3"
+    );
+    ds.pointRadius = history.length > 100 ? 1 : 3;
+    trophyChart.data.labels = history.map(h => formatShortDate(h.battle_time));
+    trophyChart.update("none"); // no animation for incremental updates
 }
 
 // ─── Matchups ───────────────────────────────────────────────────
 
 function renderMatchups(data) {
-    // Archetype chart
     const archetypes = data.archetypes || [];
     const ctx = document.getElementById("archetypeChart").getContext("2d");
 
@@ -208,7 +328,6 @@ function renderMatchups(data) {
         },
     });
 
-    // Card matchup tables
     const matchups = data.card_matchups || [];
     const sorted = [...matchups].sort((a, b) => b.win_rate - a.win_rate);
     const best = sorted.slice(0, 8);
@@ -279,14 +398,9 @@ function renderStreaks(data) {
         </div>`
     ).join("");
 
-    // Rolling stats
     renderRollingCol("rolling-35", data.rolling_35);
     renderRollingCol("rolling-10", data.rolling_10);
-
-    // Crown distribution doughnut
     renderCrownChart(data.crown_distribution);
-
-    // Time of day chart with traffic overlay
     renderTimeChart(data.time_of_day, data.corpus_traffic);
 }
 
@@ -346,7 +460,6 @@ function renderTimeChart(timeData, corpusTraffic) {
     if (!timeData || timeData.length === 0) return;
     const ctx = document.getElementById("timeChart").getContext("2d");
 
-    // Build traffic lookup by hour
     const trafficByHour = {};
     if (corpusTraffic) {
         for (const t of corpusTraffic) trafficByHour[t.hour] = t.traffic_index;
@@ -423,12 +536,14 @@ function renderTimeChart(timeData, corpusTraffic) {
 
 async function fetchSimulation() {
     try {
+        sectionLoading("sim-section");
         const resp = await fetch("/api/simulation");
-        if (!resp.ok) return;
+        if (!resp.ok) { sectionReady("sim-section"); return; }
         const data = await resp.json();
         renderSimulation(data);
+        sectionReady("sim-section");
     } catch (e) {
-        // No simulation data yet — hide section
+        sectionReady("sim-section");
     }
 }
 
@@ -436,14 +551,12 @@ function renderSimulation(data) {
     const section = document.getElementById("sim-section");
     section.style.display = "";
 
-    // Timestamp
     if (data.computed_at) {
         const ts = new Date(data.computed_at);
         document.getElementById("sim-timestamp").textContent =
             ts.toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
     }
 
-    // Threat ranking — use personal if available, fall back to corpus
     const threats = data.personal_threats || data.corpus_threats || [];
     const tbody = document.querySelector("#threat-table tbody");
     tbody.innerHTML = threats.slice(0, 20).map(t => {
@@ -458,7 +571,6 @@ function renderSimulation(data) {
         </tr>`;
     }).join("");
 
-    // Card threat matrix — worst cards (lowest win rate)
     const interactions = data.personal_card_interactions || data.card_interactions || {};
     const cardList = Object.entries(interactions)
         .map(([name, d]) => ({ name, ...d }))
@@ -467,12 +579,12 @@ function renderSimulation(data) {
 
     const worstCards = cardList.slice(0, 15);
     const bestCards = cardList.slice(-10).reverse();
-    const cardRows = [...worstCards, { name: "───", total: "", win_rate: null, ci_low: null, ci_high: null }, ...bestCards];
+    const cardRows = [...worstCards, { name: "\u2500\u2500\u2500", total: "", win_rate: null, ci_low: null, ci_high: null }, ...bestCards];
 
     const cardTbody = document.querySelector("#card-threat-table tbody");
     cardTbody.innerHTML = cardRows.map(c => {
         if (c.win_rate === null) {
-            return `<tr class="separator"><td colspan="4">─── Best ───</td></tr>`;
+            return `<tr class="separator"><td colspan="4">\u2500\u2500\u2500 Best \u2500\u2500\u2500</td></tr>`;
         }
         const pct = (c.win_rate * 100).toFixed(1);
         const ci = `[${(c.ci_low * 100).toFixed(0)}, ${(c.ci_high * 100).toFixed(0)}]`;
@@ -484,7 +596,6 @@ function renderSimulation(data) {
         </tr>`;
     }).join("");
 
-    // Sub-archetypes
     const subSection = document.getElementById("sub-archetype-section");
     const subs = data.sub_archetypes || {};
     const subEntries = Object.entries(subs).filter(([, v]) => v.length > 0);
@@ -513,24 +624,47 @@ function renderSimulation(data) {
 
 // ─── Embeddings 3D scatter plot (Plotly) + Timeline slider ───────
 
-let embeddingData = null;  // store for click lookups
-let embeddingDates = [];   // sorted unique personal dates for slider
+let embeddingData = null;
+let embeddingDates = [];
 let embeddingPlotInit = false;
 
 async function fetchEmbeddings() {
     try {
-        const resp = await fetch("/api/embeddings");
-        if (!resp.ok) return;
-        const data = await resp.json();
-        embeddingData = data.points;
-        renderEmbeddingChart(data.points);
-        initTimelineSlider(data.points);
+        sectionLoading("embeddings-section");
+        const section = document.getElementById("embeddings-section");
+        section.style.display = "";
+
+        embeddingData = [];
+        let page = 0;
+        let hasMore = true;
+        let total = 0;
+
+        while (hasMore) {
+            const resp = await fetch(`/api/embeddings?page=${page}&per_page=${PAGE_SIZE}`);
+            if (!resp.ok) { sectionReady("embeddings-section"); return; }
+            const data = await resp.json();
+            embeddingData.push(...data.points);
+            total = data.total;
+            hasMore = data.has_more;
+            page++;
+
+            if (page === 1) {
+                renderEmbeddingChart(embeddingData);
+            } else {
+                extendEmbeddingChart(data.points);
+            }
+            if (hasMore) {
+                sectionProgress("embeddings-section", embeddingData.length, total);
+            }
+        }
+
+        initTimelineSlider(embeddingData);
+        sectionReady("embeddings-section");
     } catch (e) {
-        // No embeddings yet — hide section
+        sectionReady("embeddings-section");
     }
 }
 
-// Parse "20260228T035121.000Z" to Date
 function parseBattleTime(bt) {
     if (!bt || bt.length < 15) return null;
     const y = bt.slice(0, 4), m = bt.slice(4, 6), d = bt.slice(6, 8);
@@ -544,9 +678,8 @@ function formatSliderDate(date) {
 }
 
 function initTimelineSlider(points) {
-    // Collect all dates from personal games
     const personalPoints = points.filter(p => p.corpus === "personal" && p.battle_time);
-    if (personalPoints.length < 2) return;  // no slider needed for <2 games
+    if (personalPoints.length < 2) return;
 
     const dates = personalPoints
         .map(p => parseBattleTime(p.battle_time))
@@ -584,10 +717,9 @@ function onTimelineSlide() {
     const total = embeddingDates.length;
     const label = showing === total
         ? `All ${total} personal games`
-        : `${showing} of ${total} games — through ${formatSliderDate(cutoffDate)}`;
+        : `${showing} of ${total} games \u2014 through ${formatSliderDate(cutoffDate)}`;
     document.getElementById("timeline-date").textContent = label;
 
-    // Filter personal points by date
     updateEmbeddingVisibility(cutoffDate);
 }
 
@@ -603,12 +735,11 @@ function updateEmbeddingVisibility(cutoffDate) {
     const personalWins = visible.filter(p => p.result === "win");
     const personalLosses = visible.filter(p => p.result === "loss");
 
-    // Update traces 2 and 3 (personal wins and losses) via Plotly.restyle
     Plotly.restyle("embeddingPlot", {
         x: [personalWins.map(p => p.x)],
         y: [personalWins.map(p => p.y)],
         z: [personalWins.map(p => p.z)],
-        text: [personalWins.map(p => `${p.opponent || "?"} — ${p.result} (${formatSliderDate(parseBattleTime(p.battle_time))})`)],
+        text: [personalWins.map(p => `${p.opponent || "?"} \u2014 ${p.result} (${formatSliderDate(parseBattleTime(p.battle_time))})`)],
         customdata: [personalWins.map(p => p.battle_id)],
     }, [2]);
 
@@ -616,24 +747,44 @@ function updateEmbeddingVisibility(cutoffDate) {
         x: [personalLosses.map(p => p.x)],
         y: [personalLosses.map(p => p.y)],
         z: [personalLosses.map(p => p.z)],
-        text: [personalLosses.map(p => `${p.opponent || "?"} — ${p.result} (${formatSliderDate(parseBattleTime(p.battle_time))})`)],
+        text: [personalLosses.map(p => `${p.opponent || "?"} \u2014 ${p.result} (${formatSliderDate(parseBattleTime(p.battle_time))})`)],
         customdata: [personalLosses.map(p => p.battle_id)],
     }, [3]);
 }
 
-function renderEmbeddingChart(points) {
-    if (!points || points.length === 0) return;
+const EMBEDDING_AXIS_STYLE = {
+    gridcolor: "#2a2d3a",
+    zerolinecolor: "#2a2d3a",
+    color: "#8b8fa3",
+    backgroundcolor: "#1a1d27",
+};
 
-    const section = document.getElementById("embeddings-section");
-    section.style.display = "";
+const EMBEDDING_LAYOUT = {
+    paper_bgcolor: "#1a1d27",
+    font: { color: "#8b8fa3", family: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" },
+    margin: { l: 0, r: 0, t: 0, b: 0 },
+    scene: {
+        xaxis: { ...EMBEDDING_AXIS_STYLE, title: "UMAP-1" },
+        yaxis: { ...EMBEDDING_AXIS_STYLE, title: "UMAP-2" },
+        zaxis: { ...EMBEDDING_AXIS_STYLE, title: "UMAP-3" },
+        bgcolor: "#1a1d27",
+    },
+    legend: {
+        font: { size: 11, color: "#8b8fa3" },
+        bgcolor: "rgba(26, 29, 39, 0.8)",
+    },
+    showlegend: true,
+};
 
-    // Separate into 4 categories matching previous color scheme
-    const corpusWins = points.filter(p => p.result === "win" && p.corpus !== "personal");
-    const corpusLosses = points.filter(p => p.result === "loss" && p.corpus !== "personal");
-    const personalWins = points.filter(p => p.result === "win" && p.corpus === "personal");
-    const personalLosses = points.filter(p => p.result === "loss" && p.corpus === "personal");
+const EMBEDDING_CONFIG = {
+    responsive: true,
+    displayModeBar: true,
+    modeBarButtonsToRemove: ["toImage", "sendDataToCloud"],
+    displaylogo: false,
+};
 
-    const makeTrace = (arr, name, color, size, opacity, border) => ({
+function makeEmbeddingTrace(arr, name, color, size, opacity, border) {
+    return {
         type: "scatter3d",
         mode: "markers",
         name: name,
@@ -642,7 +793,7 @@ function renderEmbeddingChart(points) {
         z: arr.map(p => p.z),
         text: arr.map(p => {
             const dateStr = p.battle_time ? formatSliderDate(parseBattleTime(p.battle_time)) : "";
-            return `${p.opponent || "?"} — ${p.result}${dateStr ? " (" + dateStr + ")" : ""}`;
+            return `${p.opponent || "?"} \u2014 ${p.result}${dateStr ? " (" + dateStr + ")" : ""}`;
         }),
         customdata: arr.map(p => p.battle_id),
         hovertemplate: "%{text}<extra></extra>",
@@ -652,58 +803,65 @@ function renderEmbeddingChart(points) {
             opacity: opacity,
             line: border ? { color: "#ffffff", width: 0.5 } : undefined,
         },
-    });
+    };
+}
+
+function renderEmbeddingChart(points) {
+    if (!points || points.length === 0) return;
+
+    const section = document.getElementById("embeddings-section");
+    section.style.display = "";
+
+    const corpusWins = points.filter(p => p.result === "win" && p.corpus !== "personal");
+    const corpusLosses = points.filter(p => p.result === "loss" && p.corpus !== "personal");
+    const personalWins = points.filter(p => p.result === "win" && p.corpus === "personal");
+    const personalLosses = points.filter(p => p.result === "loss" && p.corpus === "personal");
 
     const data = [
-        makeTrace(corpusWins,     "Corpus Wins",    "rgb(52, 211, 153)",  2.5, 0.25, false),
-        makeTrace(corpusLosses,   "Corpus Losses",  "rgb(248, 113, 113)", 2.5, 0.25, false),
-        makeTrace(personalWins,   "My Wins",        "rgb(52, 211, 153)",  5,   0.9,  true),
-        makeTrace(personalLosses, "My Losses",      "rgb(248, 113, 113)", 5,   0.9,  true),
+        makeEmbeddingTrace(corpusWins,     "Corpus Wins",    "rgb(52, 211, 153)",  2.5, 0.25, false),
+        makeEmbeddingTrace(corpusLosses,   "Corpus Losses",  "rgb(248, 113, 113)", 2.5, 0.25, false),
+        makeEmbeddingTrace(personalWins,   "My Wins",        "rgb(52, 211, 153)",  5,   0.9,  true),
+        makeEmbeddingTrace(personalLosses, "My Losses",      "rgb(248, 113, 113)", 5,   0.9,  true),
     ];
 
-    const axisStyle = {
-        gridcolor: "#2a2d3a",
-        zerolinecolor: "#2a2d3a",
-        color: "#8b8fa3",
-        backgroundcolor: "#1a1d27",
-    };
-
-    const layout = {
-        paper_bgcolor: "#1a1d27",
-        font: { color: "#8b8fa3", family: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" },
-        margin: { l: 0, r: 0, t: 0, b: 0 },
-        scene: {
-            xaxis: { ...axisStyle, title: "UMAP-1" },
-            yaxis: { ...axisStyle, title: "UMAP-2" },
-            zaxis: { ...axisStyle, title: "UMAP-3" },
-            bgcolor: "#1a1d27",
-        },
-        legend: {
-            font: { size: 11, color: "#8b8fa3" },
-            bgcolor: "rgba(26, 29, 39, 0.8)",
-        },
-        showlegend: true,
-    };
-
-    const config = {
-        responsive: true,
-        displayModeBar: true,
-        modeBarButtonsToRemove: ["toImage", "sendDataToCloud"],
-        displaylogo: false,
-    };
-
-    Plotly.newPlot("embeddingPlot", data, layout, config);
+    Plotly.newPlot("embeddingPlot", data, EMBEDDING_LAYOUT, EMBEDDING_CONFIG);
     embeddingPlotInit = true;
 
-    // Click handler — customdata carries battle_id directly
     document.getElementById("embeddingPlot").on("plotly_click", function(eventData) {
         if (eventData.points.length > 0) {
             const battleId = eventData.points[0].customdata;
-            if (battleId) {
-                fetchSimilar(battleId);
-            }
+            if (battleId) fetchSimilar(battleId);
         }
     });
+}
+
+function extendEmbeddingChart(newPoints) {
+    if (!embeddingPlotInit || !newPoints || newPoints.length === 0) return;
+
+    // Bucket new points into the 4 existing traces
+    const buckets = [[], [], [], []]; // corpusWin, corpusLoss, personalWin, personalLoss
+    for (const p of newPoints) {
+        const isPersonal = p.corpus === "personal";
+        const isWin = p.result === "win";
+        if (!isPersonal && isWin)       buckets[0].push(p);
+        else if (!isPersonal && !isWin) buckets[1].push(p);
+        else if (isPersonal && isWin)   buckets[2].push(p);
+        else                            buckets[3].push(p);
+    }
+
+    for (let i = 0; i < 4; i++) {
+        if (buckets[i].length === 0) continue;
+        Plotly.extendTraces("embeddingPlot", {
+            x: [buckets[i].map(p => p.x)],
+            y: [buckets[i].map(p => p.y)],
+            z: [buckets[i].map(p => p.z)],
+            text: [buckets[i].map(p => {
+                const dateStr = p.battle_time ? formatSliderDate(parseBattleTime(p.battle_time)) : "";
+                return `${p.opponent || "?"} \u2014 ${p.result}${dateStr ? " (" + dateStr + ")" : ""}`;
+            })],
+            customdata: [buckets[i].map(p => p.battle_id)],
+        }, [i]);
+    }
 }
 
 async function fetchSimilar(battleId) {
@@ -726,7 +884,6 @@ function drawSimilarityLines(data) {
     const valid = allSimilar.filter(s => s.x != null);
     if (valid.length === 0) return;
 
-    // Build line segments: for each similar game, a line from ref → target with a null gap
     const xs = [], ys = [], zs = [], texts = [];
     for (const s of valid) {
         xs.push(ref.x, s.x, null);
@@ -749,7 +906,6 @@ function drawSimilarityLines(data) {
     const plotEl = document.getElementById("embeddingPlot");
     const nTraces = plotEl.data.length;
 
-    // Remove previous similarity lines trace (always the 5th+ trace if it exists)
     if (nTraces > 4) {
         Plotly.deleteTraces("embeddingPlot", Array.from({length: nTraces - 4}, (_, i) => 4 + i));
     }
@@ -780,7 +936,7 @@ function similarRows(games) {
 function renderSimilarPanel(battleId, data) {
     const panel = document.getElementById("similar-panel");
     panel.style.display = "";
-    document.getElementById("similar-ref").textContent = battleId.slice(0, 12) + "…";
+    document.getElementById("similar-ref").textContent = battleId.slice(0, 12) + "\u2026";
 
     const thead = `<thead><tr><th>Opponent</th><th>Result</th><th>Score</th><th>Rank</th><th>Kernel</th><th>Archetype</th><th>Deck</th></tr></thead>`;
     let html = "";

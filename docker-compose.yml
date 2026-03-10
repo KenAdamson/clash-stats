@@ -43,6 +43,28 @@ services:
     volumes:
       - ./data:/app/data
 
+  cr-samv2:
+    build: docker/samv2
+    container_name: cr-samv2
+    restart: unless-stopped
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "109"  # render group GID for Intel Arc GPU
+    networks:
+      - media-network
+    ports:
+      - "8079:8079"
+    volumes:
+      - ./data:/app/data
+      - ./replays:/app/replays
+    shm_size: '2gb'
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8079/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
   prometheus:
     image: prom/prometheus:latest
     container_name: prometheus

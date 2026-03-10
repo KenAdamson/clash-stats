@@ -54,6 +54,16 @@ TOWER_BODY_SAMPLE_POINTS = [
     (0.78, 0.72),  # player right princess tower area
 ]
 
+# Player king tower: the light-blue tower body at bottom-center of the arena.
+# Present during gameplay, absent on VS screens / loading / phone UI.
+# RGB ~(120-190, 170-225, 200-255) — consistently light blue across arenas.
+# Sampled at the tower body itself (narrow column at x≈0.50, y≈0.85-0.86).
+PLAYER_KING_TOWER_POINTS = [
+    (0.48, 0.85),   # king tower body left
+    (0.50, 0.855),  # king tower body center
+    (0.52, 0.85),   # king tower body right
+]
+
 
 def find_battle_by_opponent(
     session: Session,
@@ -115,19 +125,20 @@ def detect_gameplay_start(frame_dir: Path, sample_step: int = 10) -> int:
         return int(path.stem.split("_")[1])
 
     def is_gameplay(frame_path: Path) -> bool:
-        """Check if a frame shows gameplay (not VS/match screen).
+        """Check if a frame shows gameplay (not VS/match screen or phone UI).
 
-        Primary signal: the VS screen has bright red/pink banners
-        (R>150, G<50) across the top. During gameplay, this becomes the
-        dark opponent info bar. Arena-skin and replay-control independent.
+        Two-signal detection:
+        1. Reject VS screen: bright red/pink banners (R>150, G<50) at top
+        2. Require player info bar: light blue bar (G>140, B>180) at y≈0.86
 
-        Secondary signal: player's princess tower body is light blue
-        during gameplay.
+        The player info bar is the most reliable positive signal — it's
+        the name/clan bar just below the arena. Present during gameplay,
+        absent on VS screens, loading screens, and phone UI overlays.
         """
         img = Image.open(frame_path)
         width, height = img.size
 
-        # Primary: check if VS banner is gone (no bright red/pink at top)
+        # Signal 1: reject if VS banner is present (bright red/pink at top)
         vs_banner_hits = 0
         for nx, ny in VS_BANNER_SAMPLE_POINTS:
             px, py = int(nx * width), int(ny * height)
@@ -138,15 +149,16 @@ def detect_gameplay_start(frame_dir: Path, sample_step: int = 10) -> int:
         if vs_banner_hits >= 2:
             return False  # still on VS screen
 
-        # Secondary: confirm tower body is visible (light blue)
+        # Signal 2: require player king tower body (light blue at bottom-center)
+        # Gameplay: RGB ~(120-190, 170-225, 200-255)
         tower_hits = 0
-        for nx, ny in TOWER_BODY_SAMPLE_POINTS:
+        for nx, ny in PLAYER_KING_TOWER_POINTS:
             px, py = int(nx * width), int(ny * height)
             r, g, b = img.getpixel((px, py))[:3]
-            if g > 150 and b > 180:
+            if g > 140 and b > 180:
                 tower_hits += 1
 
-        return tower_hits >= 1
+        return tower_hits >= 2
 
     # Coarse scan: find approximate transition
     first_gameplay_idx = len(frames) - 1  # default to last frame
