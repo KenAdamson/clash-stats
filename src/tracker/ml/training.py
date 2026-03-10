@@ -298,52 +298,23 @@ def train_tcn(session: Session, model_dir: Optional[Path] = None) -> None:
     from sqlalchemy import text as sa_text
     from tracker.ml.sequence_dataset import MIN_EVENTS
 
+    # Use JOIN instead of correlated subquery to avoid O(n*m) scan on 13M rows
     battle_rows = session.execute(
         sa_text("""
             SELECT b.battle_id
             FROM battles b
-            WHERE b.battle_type = 'PvP'
-              AND b.result IN ('win', 'loss')
-              AND (SELECT COUNT(*) FROM replay_events re
-                   WHERE re.battle_id = b.battle_id
-                     AND re.card_name != '_invalid') >= :min_events
+            JOIN (
+                SELECT battle_id FROM replay_events
+                WHERE card_name != '_invalid'
+                GROUP BY battle_id HAVING COUNT(*) >= :min_events
+            ) re_counts ON re_counts.battle_id = b.battle_id
+            WHERE b.battle_type = 'PvP' AND b.result IN ('win', 'loss')
             ORDER BY b.battle_time
         """),
         {"min_events": MIN_EVENTS},
     ).scalars().all()
 
-    # Match dataset length (some games may have been skipped during loading)
-    if len(battle_rows) != len(embeddings_128d):
-        logger.warning(
-            "Battle count mismatch: %d battles vs %d embeddings. "
-            "Some games were filtered during dataset creation.",
-            len(battle_rows), len(embeddings_128d),
-        )
-        # The dataset filters games with < MIN_EVENTS valid (non-_invalid) events
-        # We need to re-derive the actual battle_ids from the dataset
-        # Since SequenceDataset stores samples in order, we track which were kept
-        # by re-running the same logic
-        kept_ids = []
-        events_by_battle: dict[str, int] = {}
-        counts = session.execute(
-            sa_text("""
-                SELECT battle_id, COUNT(*) as cnt
-                FROM replay_events
-                WHERE card_name != '_invalid'
-                GROUP BY battle_id
-                HAVING cnt >= :min_events
-            """),
-            {"min_events": MIN_EVENTS},
-        ).all()
-        events_by_battle = {r[0]: r[1] for r in counts}
-
-        for bid in battle_rows:
-            if bid in events_by_battle:
-                kept_ids.append(bid)
-
-        battle_ids = kept_ids[: len(embeddings_128d)]
-    else:
-        battle_ids = list(battle_rows)
+    battle_ids = list(battle_rows)[:len(embeddings_128d)]
 
     # 8. UMAP 128d → 3d for visualization
     logger.info("Fitting UMAP 128d → 3d for visualization")
@@ -407,16 +378,17 @@ def embed_new(session: Session, model_dir: Optional[Path] = None) -> int:
         print("  ✗ No fitted UMAP reducer found. Run --train-tcn first.")
         return 0
 
-    # 1. Find battles with replay data but no embedding
+    # 1. Find battles with replay data but no embedding (JOIN avoids correlated subquery)
     new_rows = session.execute(
         sa_text("""
             SELECT b.battle_id
             FROM battles b
-            WHERE b.battle_type = 'PvP'
-              AND b.result IN ('win', 'loss')
-              AND (SELECT COUNT(*) FROM replay_events re
-                   WHERE re.battle_id = b.battle_id
-                     AND re.card_name != '_invalid') >= :min_events
+            JOIN (
+                SELECT battle_id FROM replay_events
+                WHERE card_name != '_invalid'
+                GROUP BY battle_id HAVING COUNT(*) >= :min_events
+            ) re_counts ON re_counts.battle_id = b.battle_id
+            WHERE b.battle_type = 'PvP' AND b.result IN ('win', 'loss')
               AND b.battle_id NOT IN (
                   SELECT ge.battle_id FROM game_embeddings ge
                   WHERE ge.model_version = :model_version
@@ -452,35 +424,22 @@ def embed_new(session: Session, model_dir: Optional[Path] = None) -> int:
     # More efficient: build a mini-dataset from just the new battle_ids
     dataset = SequenceDataset(session, vocab)
 
-    # Map dataset indices to battle_ids
-    all_battle_rows = session.execute(
+    # Map dataset indices to battle_ids using JOIN (avoids slow correlated subquery)
+    dataset_battle_ids = session.execute(
         sa_text("""
             SELECT b.battle_id
             FROM battles b
-            WHERE b.battle_type = 'PvP'
-              AND b.result IN ('win', 'loss')
-              AND (SELECT COUNT(*) FROM replay_events re
-                   WHERE re.battle_id = b.battle_id
-                     AND re.card_name != '_invalid') >= :min_events
+            JOIN (
+                SELECT battle_id FROM replay_events
+                WHERE card_name != '_invalid'
+                GROUP BY battle_id HAVING COUNT(*) >= :min_events
+            ) re_counts ON re_counts.battle_id = b.battle_id
+            WHERE b.battle_type = 'PvP' AND b.result IN ('win', 'loss')
             ORDER BY b.battle_time
         """),
         {"min_events": MIN_EVENTS},
     ).scalars().all()
-
-    # The dataset may have filtered some, so derive kept battle_ids
-    counts = session.execute(
-        sa_text("""
-            SELECT battle_id, COUNT(*) as cnt
-            FROM replay_events
-            WHERE card_name != '_invalid'
-            GROUP BY battle_id
-            HAVING cnt >= :min_events
-        """),
-        {"min_events": MIN_EVENTS},
-    ).all()
-    valid_bids = {r[0] for r in counts}
-    dataset_battle_ids = [bid for bid in all_battle_rows if bid in valid_bids]
-    dataset_battle_ids = dataset_battle_ids[: len(dataset)]
+    dataset_battle_ids = list(dataset_battle_ids)[:len(dataset)]
 
     # Find indices of new games within the dataset
     new_set = set(new_rows)

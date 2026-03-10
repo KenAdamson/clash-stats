@@ -12,7 +12,7 @@ from tracker.api import ClashRoyaleAPI, DEFAULT_API_URL
 from tracker.database import get_session, init_db
 from tracker.export import export_data
 
-DB_FILE = "clash_royale_history.db"
+DB_FILE = os.environ.get("CR_DB_PATH", "data/clash_royale_history.db")
 
 
 def fetch_and_store(
@@ -180,6 +180,15 @@ Environment variables:
                         help="Find games most similar to the given battle")
     parser.add_argument("--embed-new", action="store_true",
                         help="Embed new games using trained TCN (inference only, no retraining)")
+    # Win Probability (ADR-004)
+    parser.add_argument("--train-wp", action="store_true",
+                        help="Train win probability model (ADR-004)")
+    parser.add_argument("--wp-infer", action="store_true",
+                        help="Run WP inference using existing checkpoint (no retraining)")
+    parser.add_argument("--wp", type=str, metavar="BATTLE_ID",
+                        help="Show P(win) curve for a game")
+    parser.add_argument("--wp-critical", type=str, metavar="BATTLE_ID",
+                        help="Show top critical plays (highest WPA) for a game")
     parser.add_argument("--mark-stale-replays", action="store_true",
                         help="Mark unfetched battles older than 7 days as permanently missed")
     parser.add_argument("--manifold", action="store_true",
@@ -657,6 +666,38 @@ Environment variables:
             from tracker.ml.training import embed_new
             embed_new(session, model_dir=Path(args.db).parent / "ml_models")
 
+        if args.train_wp:
+            from pathlib import Path
+            from tracker.ml.wp_training import train_wp
+            train_wp(session, model_dir=Path(args.db).parent / "ml_models")
+
+        if args.wp_infer:
+            from pathlib import Path
+            from tracker.ml.wp_training import infer_wp
+            infer_wp(session, model_dir=Path(args.db).parent / "ml_models")
+
+        if args.wp:
+            from tracker.ml.wp_storage import WinProbability
+            rows = session.query(WinProbability).filter_by(
+                battle_id=args.wp,
+            ).order_by(WinProbability.game_tick).all()
+            if not rows:
+                print(f"  ✗ No win probability data for {args.wp}")
+                print("    Run --train-wp first")
+            else:
+                reporting.print_wp_curve(rows, args.wp)
+
+        if args.wp_critical:
+            from tracker.ml.wp_storage import WinProbability
+            rows = session.query(WinProbability).filter_by(
+                battle_id=args.wp_critical,
+            ).order_by(WinProbability.criticality.desc()).limit(10).all()
+            if not rows:
+                print(f"  ✗ No win probability data for {args.wp_critical}")
+                print("    Run --train-wp first")
+            else:
+                reporting.print_wp_critical(rows, args.wp_critical)
+
         if args.mark_stale_replays:
             from tracker.corpus_scraper import mark_stale_replays
             count = mark_stale_replays(session)
@@ -716,7 +757,9 @@ Environment variables:
             args.sim_matchups, args.sim_interactions, args.sim_elixir,
             args.sim_hands, args.sim_full,
             args.tilt_check, args.train_tcn, args.build_features, args.train_embeddings,
-            args.clusters, args.similar, args.embed_new, args.manifold,
+            args.clusters, args.similar, args.embed_new,
+            args.train_wp, args.wp_infer, args.wp, args.wp_critical,
+            args.manifold,
             args.matchup_dive, args.broken_cycle, args.mark_stale_replays,
         ])
         if not has_action:
