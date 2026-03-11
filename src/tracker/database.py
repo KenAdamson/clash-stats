@@ -61,6 +61,8 @@ def get_engine(db_ref: str) -> Engine:
         engine = create_engine(
             url,
             echo=False,
+            pool_size=20,
+            max_overflow=20,
             pool_recycle=3600,
             pool_pre_ping=True,
         )

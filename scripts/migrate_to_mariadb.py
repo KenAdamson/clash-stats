@@ -16,6 +16,7 @@ import argparse
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 
 # Allow running from repo root
@@ -31,7 +32,8 @@ MARIADB_URL = os.environ.get(
     "mysql+pymysql://clash_stats:clash_stats_pw_2026@192.168.7.59/clash_stats",
 )
 
-CHUNK = 2000  # rows per INSERT batch
+CHUNK = 500   # rows per INSERT batch — small enough to not starve the tracker
+SLEEP = 0.05  # seconds between commits — yields to tracker writes
 
 # Tables in dependency order (FK parents first)
 TABLE_ORDER = [
@@ -129,6 +131,7 @@ def main():
                 result = dst_conn.execute(insert_sql, batch)
                 dst_conn.commit()
                 inserted += result.rowcount
+                time.sleep(SLEEP)
                 offset += len(rows)
                 if offset % 50000 == 0 or offset >= count:
                     log.info("    … %d / %d", min(offset, count), count)

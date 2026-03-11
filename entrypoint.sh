@@ -30,6 +30,7 @@ cat > /app/fetch.sh << EOF
 export CR_API_KEY="${CR_API_KEY}"
 export CR_PLAYER_TAG="${CR_PLAYER_TAG}"
 [ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
+[ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
 clash-stats --fetch --db ${DB_PATH}
 EOF
@@ -60,6 +61,7 @@ export CR_PLAYER_TAG="${CR_PLAYER_TAG}"
 [ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
 export BROWSER_WS_URL="${BROWSER_WS_URL:-http://cr-browser:9223}"
 export ROYALEAPI_SESSION_PATH="${ROYALEAPI_SESSION_PATH:-/app/data/royaleapi_session.json}"
+[ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
 clash-stats --personal-combined --player-tag "${CR_PLAYER_TAG}" --replays-per-player 25 --db ${DB_PATH}
 EOF
@@ -70,6 +72,7 @@ cat > /app/corpus_update.sh << EOF
 #!/bin/sh
 export CR_API_KEY="${CR_API_KEY}"
 [ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
+[ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
 clash-stats --corpus-update --corpus-limit 200 --db ${DB_PATH}
 EOF
@@ -86,6 +89,7 @@ trap 'rm -f "\$LOCKFILE"' EXIT
 touch "\$LOCKFILE"
 export CR_API_KEY="${CR_API_KEY}"
 [ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
+[ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
 clash-stats --corpus-scrape --corpus-limit 200 --db ${DB_PATH}
 EOF
@@ -94,6 +98,7 @@ chmod +x /app/corpus_scrape.sh
 cat > /app/sim_refresh.sh << EOF
 #!/bin/sh
 export CR_PLAYER_TAG="${CR_PLAYER_TAG}"
+[ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
 clash-stats --sim-full --player-tag "${CR_PLAYER_TAG}" --db ${DB_PATH}
 EOF
@@ -111,6 +116,7 @@ touch "\$LOCKFILE"
 export BROWSER_WS_URL="${BROWSER_WS_URL:-http://cr-browser:9223}"
 export ROYALEAPI_SESSION_PATH="${ROYALEAPI_SESSION_PATH:-/app/data/royaleapi_session.json}"
 export REPLAYS_PER_PLAYER="${REPLAYS_PER_PLAYER:-25}"
+[ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
 clash-stats --corpus-replays --corpus-limit 200 --concurrency 12 --max-pages 2 --db ${DB_PATH}
 EOF
@@ -121,6 +127,7 @@ cat > /app/corpus_discover.sh << EOF
 #!/bin/sh
 export CR_API_KEY="${CR_API_KEY}"
 [ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
+[ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
 clash-stats --corpus-discover --corpus-limit 200 --db ${DB_PATH}
 EOF
@@ -131,6 +138,7 @@ cat > /app/corpus_locations.sh << EOF
 #!/bin/sh
 export CR_API_KEY="${CR_API_KEY}"
 [ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
+[ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
 clash-stats --corpus-locations --corpus-limit 200 --db ${DB_PATH}
 EOF
@@ -140,6 +148,7 @@ chmod +x /app/corpus_locations.sh
 cat > /app/corpus_nemeses.sh << EOF
 #!/bin/sh
 export CR_PLAYER_TAG="${CR_PLAYER_TAG}"
+[ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
 clash-stats --corpus-nemeses --player-tag "${CR_PLAYER_TAG}" --db ${DB_PATH}
 EOF
@@ -160,6 +169,7 @@ export CR_API_KEY="${CR_API_KEY}"
 export BROWSER_WS_URL="${BROWSER_WS_URL:-http://cr-browser:9223}"
 export ROYALEAPI_SESSION_PATH="${ROYALEAPI_SESSION_PATH:-/app/data/royaleapi_session.json}"
 export REPLAYS_PER_PLAYER="${REPLAYS_PER_PLAYER:-25}"
+[ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
 clash-stats --corpus-combined --corpus-limit 200 --concurrency 12 --max-pages 2 --db ${DB_PATH}
 EOF
@@ -168,6 +178,7 @@ chmod +x /app/corpus_combined.sh
 # TCN retraining
 cat > /app/tcn_train.sh << EOF
 #!/bin/sh
+[ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
 clash-stats --train-tcn --db ${DB_PATH}
 EOF
