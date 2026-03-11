@@ -74,7 +74,7 @@ export CR_API_KEY="${CR_API_KEY}"
 [ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
 [ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
-clash-stats --corpus-update --corpus-limit 200 --db ${DB_PATH}
+clash-stats --corpus-update --corpus-limit 500 --db ${DB_PATH}
 EOF
 chmod +x /app/corpus_update.sh
 
@@ -91,7 +91,7 @@ export CR_API_KEY="${CR_API_KEY}"
 [ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
 [ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
-clash-stats --corpus-scrape --corpus-limit 200 --db ${DB_PATH}
+clash-stats --corpus-scrape --corpus-limit 500 --db ${DB_PATH}
 EOF
 chmod +x /app/corpus_scrape.sh
 
@@ -118,7 +118,7 @@ export ROYALEAPI_SESSION_PATH="${ROYALEAPI_SESSION_PATH:-/app/data/royaleapi_ses
 export REPLAYS_PER_PLAYER="${REPLAYS_PER_PLAYER:-25}"
 [ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
-clash-stats --corpus-replays --corpus-limit 200 --concurrency 12 --max-pages 2 --db ${DB_PATH}
+clash-stats --corpus-replays --corpus-limit 500 --concurrency 12 --max-pages 2 --db ${DB_PATH}
 EOF
 chmod +x /app/corpus_replays.sh
 
@@ -129,7 +129,7 @@ export CR_API_KEY="${CR_API_KEY}"
 [ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
 [ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
-clash-stats --corpus-discover --corpus-limit 200 --db ${DB_PATH}
+clash-stats --corpus-discover --corpus-limit 500 --db ${DB_PATH}
 EOF
 chmod +x /app/corpus_discover.sh
 
@@ -140,7 +140,7 @@ export CR_API_KEY="${CR_API_KEY}"
 [ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
 [ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
-clash-stats --corpus-locations --corpus-limit 200 --db ${DB_PATH}
+clash-stats --corpus-locations --corpus-limit 500 --db ${DB_PATH}
 EOF
 chmod +x /app/corpus_locations.sh
 
@@ -171,7 +171,7 @@ export ROYALEAPI_SESSION_PATH="${ROYALEAPI_SESSION_PATH:-/app/data/royaleapi_ses
 export REPLAYS_PER_PLAYER="${REPLAYS_PER_PLAYER:-25}"
 [ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
-clash-stats --corpus-combined --corpus-limit 200 --concurrency 12 --max-pages 2 --db ${DB_PATH}
+clash-stats --corpus-combined --corpus-limit 500 --concurrency 12 --max-pages 2 --db ${DB_PATH}
 EOF
 chmod +x /app/corpus_combined.sh
 
@@ -192,7 +192,7 @@ echo "  Personal:   every 2 min combined (battles + replays, atomic)"
 echo "  Database:   ${DB_PATH}"
 echo "  Dashboard:  http://0.0.0.0:8078"
 echo "  Stats push: every 5 min → ${PUSH_DEST}"
-echo "  Corpus:     every 5 min combined (battles + replays, 200 players, 12 tabs)"
+echo "  Corpus:     every 5 min combined (battles + replays, 500 players, 12 tabs)"
 echo "  Discovery:  daily 3am opponent network + weekly Mon 7am regional leaderboards"
 echo "  Metrics:    http://0.0.0.0:8001/metrics (Prometheus)"
 echo "  noVNC:      http://0.0.0.0:6080 (browser sidecar)"
