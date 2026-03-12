@@ -326,22 +326,8 @@ Environment variables:
             from tracker.metrics import SCRAPE_RUNS, flush_metrics
             if new_battles >= 0:
                 SCRAPE_RUNS.labels(scrape_type="battles", outcome="success").inc()
-            # Always attempt replays — even if no NEW battles this cycle,
-            # there may be unfetched replays from previous cycles
-            from tracker.replays import run_fetch_replays
-            replays_per_player = (
-                args.replays_per_player
-                or int(os.environ.get("REPLAYS_PER_PLAYER", "25"))
-            )
-            replay_count = run_fetch_replays(
-                session, tag_clean, limit=replays_per_player,
-            )
-            if replay_count >= 0:
-                SCRAPE_RUNS.labels(scrape_type="personal_replays", outcome="success").inc()
-                print(f"  ✓ Fetched {replay_count} replays")
-            elif replay_count == -1:
-                SCRAPE_RUNS.labels(scrape_type="personal_replays", outcome="session_expired").inc()
-                print("  ✗ RoyaleAPI session expired")
+            # Replay scraping now happens inside corpus_combined using the warm
+            # shared browser context (avoids Cloudflare fresh-context challenges).
             flush_metrics("personal_combined")
 
         if args.corpus_update:
@@ -405,6 +391,7 @@ Environment variables:
                 replays_per_player=replays_per_player,
                 max_pages=args.max_pages,
                 concurrency=concurrency,
+                personal_tag=player_tag or os.environ.get("CR_PLAYER_TAG"),
             )
             print(f"  ✓ Combined scrape: {result['total_players']} players, "
                   f"{result['total_new_battles']} battles, "

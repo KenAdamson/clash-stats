@@ -46,7 +46,7 @@ export STATS_REMOTE="${STATS_REMOTE:-origin}"
 EOF
 chmod +x /app/publish_wrapper.sh
 
-# Build personal combined wrapper: fetch battles + replays in one atomic pass
+# Build personal combined wrapper: fetch battles only (replays handled by corpus_combined)
 cat > /app/personal_combined.sh << EOF
 #!/bin/sh
 LOCKFILE=/tmp/personal_combined.lock
@@ -59,11 +59,9 @@ touch "\$LOCKFILE"
 export CR_API_KEY="${CR_API_KEY}"
 export CR_PLAYER_TAG="${CR_PLAYER_TAG}"
 [ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
-export BROWSER_WS_URL="${BROWSER_WS_URL:-http://cr-browser:9223}"
-export ROYALEAPI_SESSION_PATH="${ROYALEAPI_SESSION_PATH:-/app/data/royaleapi_session.json}"
 [ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
-clash-stats --personal-combined --player-tag "${CR_PLAYER_TAG}" --replays-per-player 25 --db ${DB_PATH}
+clash-stats --personal-combined --player-tag "${CR_PLAYER_TAG}" --db ${DB_PATH}
 EOF
 chmod +x /app/personal_combined.sh
 
@@ -165,6 +163,7 @@ fi
 trap 'rm -f "\$LOCKFILE"' EXIT
 touch "\$LOCKFILE"
 export CR_API_KEY="${CR_API_KEY}"
+export CR_PLAYER_TAG="${CR_PLAYER_TAG}"
 [ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
 export BROWSER_WS_URL="${BROWSER_WS_URL:-http://cr-browser:9223}"
 export ROYALEAPI_SESSION_PATH="${ROYALEAPI_SESSION_PATH:-/app/data/royaleapi_session.json}"

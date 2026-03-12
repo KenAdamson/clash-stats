@@ -425,6 +425,7 @@ async def scrape_corpus_combined(
     replays_per_player: int = 25,
     max_pages: int = 2,
     concurrency: int = 12,
+    personal_tag: str | None = None,
 ) -> dict:
     """Fetch battles AND replays for corpus players in a single pass.
 
@@ -432,6 +433,10 @@ async def scrape_corpus_combined(
     then immediately dispatches the same batch to browser tabs for concurrent
     replay scraping. This maximizes the overlap between the CR API's battle
     window and RoyaleAPI's cached battles.
+
+    If ``personal_tag`` is provided, personal replays are scraped FIRST using a
+    dedicated tab in the same warm browser context, avoiding the Cloudflare
+    challenges that occur when a fresh context is created every 2 minutes.
 
     Args:
         session: SQLAlchemy session.
@@ -442,6 +447,8 @@ async def scrape_corpus_combined(
         replays_per_player: Max replays per player per run.
         max_pages: Pagination depth on RoyaleAPI.
         concurrency: Number of parallel browser tabs.
+        personal_tag: Player tag (with or without ``#``) whose replays should be
+            scraped first in the warm context before processing corpus players.
 
     Returns:
         Dict with combined scrape statistics.
@@ -514,6 +521,36 @@ async def scrape_corpus_combined(
             await page.route("**/adsbygoogle**", lambda route: route.abort())
             pages.append(page)
         logger.info("Opened %d browser tabs (resources blocked).", len(pages))
+
+        # --- Personal replays: scrape first in warm context ---
+        if personal_tag and not stats["session_expired"]:
+            clean_personal = personal_tag.lstrip("#")
+            personal_page = await context.new_page()
+            await personal_page.route(
+                "**/*.{png,jpg,jpeg,gif,svg,ico,woff,woff2,ttf,eot,css}",
+                lambda route: route.abort(),
+            )
+            await personal_page.route("**/analytics**", lambda route: route.abort())
+            await personal_page.route("**/ads**", lambda route: route.abort())
+            await personal_page.route("**/tracking**", lambda route: route.abort())
+            await personal_page.route("**/google-analytics**", lambda route: route.abort())
+            await personal_page.route("**/gtag**", lambda route: route.abort())
+            await personal_page.route("**/adsbygoogle**", lambda route: route.abort())
+            try:
+                personal_count = await fetch_replays_for_player(
+                    session, personal_page, clean_personal,
+                    limit=25, max_pages=10,
+                )
+                if personal_count == -1:
+                    logger.warning("Personal replay scrape: session expired for %s", clean_personal)
+                    stats["session_expired"] = True
+                else:
+                    logger.info("Personal replays: %d fetched for %s", personal_count, clean_personal)
+                    stats["total_replays"] += max(0, personal_count)
+            except Exception as e:
+                logger.warning("Personal replay scrape error for %s: %s", clean_personal, e)
+            finally:
+                await personal_page.close()
 
         async def _replay_worker(page, player, stagger_secs=0):
             """Scrape replays for one player on one tab."""
@@ -698,11 +735,13 @@ def run_scrape_corpus_combined(
     replays_per_player: int = 25,
     max_pages: int = 2,
     concurrency: int = 12,
+    personal_tag: str | None = None,
 ) -> dict:
     """Synchronous wrapper for scrape_corpus_combined."""
     return asyncio.run(
         scrape_corpus_combined(
             session, api, browser_ws, state_path, limit,
             replays_per_player, max_pages, concurrency,
+            personal_tag=personal_tag,
         )
     )
