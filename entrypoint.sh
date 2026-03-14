@@ -50,9 +50,16 @@ chmod +x /app/publish_wrapper.sh
 cat > /app/personal_combined.sh << EOF
 #!/bin/sh
 LOCKFILE=/tmp/personal_combined.lock
+STALE_MINUTES=10
 if [ -f "\$LOCKFILE" ]; then
-    echo "personal_combined: previous run still active, skipping"
-    exit 0
+    lock_age=\$(( \$(date +%s) - \$(date -r "\$LOCKFILE" +%s) ))
+    if [ "\$lock_age" -gt \$(( STALE_MINUTES * 60 )) ]; then
+        echo "personal_combined: stale lock (\${lock_age}s old), removing"
+        rm -f "\$LOCKFILE"
+    else
+        echo "personal_combined: previous run still active, skipping"
+        exit 0
+    fi
 fi
 trap 'rm -f "\$LOCKFILE"' EXIT
 touch "\$LOCKFILE"
@@ -79,9 +86,16 @@ chmod +x /app/corpus_update.sh
 cat > /app/corpus_scrape.sh << EOF
 #!/bin/sh
 LOCKFILE=/tmp/corpus_scrape.lock
+STALE_MINUTES=30
 if [ -f "\$LOCKFILE" ]; then
-    echo "corpus_scrape: previous run still active, skipping"
-    exit 0
+    lock_age=\$(( \$(date +%s) - \$(date -r "\$LOCKFILE" +%s) ))
+    if [ "\$lock_age" -gt \$(( STALE_MINUTES * 60 )) ]; then
+        echo "corpus_scrape: stale lock (\${lock_age}s old), removing"
+        rm -f "\$LOCKFILE"
+    else
+        echo "corpus_scrape: previous run still active, skipping"
+        exit 0
+    fi
 fi
 trap 'rm -f "\$LOCKFILE"' EXIT
 touch "\$LOCKFILE"
@@ -105,9 +119,16 @@ chmod +x /app/sim_refresh.sh
 cat > /app/corpus_replays.sh << EOF
 #!/bin/sh
 LOCKFILE=/tmp/corpus_replays.lock
+STALE_MINUTES=30
 if [ -f "\$LOCKFILE" ]; then
-    echo "corpus_replays: previous run still active, skipping"
-    exit 0
+    lock_age=\$(( \$(date +%s) - \$(date -r "\$LOCKFILE" +%s) ))
+    if [ "\$lock_age" -gt \$(( STALE_MINUTES * 60 )) ]; then
+        echo "corpus_replays: stale lock (\${lock_age}s old), removing"
+        rm -f "\$LOCKFILE"
+    else
+        echo "corpus_replays: previous run still active, skipping"
+        exit 0
+    fi
 fi
 trap 'rm -f "\$LOCKFILE"' EXIT
 touch "\$LOCKFILE"
@@ -156,9 +177,16 @@ chmod +x /app/corpus_nemeses.sh
 cat > /app/corpus_combined.sh << EOF
 #!/bin/sh
 LOCKFILE=/tmp/corpus_combined.lock
+STALE_MINUTES=30
 if [ -f "\$LOCKFILE" ]; then
-    echo "corpus_combined: previous run still active, skipping"
-    exit 0
+    lock_age=\$(( \$(date +%s) - \$(date -r "\$LOCKFILE" +%s) ))
+    if [ "\$lock_age" -gt \$(( STALE_MINUTES * 60 )) ]; then
+        echo "corpus_combined: stale lock (\${lock_age}s old), removing"
+        rm -f "\$LOCKFILE"
+    else
+        echo "corpus_combined: previous run still active, skipping"
+        exit 0
+    fi
 fi
 trap 'rm -f "\$LOCKFILE"' EXIT
 touch "\$LOCKFILE"
