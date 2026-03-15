@@ -30,6 +30,7 @@ cat > /app/fetch.sh << EOF
 export CR_API_KEY="${CR_API_KEY}"
 export CR_PLAYER_TAG="${CR_PLAYER_TAG}"
 [ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
+[ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
 clash-stats --fetch --db ${DB_PATH}
 EOF
@@ -45,23 +46,29 @@ export STATS_REMOTE="${STATS_REMOTE:-origin}"
 EOF
 chmod +x /app/publish_wrapper.sh
 
-# Build personal combined wrapper: fetch battles + replays in one atomic pass
+# Build personal combined wrapper: fetch battles only (replays handled by corpus_combined)
 cat > /app/personal_combined.sh << EOF
 #!/bin/sh
 LOCKFILE=/tmp/personal_combined.lock
+STALE_MINUTES=10
 if [ -f "\$LOCKFILE" ]; then
-    echo "personal_combined: previous run still active, skipping"
-    exit 0
+    lock_age=\$(( \$(date +%s) - \$(date -r "\$LOCKFILE" +%s) ))
+    if [ "\$lock_age" -gt \$(( STALE_MINUTES * 60 )) ]; then
+        echo "personal_combined: stale lock (\${lock_age}s old), removing"
+        rm -f "\$LOCKFILE"
+    else
+        echo "personal_combined: previous run still active, skipping"
+        exit 0
+    fi
 fi
 trap 'rm -f "\$LOCKFILE"' EXIT
 touch "\$LOCKFILE"
 export CR_API_KEY="${CR_API_KEY}"
 export CR_PLAYER_TAG="${CR_PLAYER_TAG}"
 [ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
-export BROWSER_WS_URL="${BROWSER_WS_URL:-http://cr-browser:9223}"
-export ROYALEAPI_SESSION_PATH="${ROYALEAPI_SESSION_PATH:-/app/data/royaleapi_session.json}"
+[ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
-clash-stats --personal-combined --player-tag "${CR_PLAYER_TAG}" --replays-per-player 25 --db ${DB_PATH}
+clash-stats --personal-combined --player-tag "${CR_PLAYER_TAG}" --db ${DB_PATH}
 EOF
 chmod +x /app/personal_combined.sh
 
@@ -70,30 +77,40 @@ cat > /app/corpus_update.sh << EOF
 #!/bin/sh
 export CR_API_KEY="${CR_API_KEY}"
 [ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
+[ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
-clash-stats --corpus-update --corpus-limit 200 --db ${DB_PATH}
+clash-stats --corpus-update --corpus-limit 500 --db ${DB_PATH}
 EOF
 chmod +x /app/corpus_update.sh
 
 cat > /app/corpus_scrape.sh << EOF
 #!/bin/sh
 LOCKFILE=/tmp/corpus_scrape.lock
+STALE_MINUTES=30
 if [ -f "\$LOCKFILE" ]; then
-    echo "corpus_scrape: previous run still active, skipping"
-    exit 0
+    lock_age=\$(( \$(date +%s) - \$(date -r "\$LOCKFILE" +%s) ))
+    if [ "\$lock_age" -gt \$(( STALE_MINUTES * 60 )) ]; then
+        echo "corpus_scrape: stale lock (\${lock_age}s old), removing"
+        rm -f "\$LOCKFILE"
+    else
+        echo "corpus_scrape: previous run still active, skipping"
+        exit 0
+    fi
 fi
 trap 'rm -f "\$LOCKFILE"' EXIT
 touch "\$LOCKFILE"
 export CR_API_KEY="${CR_API_KEY}"
 [ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
+[ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
-clash-stats --corpus-scrape --corpus-limit 200 --db ${DB_PATH}
+clash-stats --corpus-scrape --corpus-limit 500 --db ${DB_PATH}
 EOF
 chmod +x /app/corpus_scrape.sh
 
 cat > /app/sim_refresh.sh << EOF
 #!/bin/sh
 export CR_PLAYER_TAG="${CR_PLAYER_TAG}"
+[ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
 clash-stats --sim-full --player-tag "${CR_PLAYER_TAG}" --db ${DB_PATH}
 EOF
@@ -102,17 +119,25 @@ chmod +x /app/sim_refresh.sh
 cat > /app/corpus_replays.sh << EOF
 #!/bin/sh
 LOCKFILE=/tmp/corpus_replays.lock
+STALE_MINUTES=30
 if [ -f "\$LOCKFILE" ]; then
-    echo "corpus_replays: previous run still active, skipping"
-    exit 0
+    lock_age=\$(( \$(date +%s) - \$(date -r "\$LOCKFILE" +%s) ))
+    if [ "\$lock_age" -gt \$(( STALE_MINUTES * 60 )) ]; then
+        echo "corpus_replays: stale lock (\${lock_age}s old), removing"
+        rm -f "\$LOCKFILE"
+    else
+        echo "corpus_replays: previous run still active, skipping"
+        exit 0
+    fi
 fi
 trap 'rm -f "\$LOCKFILE"' EXIT
 touch "\$LOCKFILE"
 export BROWSER_WS_URL="${BROWSER_WS_URL:-http://cr-browser:9223}"
 export ROYALEAPI_SESSION_PATH="${ROYALEAPI_SESSION_PATH:-/app/data/royaleapi_session.json}"
 export REPLAYS_PER_PLAYER="${REPLAYS_PER_PLAYER:-25}"
+[ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
-clash-stats --corpus-replays --corpus-limit 200 --concurrency 12 --max-pages 2 --db ${DB_PATH}
+clash-stats --corpus-replays --corpus-limit 500 --concurrency 12 --max-pages 2 --db ${DB_PATH}
 EOF
 chmod +x /app/corpus_replays.sh
 
@@ -121,8 +146,9 @@ cat > /app/corpus_discover.sh << EOF
 #!/bin/sh
 export CR_API_KEY="${CR_API_KEY}"
 [ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
+[ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
-clash-stats --corpus-discover --corpus-limit 200 --db ${DB_PATH}
+clash-stats --corpus-discover --corpus-limit 500 --db ${DB_PATH}
 EOF
 chmod +x /app/corpus_discover.sh
 
@@ -131,8 +157,9 @@ cat > /app/corpus_locations.sh << EOF
 #!/bin/sh
 export CR_API_KEY="${CR_API_KEY}"
 [ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
+[ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
-clash-stats --corpus-locations --corpus-limit 200 --db ${DB_PATH}
+clash-stats --corpus-locations --corpus-limit 500 --db ${DB_PATH}
 EOF
 chmod +x /app/corpus_locations.sh
 
@@ -140,6 +167,7 @@ chmod +x /app/corpus_locations.sh
 cat > /app/corpus_nemeses.sh << EOF
 #!/bin/sh
 export CR_PLAYER_TAG="${CR_PLAYER_TAG}"
+[ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
 clash-stats --corpus-nemeses --player-tag "${CR_PLAYER_TAG}" --db ${DB_PATH}
 EOF
@@ -149,25 +177,35 @@ chmod +x /app/corpus_nemeses.sh
 cat > /app/corpus_combined.sh << EOF
 #!/bin/sh
 LOCKFILE=/tmp/corpus_combined.lock
+STALE_MINUTES=30
 if [ -f "\$LOCKFILE" ]; then
-    echo "corpus_combined: previous run still active, skipping"
-    exit 0
+    lock_age=\$(( \$(date +%s) - \$(date -r "\$LOCKFILE" +%s) ))
+    if [ "\$lock_age" -gt \$(( STALE_MINUTES * 60 )) ]; then
+        echo "corpus_combined: stale lock (\${lock_age}s old), removing"
+        rm -f "\$LOCKFILE"
+    else
+        echo "corpus_combined: previous run still active, skipping"
+        exit 0
+    fi
 fi
 trap 'rm -f "\$LOCKFILE"' EXIT
 touch "\$LOCKFILE"
 export CR_API_KEY="${CR_API_KEY}"
+export CR_PLAYER_TAG="${CR_PLAYER_TAG}"
 [ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
 export BROWSER_WS_URL="${BROWSER_WS_URL:-http://cr-browser:9223}"
 export ROYALEAPI_SESSION_PATH="${ROYALEAPI_SESSION_PATH:-/app/data/royaleapi_session.json}"
 export REPLAYS_PER_PLAYER="${REPLAYS_PER_PLAYER:-25}"
+[ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
-clash-stats --corpus-combined --corpus-limit 200 --concurrency 12 --max-pages 2 --db ${DB_PATH}
+clash-stats --corpus-combined --corpus-limit 500 --concurrency 12 --max-pages 2 --db ${DB_PATH}
 EOF
 chmod +x /app/corpus_combined.sh
 
 # TCN retraining
 cat > /app/tcn_train.sh << EOF
 #!/bin/sh
+[ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
 clash-stats --train-tcn --db ${DB_PATH}
 EOF
@@ -181,7 +219,7 @@ echo "  Personal:   every 2 min combined (battles + replays, atomic)"
 echo "  Database:   ${DB_PATH}"
 echo "  Dashboard:  http://0.0.0.0:8078"
 echo "  Stats push: every 5 min → ${PUSH_DEST}"
-echo "  Corpus:     every 5 min combined (battles + replays, 200 players, 12 tabs)"
+echo "  Corpus:     every 5 min combined (battles + replays, 500 players, 12 tabs)"
 echo "  Discovery:  daily 3am opponent network + weekly Mon 7am regional leaderboards"
 echo "  Metrics:    http://0.0.0.0:8001/metrics (Prometheus)"
 echo "  noVNC:      http://0.0.0.0:6080 (browser sidecar)"

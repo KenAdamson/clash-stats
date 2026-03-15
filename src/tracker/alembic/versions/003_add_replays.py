@@ -21,18 +21,19 @@ depends_on: Union[str, Sequence[str], None] = None
 def _column_exists(table: str, column: str) -> bool:
     """Check if a column already exists on a table (idempotent migrations)."""
     conn = op.get_bind()
-    result = conn.execute(sa.text(f"PRAGMA table_info({table})"))
-    columns = {row[1] for row in result}
+    insp = sa.inspect(conn)
+    try:
+        columns = {c["name"] for c in insp.get_columns(table)}
+    except Exception:
+        return False
     return column in columns
 
 
 def _table_exists(table: str) -> bool:
     """Check if a table already exists."""
     conn = op.get_bind()
-    result = conn.execute(sa.text(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name=:name"
-    ), {"name": table})
-    return result.fetchone() is not None
+    insp = sa.inspect(conn)
+    return table in insp.get_table_names()
 
 
 def upgrade() -> None:
@@ -47,9 +48,9 @@ def upgrade() -> None:
         op.create_table(
             "replay_events",
             sa.Column("id", sa.Integer, primary_key=True),
-            sa.Column("battle_id", sa.String, sa.ForeignKey("battles.battle_id"), nullable=False),
-            sa.Column("side", sa.String, nullable=False),
-            sa.Column("card_name", sa.String, nullable=False),
+            sa.Column("battle_id", sa.String(64), sa.ForeignKey("battles.battle_id"), nullable=False),
+            sa.Column("side", sa.String(16), nullable=False),
+            sa.Column("card_name", sa.String(64), nullable=False),
             sa.Column("game_tick", sa.Integer),
             sa.Column("arena_x", sa.Integer),
             sa.Column("arena_y", sa.Integer),
@@ -63,8 +64,8 @@ def upgrade() -> None:
         op.create_table(
             "replay_summaries",
             sa.Column("id", sa.Integer, primary_key=True),
-            sa.Column("battle_id", sa.String, sa.ForeignKey("battles.battle_id"), nullable=False),
-            sa.Column("side", sa.String, nullable=False),
+            sa.Column("battle_id", sa.String(64), sa.ForeignKey("battles.battle_id"), nullable=False),
+            sa.Column("side", sa.String(16), nullable=False),
             sa.Column("total_plays", sa.Integer),
             sa.Column("total_elixir", sa.Integer),
             sa.Column("troop_plays", sa.Integer),

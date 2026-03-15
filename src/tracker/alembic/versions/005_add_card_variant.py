@@ -22,8 +22,11 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def _column_exists(table: str, column: str) -> bool:
     conn = op.get_bind()
-    result = conn.execute(sa.text(f"PRAGMA table_info({table})"))
-    columns = {row[1] for row in result}
+    insp = sa.inspect(conn)
+    try:
+        columns = {c["name"] for c in insp.get_columns(table)}
+    except Exception:
+        return False
     return column in columns
 
 
@@ -47,7 +50,7 @@ def upgrade() -> None:
     if not _column_exists("deck_cards", "card_variant"):
         op.add_column(
             "deck_cards",
-            sa.Column("card_variant", sa.String, server_default="base"),
+            sa.Column("card_variant", sa.String(16), server_default="base"),
         )
 
     # Backfill from raw_json

@@ -8,3 +8,6 @@ data/
 .env
 src/cycle_sim/
 .env.anthropic
+replays/
+*.db
+.claude/

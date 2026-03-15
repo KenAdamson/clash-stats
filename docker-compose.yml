@@ -1,4 +1,31 @@
 services:
+  mariadb:
+    image: mariadb:lts
+    container_name: clash-mariadb
+    restart: always
+    profiles: [local]
+    volumes:
+      - ./data/mariadb-local:/var/lib/mysql
+    ports:
+      - "192.168.7.58:3306:3306"
+    environment:
+      - MYSQL_ROOT_PASSWORD=${MARIADB_ROOT_PASSWORD:-clashroot}
+      - MYSQL_DATABASE=clash_stats
+      - MYSQL_USER=clash_stats
+      - MYSQL_PASSWORD=clash_stats_pw_2026
+    command: >
+      --innodb-buffer-pool-size=4G
+      --innodb-log-file-size=512M
+      --innodb-flush-log-at-trx-commit=2
+      --sync-binlog=0
+    networks:
+      - media-network
+    healthcheck:
+      test: ["CMD", "mariadb-admin", "ping", "-u", "clash_stats", "-pclash_stats_pw_2026", "--silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   cr-tracker:
     build:
       context: .
@@ -11,6 +38,7 @@ services:
       - FETCH_INTERVAL=14400  # 4 hours in seconds
       - BROWSER_WS_URL=http://cr-browser:9223
       - ROYALEAPI_SESSION_PATH=/app/data/royaleapi_session.json
+      - DATABASE_URL=mysql+pymysql://clash_stats:clash_stats_pw_2026@clash-mariadb/clash_stats
     volumes:
       - ./data:/app/data
       - ./.git:/app/.git:rw
@@ -21,6 +49,7 @@ services:
       - "109"  # render group GID for Intel GPU access
     depends_on:
       - cr-browser
+      - mariadb
     networks:
       - media-network
     ports:

@@ -12,7 +12,9 @@ from tracker.api import ClashRoyaleAPI, DEFAULT_API_URL
 from tracker.database import get_session, init_db
 from tracker.export import export_data
 
-DB_FILE = "clash_royale_history.db"
+DB_FILE = os.environ.get("CR_DB_PATH", "data/clash_royale_history.db")
+# If DATABASE_URL is set it takes precedence over --db for all operations.
+_DATABASE_URL = os.environ.get("DATABASE_URL")
 
 
 def fetch_and_store(
@@ -180,6 +182,15 @@ Environment variables:
                         help="Find games most similar to the given battle")
     parser.add_argument("--embed-new", action="store_true",
                         help="Embed new games using trained TCN (inference only, no retraining)")
+    # Win Probability (ADR-004)
+    parser.add_argument("--train-wp", action="store_true",
+                        help="Train win probability model (ADR-004)")
+    parser.add_argument("--wp-infer", action="store_true",
+                        help="Run WP inference using existing checkpoint (no retraining)")
+    parser.add_argument("--wp", type=str, metavar="BATTLE_ID",
+                        help="Show P(win) curve for a game")
+    parser.add_argument("--wp-critical", type=str, metavar="BATTLE_ID",
+                        help="Show top critical plays (highest WPA) for a game")
     parser.add_argument("--mark-stale-replays", action="store_true",
                         help="Mark unfetched battles older than 7 days as permanently missed")
     parser.add_argument("--manifold", action="store_true",
@@ -203,8 +214,19 @@ Environment variables:
     player_tag = args.player_tag or os.environ.get("CR_PLAYER_TAG")
     api_url = args.api_url or os.environ.get("CR_API_URL", DEFAULT_API_URL)
 
-    engine = init_db(args.db)
+    # DATABASE_URL env var overrides --db (enables MariaDB backend)
+    _db_ref = _DATABASE_URL or args.db
+    engine = init_db(_db_ref)
     session = get_session(engine)
+
+    # model_dir lives next to the DB file for SQLite; fall back to data/ml_models
+    # when using a URL-based backend (MariaDB).
+    from pathlib import Path
+    _model_dir = (
+        Path("data/ml_models")
+        if ("://" in _db_ref)
+        else Path(args.db).parent / "ml_models"
+    )
 
     try:
         if args.fetch:
@@ -304,22 +326,8 @@ Environment variables:
             from tracker.metrics import SCRAPE_RUNS, flush_metrics
             if new_battles >= 0:
                 SCRAPE_RUNS.labels(scrape_type="battles", outcome="success").inc()
-            # Always attempt replays — even if no NEW battles this cycle,
-            # there may be unfetched replays from previous cycles
-            from tracker.replays import run_fetch_replays
-            replays_per_player = (
-                args.replays_per_player
-                or int(os.environ.get("REPLAYS_PER_PLAYER", "25"))
-            )
-            replay_count = run_fetch_replays(
-                session, tag_clean, limit=replays_per_player,
-            )
-            if replay_count >= 0:
-                SCRAPE_RUNS.labels(scrape_type="personal_replays", outcome="success").inc()
-                print(f"  ✓ Fetched {replay_count} replays")
-            elif replay_count == -1:
-                SCRAPE_RUNS.labels(scrape_type="personal_replays", outcome="session_expired").inc()
-                print("  ✗ RoyaleAPI session expired")
+            # Replay scraping now happens inside corpus_combined using the warm
+            # shared browser context (avoids Cloudflare fresh-context challenges).
             flush_metrics("personal_combined")
 
         if args.corpus_update:
@@ -383,6 +391,7 @@ Environment variables:
                 replays_per_player=replays_per_player,
                 max_pages=args.max_pages,
                 concurrency=concurrency,
+                personal_tag=player_tag or os.environ.get("CR_PLAYER_TAG"),
             )
             print(f"  ✓ Combined scrape: {result['total_players']} players, "
                   f"{result['total_new_battles']} battles, "
@@ -588,9 +597,8 @@ Environment variables:
                 print_tilt_warning(tilt_status)
 
         if args.train_tcn:
-            from pathlib import Path
             from tracker.ml.training import train_tcn
-            train_tcn(session, model_dir=Path(args.db).parent / "ml_models")
+            train_tcn(session, model_dir=_model_dir)
 
         if args.build_features:
             from tracker.ml.card_metadata import CardVocabulary
@@ -604,7 +612,6 @@ Environment variables:
                 print("  · No new games to process")
 
         if args.train_embeddings:
-            from pathlib import Path
             from tracker.ml.features import load_feature_matrix
             from tracker.ml.umap_embeddings import train_embeddings
             battle_ids, features = load_feature_matrix(session)
@@ -612,8 +619,7 @@ Environment variables:
                 print(f"  ✗ Need at least 20 games with features (have {len(battle_ids)})")
                 print("    Run --build-features first")
             else:
-                model_dir = Path(args.db).parent / "ml_models"
-                train_embeddings(session, battle_ids, features, model_dir=model_dir)
+                train_embeddings(session, battle_ids, features, model_dir=_model_dir)
                 print(f"  ✓ Embeddings trained: {len(battle_ids)} games, "
                       f"UMAP 15d + 3d, HDBSCAN clustered")
 
@@ -653,9 +659,38 @@ Environment variables:
                               f"{r.get('archetype', '?'):>22}")
 
         if args.embed_new:
-            from pathlib import Path
             from tracker.ml.training import embed_new
-            embed_new(session, model_dir=Path(args.db).parent / "ml_models")
+            embed_new(session, model_dir=_model_dir)
+
+        if args.train_wp:
+            from tracker.ml.wp_training import train_wp
+            train_wp(session, model_dir=_model_dir)
+
+        if args.wp_infer:
+            from tracker.ml.wp_training import infer_wp
+            infer_wp(session, model_dir=_model_dir)
+
+        if args.wp:
+            from tracker.ml.wp_storage import WinProbability
+            rows = session.query(WinProbability).filter_by(
+                battle_id=args.wp,
+            ).order_by(WinProbability.game_tick).all()
+            if not rows:
+                print(f"  ✗ No win probability data for {args.wp}")
+                print("    Run --train-wp first")
+            else:
+                reporting.print_wp_curve(rows, args.wp)
+
+        if args.wp_critical:
+            from tracker.ml.wp_storage import WinProbability
+            rows = session.query(WinProbability).filter_by(
+                battle_id=args.wp_critical,
+            ).order_by(WinProbability.criticality.desc()).limit(10).all()
+            if not rows:
+                print(f"  ✗ No win probability data for {args.wp_critical}")
+                print("    Run --train-wp first")
+            else:
+                reporting.print_wp_critical(rows, args.wp_critical)
 
         if args.mark_stale_replays:
             from tracker.corpus_scraper import mark_stale_replays
@@ -716,7 +751,9 @@ Environment variables:
             args.sim_matchups, args.sim_interactions, args.sim_elixir,
             args.sim_hands, args.sim_full,
             args.tilt_check, args.train_tcn, args.build_features, args.train_embeddings,
-            args.clusters, args.similar, args.embed_new, args.manifold,
+            args.clusters, args.similar, args.embed_new,
+            args.train_wp, args.wp_infer, args.wp, args.wp_critical,
+            args.manifold,
             args.matchup_dive, args.broken_cycle, args.mark_stale_replays,
         ])
         if not has_action:

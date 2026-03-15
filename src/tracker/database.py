@@ -14,25 +14,58 @@ from tracker.models import Base
 ALEMBIC_DIR = Path(__file__).parent / "alembic"
 
 
+def _db_url(db_ref: str) -> str:
+    """Convert a file path or existing URL to a full SQLAlchemy URL.
+
+    Args:
+        db_ref: Either a SQLite file path or a full database URL
+                (e.g. ``mysql+pymysql://user:pw@host/db``).
+
+    Returns:
+        Full SQLAlchemy connection URL string.
+    """
+    if "://" in db_ref:
+        return db_ref
+    return f"sqlite:///{db_ref}"
+
+
+def _is_sqlite(url: str) -> bool:
+    """Return True if the URL is a SQLite connection."""
+    return url.startswith("sqlite")
+
+
 def _set_sqlite_pragmas(dbapi_conn, connection_record):
     """Enable WAL mode and set busy timeout for concurrent access."""
     cursor = dbapi_conn.cursor()
     cursor.execute("PRAGMA journal_mode=WAL")
-    cursor.execute("PRAGMA busy_timeout=5000")
+    cursor.execute("PRAGMA busy_timeout=30000")
     cursor.close()
 
 
-def get_engine(db_path: str) -> Engine:
-    """Create a SQLAlchemy engine for the given SQLite database.
+def get_engine(db_ref: str) -> Engine:
+    """Create a SQLAlchemy engine for the given database.
 
     Args:
-        db_path: Path to the SQLite database file.
+        db_ref: Either a SQLite file path or a full database URL
+                (e.g. ``mysql+pymysql://user:pw@host/db``).
 
     Returns:
         SQLAlchemy Engine instance.
     """
-    engine = create_engine(f"sqlite:///{db_path}", echo=False)
-    event.listen(engine, "connect", _set_sqlite_pragmas)
+    url = _db_url(db_ref)
+    if _is_sqlite(url):
+        engine = create_engine(url, echo=False)
+        event.listen(engine, "connect", _set_sqlite_pragmas)
+    else:
+        # MariaDB/MySQL — connection pooling with reconnect on stale connections
+        engine = create_engine(
+            url,
+            echo=False,
+            pool_size=20,
+            max_overflow=20,
+            pool_recycle=3600,
+            pool_pre_ping=True,
+        )
     return engine
 
 
@@ -49,18 +82,18 @@ def get_session(engine: Engine) -> Session:
     return factory()
 
 
-def _get_alembic_config(db_path: str) -> Config:
+def _get_alembic_config(db_ref: str) -> Config:
     """Build an Alembic Config pointing at our migrations directory.
 
     Args:
-        db_path: Path to the SQLite database file.
+        db_ref: Either a SQLite file path or a full database URL.
 
     Returns:
         Alembic Config instance.
     """
     cfg = Config()
     cfg.set_main_option("script_location", str(ALEMBIC_DIR))
-    cfg.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
+    cfg.set_main_option("sqlalchemy.url", _db_url(db_ref))
     return cfg
 
 
@@ -70,48 +103,55 @@ def _database_exists(engine: Engine) -> bool:
     return "battles" in insp.get_table_names()
 
 
-def run_migrations(db_path: str) -> None:
+def run_migrations(db_ref: str) -> None:
     """Run Alembic migrations to bring the database up to date.
 
-    For existing databases (created before Alembic was added), this stamps
+    For existing SQLite databases created before Alembic was added, this stamps
     the initial revision so Alembic knows the schema is current, then runs
-    any subsequent migrations.
+    any subsequent migrations.  Fresh MariaDB databases always run all
+    migrations from revision 001 to head.
 
     Args:
-        db_path: Path to the SQLite database file.
+        db_ref: Either a SQLite file path or a full database URL.
     """
-    engine = get_engine(db_path)
-    cfg = _get_alembic_config(db_path)
+    engine = get_engine(db_ref)
+    cfg = _get_alembic_config(db_ref)
 
-    # Check if this is a pre-Alembic database
-    insp = inspect(engine)
-    tables = insp.get_table_names()
-    has_alembic = "alembic_version" in tables
-    has_battles = "battles" in tables
+    url = _db_url(db_ref)
+    if _is_sqlite(url):
+        # Check if this is a pre-Alembic database
+        insp = inspect(engine)
+        tables = insp.get_table_names()
+        has_alembic = "alembic_version" in tables
+        has_battles = "battles" in tables
 
-    if has_battles and not has_alembic:
-        # Existing database without Alembic — stamp as already at initial revision
-        command.stamp(cfg, "001")
-        # Drop the old hand-rolled schema_version table if present
-        if "schema_version" in tables:
-            with engine.begin() as conn:
-                conn.execute(text("DROP TABLE schema_version"))
+        if has_battles and not has_alembic:
+            # Existing database without Alembic — stamp as already at initial revision
+            command.stamp(cfg, "001")
+            # Drop the old hand-rolled schema_version table if present
+            if "schema_version" in tables:
+                with engine.begin() as conn:
+                    conn.execute(text("DROP TABLE schema_version"))
 
     # Run any pending migrations
     command.upgrade(cfg, "head")
     engine.dispose()
 
 
-def init_db(db_path: str) -> Engine:
+def init_db(db_ref: str) -> Engine:
     """Initialize the database: run migrations and return an engine.
 
     This is the main entry point for setting up the database connection.
 
     Args:
-        db_path: Path to the SQLite database file.
+        db_ref: Either a SQLite file path or a full database URL
+                (e.g. ``mysql+pymysql://user:pw@host/db``).  Also honours
+                the ``DATABASE_URL`` environment variable — if set it takes
+                precedence over ``db_ref``.
 
     Returns:
         SQLAlchemy Engine instance ready for use.
     """
-    run_migrations(db_path)
-    return get_engine(db_path)
+    effective = os.environ.get("DATABASE_URL", db_ref)
+    run_migrations(effective)
+    return get_engine(effective)

@@ -21,7 +21,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     with op.batch_alter_table("battles") as batch_op:
-        batch_op.add_column(sa.Column("video_path", sa.String(), nullable=True))
+        batch_op.add_column(sa.Column("video_path", sa.String(512), nullable=True))
 
 
 def downgrade() -> None:

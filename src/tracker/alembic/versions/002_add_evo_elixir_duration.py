@@ -22,8 +22,11 @@ depends_on: Union[str, Sequence[str], None] = None
 def _column_exists(table: str, column: str) -> bool:
     """Check if a column already exists on a table (idempotent migrations)."""
     conn = op.get_bind()
-    result = conn.execute(sa.text(f"PRAGMA table_info({table})"))
-    columns = {row[1] for row in result}
+    insp = sa.inspect(conn)
+    try:
+        columns = {c["name"] for c in insp.get_columns(table)}
+    except Exception:
+        return False
     return column in columns
 
 

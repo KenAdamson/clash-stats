@@ -524,3 +524,72 @@ def print_broken_cycle(results: list[dict]) -> None:
         direction = "+" if delta >= 0 else ""
         print(f"    Delta: {direction}{delta}pp")
         print()
+
+
+def print_wp_curve(rows: list, battle_id: str) -> None:
+    """Print an ASCII win probability curve for a game.
+
+    Args:
+        rows: WinProbability ORM objects ordered by game_tick.
+        battle_id: The battle ID for display.
+    """
+    width = min(shutil.get_terminal_size().columns - 10, 80)
+    height = 20
+
+    probs = [r.win_prob for r in rows]
+    ticks = [r.game_tick for r in rows]
+
+    print(f"\nP(win) curve for {battle_id}")
+    print(f"  Events: {len(probs)} | "
+          f"Start: {probs[0]:.1%} | End: {probs[-1]:.1%} | "
+          f"Min: {min(probs):.1%} | Max: {max(probs):.1%}")
+    print()
+
+    # ASCII chart
+    for row_idx in range(height, -1, -1):
+        y_val = row_idx / height
+        label = f"{y_val:4.0%} " if row_idx % 5 == 0 else "     "
+        line = [" "] * width
+
+        for i, p in enumerate(probs):
+            col = int(i / len(probs) * (width - 1))
+            p_row = int(p * height + 0.5)
+            if p_row == row_idx:
+                line[col] = "●"
+
+        # Draw 50% reference line
+        if row_idx == height // 2:
+            for c in range(width):
+                if line[c] == " ":
+                    line[c] = "·"
+
+        print(f"  {label}{''.join(line)}")
+
+    print(f"  {'':>5}{'─' * width}")
+    print(f"  {'':>5}0{'':>{width - 6}}tick {ticks[-1]}")
+
+    # Top 5 swings
+    swings = sorted(rows, key=lambda r: abs(r.wpa or 0), reverse=True)[:5]
+    if swings:
+        print(f"\n  Top swings:")
+        for r in swings:
+            sign = "+" if (r.wpa or 0) >= 0 else ""
+            print(f"    tick {r.game_tick:>5} | P(win) {r.win_prob:.1%} | "
+                  f"WPA {sign}{(r.wpa or 0):.1%}")
+
+
+def print_wp_critical(rows: list, battle_id: str) -> None:
+    """Print top critical plays (highest WPA) for a game.
+
+    Args:
+        rows: WinProbability ORM objects ordered by criticality desc.
+        battle_id: The battle ID for display.
+    """
+    print(f"\nCritical plays for {battle_id}")
+    print(f"  {'#':>3} {'Tick':>6} {'P(win)':>8} {'WPA':>8} {'Criticality':>12}")
+    print(f"  {'─' * 42}")
+
+    for i, r in enumerate(rows, 1):
+        sign = "+" if (r.wpa or 0) >= 0 else ""
+        print(f"  {i:>3} {r.game_tick:>6} {r.win_prob:>7.1%} "
+              f"{sign}{(r.wpa or 0):>7.1%} {(r.criticality or 0):>11.1%}")
