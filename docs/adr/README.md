@@ -13,7 +13,7 @@ The replay scraper (`replays.py`) captures every card placement event with tick-
 | [001](001-feature-engineering.md) | Feature Engineering from Replay Events | Implemented | Canonical feature extraction pipeline that all downstream models consume |
 | [002](002-monte-carlo-simulation.md) | Monte Carlo Simulation Framework | Proposed | Elixir economy modeling, opening hand analysis, matchup probability distributions |
 | [003](003-game-state-embeddings.md) | Game State Embedding Model | Phase 0+1 Implemented | Learned vector representations of game states via UMAP and TCN |
-| [004](004-win-probability-estimator.md) | Real-Time Win Probability Estimator | Proposed | P(win) at any tick given game state history — the "WPA" of Clash Royale |
+| [004](004-win-probability-estimator.md) | Real-Time Win Probability Estimator | **Implemented (v2)** | P(win) at every tick, WPA per card, Platt-calibrated (78.4% acc, ECE=0.031) |
 | [005](005-opponent-prediction.md) | Opponent Play Prediction Model | Proposed | Sequence model predicting next card/position/timing from opponent |
 | [006](006-counterfactual-simulator.md) | Counterfactual Deck Simulator | Proposed | Generative model for synthetic game sequences under deck modifications |
 | [007](007-training-data-pipeline.md) | Training Data Pipeline & Scale Strategy | Implemented | Scaling beyond personal replays to top-ladder corpus via extended scraping |

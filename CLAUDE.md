@@ -95,7 +95,7 @@ The replay scraper (`replays.py`) transforms this from a results database into a
 
 - **Monte Carlo Simulation** (ADR-002): Elixir economy modeling, opening hand analysis, Bayesian matchup estimation, card substitution analysis. No ML required — runs immediately on current data.
 - **Game State Embeddings** (ADR-003): Phase 0 implemented — 50-dim feature extraction from replay data, two-stage supervised UMAP (50→15-dim analytical, 15→3-dim visualization), HDBSCAN clustering, Euclidean similarity search with percentile rank + Gaussian kernel. Interactive 3D scatter plot (Plotly.js) on the dashboard with click-to-similar. Future phases: TCN-based learned representations.
-- **Win Probability Estimator** (ADR-004): P(win) at every game tick. WPA (Win Probability Added) per card placement. Critical play identification.
+- **Win Probability Estimator** (ADR-004): **Implemented (v2).** Causal TCN producing P(win) at every game tick. WPA per card placement. Platt-calibrated (ECE=0.031). 78.4% accuracy on 37.9K corpus games. Dashboard: interactive P(win) curves, card WPA tables with archetype drill-down. Incremental inference via 5-min cron. CLI: `--train-wp`, `--wp-infer-new`, `--wp BATTLE_ID`, `--wp-critical`, `--wp-cards`.
 - **Opponent Prediction** (ADR-005): Sequence model predicting opponent's next card, timing, and position. Markov chain cycle tracking.
 - **Counterfactual Simulator** (ADR-006): CVAE generating synthetic game sequences under deck modifications. Deck gradient computation. Manifold-based deck exploration.
 - **Training Data Pipeline** (ADR-007): Top-ladder replay corpus for pre-training. Transfer learning to personal games. Meta shift detection.
@@ -111,11 +111,12 @@ Priorities:
 2. ~~Add streak detection and rolling window stats~~ Done
 3. ~~Build a simple web dashboard~~ Done (Flask + Chart.js + Plotly.js)
 4. ~~Game state embeddings Phase 0 (ADR-003)~~ Done — feature extraction, UMAP, clustering, 3D scatter plot
-5. Add tilt detection — if the tracker sees 3+ consecutive losses, surface a "you're tilting" warning
-6. Complete BVT on replay scraper pipeline
-7. Monte Carlo simulation framework (ADR-002) — first ML milestone, no training data minimum
-8. Top-ladder corpus collection (ADR-007) — pre-training data for neural models
-9. Game state embeddings Phase 1+ (ADR-003) — TCN-based learned representations, manifold visualization
+5. ~~Win Probability Estimator (ADR-004)~~ Done (v2) — Platt-calibrated P(win) at every tick, 78.4% accuracy, dashboard visualization, incremental cron inference
+6. Add tilt detection — if the tracker sees 3+ consecutive losses, surface a "you're tilting" warning
+7. Complete BVT on replay scraper pipeline
+8. Monte Carlo simulation framework (ADR-002) — first ML milestone, no training data minimum
+9. Top-ladder corpus collection (ADR-007) — pre-training data for neural models
+10. Game state embeddings Phase 1+ (ADR-003) — TCN-based learned representations, manifold visualization
 
 ## Deployment
 
@@ -157,14 +158,19 @@ clash-stats/
 │       ├── cli.py               ← argparse + main() dispatch
 │       ├── alembic/             ← Alembic migration config + versions
 │       ├── simulation/          ← (planned) Monte Carlo framework (ADR-002)
-│       ├── ml/                  ← ML Phase 0: feature extraction, UMAP embeddings, clustering, similarity
+│       ├── ml/                  ← ML: embeddings, win probability, clustering, similarity
 │       │   ├── __init__.py
 │       │   ├── card_metadata.py ← CardVocabulary — dynamic card→index mapping from DB
 │       │   ├── features.py      ← 50-dim feature extraction from replay data
+│       │   ├── sequence_dataset.py ← SequenceDataset — replay events → padded tensors
 │       │   ├── umap_embeddings.py ← Two-stage UMAP (50→15→3) + supervised fitting
 │       │   ├── clustering.py    ← HDBSCAN clustering + cluster profiling
 │       │   ├── similarity.py    ← Euclidean distance + percentile rank + Gaussian kernel
-│       │   └── storage.py       ← GameFeature/GameEmbedding ORM models, numpy↔BLOB
+│       │   ├── storage.py       ← GameFeature/GameEmbedding ORM models, numpy↔BLOB
+│       │   ├── wp_training.py   ← WPTrainer, WinProbabilityModel, train/infer pipelines
+│       │   ├── wp_dataset.py    ← Collate function for variable-length sequences
+│       │   ├── wp_storage.py    ← WinProbability, GameWPSummary ORM models
+│       │   └── calibration.py   ← PlattCalibrator — Platt scaling + ECE diagnostics
 │       └── tests/
 │           ├── conftest.py      ← Shared fixtures
 │           ├── fixtures/        ← Static HTML fixtures for replay parser tests
