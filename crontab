@@ -15,6 +15,8 @@ PATH=/usr/local/bin:/usr/bin:/bin
 0 2,8,14,20 * * * root /app/sim_refresh.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 
 # --- ML training ---
+# Incremental WP inference: process new games every 5 min (offset from corpus)
+*/5 * * * * root /app/wp_infer_new.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Weekly: retrain TCN on full corpus (Sunday 4am UTC)
 0 4 * * 0 root /app/tcn_train.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 

@@ -353,6 +353,7 @@ def get_recent_battles(session: Session, limit: int = 10, ladder_only: bool = Fa
     """Get last N battles with details."""
     stmt = (
         select(
+            Battle.battle_id,
             Battle.battle_time,
             Battle.battle_type,
             Battle.arena_name,

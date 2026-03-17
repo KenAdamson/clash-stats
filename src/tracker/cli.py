@@ -4,6 +4,8 @@ import argparse
 import logging
 import os
 
+logger = logging.getLogger(__name__)
+
 # Must be set before prometheus_client is first imported (via tracker.metrics)
 os.environ.setdefault("PROMETHEUS_DISABLE_CREATED_SERIES", "true")
 
@@ -185,12 +187,18 @@ Environment variables:
     # Win Probability (ADR-004)
     parser.add_argument("--train-wp", action="store_true",
                         help="Train win probability model (ADR-004)")
+    parser.add_argument("--wp-unfreeze", action="store_true",
+                        help="Unfreeze TCN encoder during WP training (full fine-tune)")
     parser.add_argument("--wp-infer", action="store_true",
                         help="Run WP inference using existing checkpoint (no retraining)")
+    parser.add_argument("--wp-infer-new", action="store_true",
+                        help="Run WP inference only on games missing WP data (incremental)")
     parser.add_argument("--wp", type=str, metavar="BATTLE_ID",
                         help="Show P(win) curve for a game")
     parser.add_argument("--wp-critical", type=str, metavar="BATTLE_ID",
                         help="Show top critical plays (highest WPA) for a game")
+    parser.add_argument("--wp-cards", action="store_true",
+                        help="Show aggregate card WPA impact across all games")
     parser.add_argument("--mark-stale-replays", action="store_true",
                         help="Mark unfetched battles older than 7 days as permanently missed")
     parser.add_argument("--manifold", action="store_true",
@@ -326,8 +334,25 @@ Environment variables:
             from tracker.metrics import SCRAPE_RUNS, flush_metrics
             if new_battles >= 0:
                 SCRAPE_RUNS.labels(scrape_type="battles", outcome="success").inc()
-            # Replay scraping now happens inside corpus_combined using the warm
-            # shared browser context (avoids Cloudflare fresh-context challenges).
+            # Always scrape personal replays — don't depend on corpus_combined
+            # which may be locked/skipped. Uses the shared browser context.
+            try:
+                from tracker.replays import run_fetch_replays
+                replay_count = run_fetch_replays(session, tag_clean)
+                if replay_count > 0:
+                    print(f"  ✓ Fetched {replay_count} personal replays")
+                    SCRAPE_RUNS.labels(scrape_type="personal_replays", outcome="success").inc()
+            except Exception as e:
+                logger.warning("Personal replay scrape failed: %s", e)
+                SCRAPE_RUNS.labels(scrape_type="personal_replays", outcome="error").inc()
+            # Incremental WP inference — process any games with replays but no WP data
+            try:
+                from tracker.ml.wp_training import infer_wp_incremental
+                wp_new = infer_wp_incremental(session, model_dir=_model_dir)
+                if wp_new and wp_new > 0:
+                    print(f"  ✓ WP inference: {wp_new} new games")
+            except Exception as e:
+                logger.warning("Incremental WP inference failed: %s", e)
             flush_metrics("personal_combined")
 
         if args.corpus_update:
@@ -664,11 +689,21 @@ Environment variables:
 
         if args.train_wp:
             from tracker.ml.wp_training import train_wp
-            train_wp(session, model_dir=_model_dir)
+            train_wp(session, model_dir=_model_dir, unfreeze_encoder=args.wp_unfreeze)
 
         if args.wp_infer:
             from tracker.ml.wp_training import infer_wp
             infer_wp(session, model_dir=_model_dir)
+
+        if args.wp_infer_new:
+            from tracker.ml.wp_training import infer_wp_incremental
+            n = infer_wp_incremental(session, model_dir=_model_dir)
+            if n == -1:
+                print("  ✗ No trained WP model found. Run --train-wp first.")
+            elif n == 0:
+                print("  · No new games to process")
+            else:
+                print(f"  ✓ WP inference: {n} new games processed")
 
         if args.wp:
             from tracker.ml.wp_storage import WinProbability
@@ -691,6 +726,20 @@ Environment variables:
                 print("    Run --train-wp first")
             else:
                 reporting.print_wp_critical(rows, args.wp_critical)
+
+        if args.wp_cards:
+            from tracker.ml.wp_storage import GameWPSummary
+            from tracker.models import Battle
+            from sqlalchemy import func, select
+            rows = session.execute(
+                select(GameWPSummary)
+                .join(Battle, Battle.battle_id == GameWPSummary.battle_id)
+                .where(Battle.corpus == "personal")
+            ).scalars().all()
+            if not rows:
+                print("  ✗ No WP data for personal games. Run --wp-infer first.")
+            else:
+                reporting.print_wp_cards(rows)
 
         if args.mark_stale_replays:
             from tracker.corpus_scraper import mark_stale_replays
@@ -752,7 +801,7 @@ Environment variables:
             args.sim_hands, args.sim_full,
             args.tilt_check, args.train_tcn, args.build_features, args.train_embeddings,
             args.clusters, args.similar, args.embed_new,
-            args.train_wp, args.wp_infer, args.wp, args.wp_critical,
+            args.train_wp, args.wp_infer, args.wp_infer_new, args.wp, args.wp_critical, args.wp_cards,
             args.manifold,
             args.matchup_dive, args.broken_cycle, args.mark_stale_replays,
         ])

@@ -202,6 +202,16 @@ clash-stats --corpus-combined --corpus-limit 500 --concurrency 12 --max-pages 2 
 EOF
 chmod +x /app/corpus_combined.sh
 
+# Incremental WP inference: process games with replays but no WP data
+cat > /app/wp_infer_new.sh << EOF
+#!/bin/sh
+cd /app
+[ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
+export PYTHONUNBUFFERED=1
+clash-stats --wp-infer-new --db ${DB_PATH}
+EOF
+chmod +x /app/wp_infer_new.sh
+
 # TCN retraining
 cat > /app/tcn_train.sh << EOF
 #!/bin/sh

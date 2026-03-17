@@ -14,7 +14,7 @@ services:
       - MYSQL_USER=clash_stats
       - MYSQL_PASSWORD=clash_stats_pw_2026
     command: >
-      --innodb-buffer-pool-size=4G
+      --innodb-buffer-pool-size=2G
       --innodb-log-file-size=512M
       --innodb-flush-log-at-trx-commit=2
       --sync-binlog=0
