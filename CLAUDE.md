@@ -93,12 +93,14 @@ These data points inform what analytics matter:
 
 The replay scraper (`replays.py`) transforms this from a results database into a full game telemetry system. Architecture Decision Records for the ML and simulation capabilities are in [`docs/adr/`](docs/adr/README.md):
 
-- **Monte Carlo Simulation** (ADR-002): Elixir economy modeling, opening hand analysis, Bayesian matchup estimation, card substitution analysis. No ML required — runs immediately on current data.
-- **Game State Embeddings** (ADR-003): Phase 0 implemented — 50-dim feature extraction from replay data, two-stage supervised UMAP (50→15-dim analytical, 15→3-dim visualization), HDBSCAN clustering, Euclidean similarity search with percentile rank + Gaussian kernel. Interactive 3D scatter plot (Plotly.js) on the dashboard with click-to-similar. Future phases: TCN-based learned representations.
+- **Monte Carlo Simulation** (ADR-002): **Implemented.** Elixir economy modeling, opening hand analysis, Bayesian matchup estimation, card interaction matrices. CLI: `--sim-matchups`, `--sim-interactions`, `--sim-elixir`, `--sim-hands`, `--sim-full`.
+- **Game State Embeddings** (ADR-003): **Phase 0+1 Implemented.** 50-dim feature extraction, two-stage UMAP (50→15→3), HDBSCAN clustering, TCN encoder (6-layer causal, 256-dim). Interactive 3D scatter plot on dashboard. Phase 2 (Transformer) pending 10K+ replay games.
 - **Win Probability Estimator** (ADR-004): **Implemented (v2).** Causal TCN producing P(win) at every game tick. WPA per card placement. Platt-calibrated (ECE=0.031). 78.4% accuracy on 37.9K corpus games. Dashboard: interactive P(win) curves, card WPA tables with archetype drill-down. Incremental inference via 5-min cron. CLI: `--train-wp`, `--wp-infer-new`, `--wp BATTLE_ID`, `--wp-critical`, `--wp-cards`.
-- **Opponent Prediction** (ADR-005): Sequence model predicting opponent's next card, timing, and position. Markov chain cycle tracking.
-- **Counterfactual Simulator** (ADR-006): CVAE generating synthetic game sequences under deck modifications. Deck gradient computation. Manifold-based deck exploration.
-- **Training Data Pipeline** (ADR-007): Top-ladder replay corpus for pre-training. Transfer learning to personal games. Meta shift detection.
+- **Opponent Prediction** (ADR-005): Proposed. Sequence model predicting opponent's next card, timing, and position.
+- **Counterfactual Simulator** (ADR-006): Proposed. CVAE generating synthetic game sequences under deck modifications.
+- **Training Data Pipeline** (ADR-007): **Implemented.** Top-ladder corpus (13K+ players), 3-4K battles/day, stratified sampling, transfer learning to personal games.
+- **Observability** (ADR-008): **Implemented.** Prometheus metrics, Loki logs, Grafana dashboards, circuit breakers, structured retries.
+- **Visual Game State Recognition** (ADR-009): **In Progress.** Replay-guided labeling (Phase 1.5), SAMv2 unit tracking on Arc A770 XPU (Phase 2). YOLO distillation pending.
 
 Dependencies: `torch`, `numpy`, `scikit-learn`, `umap-learn`, `hdbscan`, `pandas` (ML extras installed via `pip install .[ml]` in the Docker image).
 
@@ -110,13 +112,15 @@ Priorities:
 1. ~~Fix the Evo tracking gap in the tracker (deck hash + schema)~~ Done
 2. ~~Add streak detection and rolling window stats~~ Done
 3. ~~Build a simple web dashboard~~ Done (Flask + Chart.js + Plotly.js)
-4. ~~Game state embeddings Phase 0 (ADR-003)~~ Done — feature extraction, UMAP, clustering, 3D scatter plot
+4. ~~Game state embeddings Phase 0+1 (ADR-003)~~ Done — feature extraction, UMAP, clustering, TCN encoder, 3D manifold visualization
 5. ~~Win Probability Estimator (ADR-004)~~ Done (v2) — Platt-calibrated P(win) at every tick, 78.4% accuracy, dashboard visualization, incremental cron inference
-6. Add tilt detection — if the tracker sees 3+ consecutive losses, surface a "you're tilting" warning
-7. Complete BVT on replay scraper pipeline
-8. Monte Carlo simulation framework (ADR-002) — first ML milestone, no training data minimum
-9. Top-ladder corpus collection (ADR-007) — pre-training data for neural models
-10. Game state embeddings Phase 1+ (ADR-003) — TCN-based learned representations, manifold visualization
+6. ~~Monte Carlo simulation framework (ADR-002)~~ Done — elixir economy, opening hands, Bayesian matchups, interaction matrices
+7. ~~Top-ladder corpus collection (ADR-007)~~ Done — 13K+ players, 3-4K battles/day
+8. ~~Observability (ADR-008)~~ Done — Prometheus + Loki + Grafana + Alloy, circuit breakers, structured retries
+9. Add tilt detection — if the tracker sees 3+ consecutive losses, surface a "you're tilting" warning
+10. Complete BVT on replay scraper pipeline
+11. Visual game state recognition (ADR-009) — SAMv2 tracking operational, YOLO distillation next
+12. Game state embeddings Phase 2 (ADR-003) — Transformer encoder, pending 10K+ replay games
 
 ## Deployment
 
