@@ -59,7 +59,11 @@ def print_overall_stats(session: Session) -> None:
     three_crown_rate = (three_crowns / wins * 100) if wins > 0 else 0
 
     print(f"  Total Tracked:   {total:,}")
-    print(f"  Date Range:      {stats.get('first_battle', 'N/A')[:10]} to {stats.get('last_battle', 'N/A')[:10]}")
+    first_bt = stats.get("first_battle")
+    last_bt = stats.get("last_battle")
+    first_str = first_bt.strftime("%Y-%m-%d") if first_bt else "N/A"
+    last_str = last_bt.strftime("%Y-%m-%d") if last_bt else "N/A"
+    print(f"  Date Range:      {first_str} to {last_str}")
     print()
     print(f"  Wins:            {wins:,} ({win_rate:.1f}%)")
     print(f"  Losses:          {losses:,} ({losses / total * 100:.1f}%)")
@@ -319,7 +323,8 @@ def print_trophy_history(session: Session) -> None:
 
     span = max_t - min_t if max_t != min_t else 1
     for h in display:
-        date = (h.get("battle_time") or "")[:8]
+        bt = h.get("battle_time")
+        date = bt.strftime("%Y%m%d") if bt else ""
         result_icon = "W" if h["result"] == "win" else ("L" if h["result"] == "loss" else "D")
         bar_len = int((h["trophies"] - min_t) / span * chart_width)
         bar = "█" * bar_len

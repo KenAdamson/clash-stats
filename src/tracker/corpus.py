@@ -108,6 +108,8 @@ def get_corpus_players(
     active_only: bool = True,
     source: Optional[str] = None,
     limit: Optional[int] = None,
+    prioritize_active: bool = False,
+    model_dir: Optional[str] = None,
 ) -> list[PlayerCorpus]:
     """Get corpus players, ordered by least recently scraped.
 
@@ -116,6 +118,10 @@ def get_corpus_players(
         active_only: Only return active players.
         source: Filter by source type.
         limit: Maximum players to return.
+        prioritize_active: If True and an activity model exists, sort by
+            P(has_new_battles) descending instead of FIFO. Priority/nemesis
+            players are still boosted to the top.
+        model_dir: Directory containing trained ML models.
 
     Returns:
         List of PlayerCorpus objects.
@@ -126,7 +132,7 @@ def get_corpus_players(
     if source:
         stmt = stmt.where(PlayerCorpus.source == source)
 
-    # Priority players first, then never-scraped, then least recently scraped
+    # Default ordering: priority first, then never-scraped, then FIFO
     stmt = stmt.order_by(
         (PlayerCorpus.source == "priority").desc(),
         PlayerCorpus.last_scraped.is_(None).desc(),
@@ -135,7 +141,47 @@ def get_corpus_players(
     if limit:
         stmt = stmt.limit(limit)
 
-    return list(session.scalars(stmt).all())
+    players = list(session.scalars(stmt).all())
+
+    # ML-based reordering if requested and model exists
+    if prioritize_active and players:
+        try:
+            from tracker.ml.activity_model import score_corpus_players
+            _mdir = model_dir or "data/ml_models"
+            logger.info("Activity model: scoring %d players...", len(players))
+            scores = score_corpus_players(session, model_dir=_mdir)
+            if scores is not None:
+                score_map = dict(scores)
+
+                # Partition: priority/nemesis players stay at the top
+                priority = [p for p in players if p.source in ("priority", "nemesis")]
+                rest = [p for p in players if p.source not in ("priority", "nemesis")]
+
+                # Sort non-priority players by activity score descending
+                rest.sort(
+                    key=lambda p: score_map.get(p.player_tag, 0.0),
+                    reverse=True,
+                )
+
+                players = priority + rest
+
+                # Log score distribution
+                if rest:
+                    rest_scores = [score_map.get(p.player_tag, 0.0) for p in rest]
+                    top_n = min(500, len(rest_scores))
+                    bot_n = min(500, len(rest_scores))
+                    logger.info(
+                        "Activity model: scored %d players — "
+                        "top %d have P(active) > %.2f, "
+                        "bottom %d < %.2f",
+                        len(rest_scores),
+                        top_n, rest_scores[top_n - 1] if top_n <= len(rest_scores) else 0.0,
+                        bot_n, rest_scores[-bot_n] if bot_n <= len(rest_scores) else 0.0,
+                    )
+        except Exception as e:
+            logger.warning("Activity model scoring failed, using FIFO: %s", e)
+
+    return players
 
 
 def mark_player_scraped(

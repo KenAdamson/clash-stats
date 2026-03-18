@@ -22,6 +22,12 @@ from tracker.api import (
 )
 from tracker.corpus import get_corpus_players, mark_player_scraped
 from tracker.metrics import (
+    CORPUS_ACTIVITY_SCORE_P50,
+    CORPUS_ACTIVITY_SCORE_P90,
+    CORPUS_BATCH_BATTLES,
+    CORPUS_BATCH_REPLAYS,
+    CORPUS_BATCH_ZERO_YIELD,
+    CORPUS_BATTLES_PER_PLAYER,
     CORPUS_PLAYERS_ACTIVE,
     CORPUS_PLAYERS_DEACTIVATED,
     REPLAYS_FETCHED,
@@ -66,8 +72,6 @@ def mark_stale_replays(session: Session, max_age_days: int = STALE_REPLAY_DAYS) 
     """
     from datetime import datetime, timedelta, timezone
     cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
-    # battle_time is stored as "20260228T200232.000Z" — lexicographic compare works
-    cutoff_str = cutoff.strftime("%Y%m%dT%H%M%S.000Z")
 
     from sqlalchemy import update
     from sqlalchemy.exc import OperationalError
@@ -77,7 +81,7 @@ def mark_stale_replays(session: Session, max_age_days: int = STALE_REPLAY_DAYS) 
             .where(
                 Battle.replay_fetched == 0,
                 Battle.battle_type.in_(["PvP", "pathOfLegend", "riverRacePvP"]),
-                Battle.battle_time < cutoff_str,
+                Battle.battle_time < cutoff,
             )
             .values(replay_fetched=2)
         )
@@ -453,11 +457,9 @@ async def scrape_corpus_combined(
     Returns:
         Dict with combined scrape statistics.
     """
-    from playwright.async_api import async_playwright
     from sqlalchemy import select, func
     from tracker.models import PlayerCorpus
 
-    cdp_url = browser_ws or os.environ.get("BROWSER_WS_URL", DEFAULT_BROWSER_CDP)
     save_path = state_path or os.environ.get(
         "ROYALEAPI_SESSION_PATH", DEFAULT_SESSION_PATH
     )
@@ -471,7 +473,9 @@ async def scrape_corpus_combined(
     ) or 0
     CORPUS_PLAYERS_ACTIVE.set(total_active)
 
-    players = get_corpus_players(session, active_only=True, limit=limit)
+    players = get_corpus_players(
+        session, active_only=True, limit=limit, prioritize_active=True,
+    )
     if not players:
         logger.info("No active corpus players.")
         return {
@@ -482,7 +486,7 @@ async def scrape_corpus_combined(
 
     effective_concurrency = min(concurrency, len(players))
     logger.info(
-        "Combined scrape: %d corpus players (%d concurrent tabs).",
+        "Combined scrape: %d corpus players (%d concurrent).",
         len(players), effective_concurrency,
     )
 
@@ -498,210 +502,194 @@ async def scrape_corpus_combined(
     }
     consecutive_auth_failures = 0
 
-    async with async_playwright() as pw:
-        browser = await pw.chromium.connect_over_cdp(cdp_url)
-        context = await browser.new_context(
-            storage_state=save_path,
-            viewport={"width": 1280, "height": 720},
-        )
+    # Reset per-batch gauges from previous run
+    total_batches = (len(players) + effective_concurrency - 1) // effective_concurrency
+    for i in range(1, total_batches + 1):
+        CORPUS_BATCH_BATTLES.labels(batch=str(i)).set(0)
+        CORPUS_BATCH_REPLAYS.labels(batch=str(i)).set(0)
+        CORPUS_BATCH_ZERO_YIELD.labels(batch=str(i)).set(0)
 
-        # Create tab pool with resource blocking
-        pages = []
-        for _ in range(effective_concurrency):
-            page = await context.new_page()
-            await page.route(
-                "**/*.{png,jpg,jpeg,gif,svg,ico,woff,woff2,ttf,eot,css}",
-                lambda route: route.abort(),
+    from tracker.replay_http import fetch_replays_http
+
+    # --- Personal replays via HTTP (no browser) ---
+    if personal_tag and not stats["session_expired"]:
+        clean_personal = personal_tag.lstrip("#")
+        try:
+            personal_count = fetch_replays_http(
+                session, clean_personal, save_path,
+                limit=25, max_pages=10,
             )
-            await page.route("**/analytics**", lambda route: route.abort())
-            await page.route("**/ads**", lambda route: route.abort())
-            await page.route("**/tracking**", lambda route: route.abort())
-            await page.route("**/google-analytics**", lambda route: route.abort())
-            await page.route("**/gtag**", lambda route: route.abort())
-            await page.route("**/adsbygoogle**", lambda route: route.abort())
-            pages.append(page)
-        logger.info("Opened %d browser tabs (resources blocked).", len(pages))
+            if personal_count == -1:
+                logger.warning("Personal replay scrape: session expired for %s", clean_personal)
+                stats["session_expired"] = True
+            else:
+                logger.info("Personal replays: %d fetched for %s", personal_count, clean_personal)
+                stats["total_replays"] += max(0, personal_count)
+        except Exception as e:
+            logger.warning("Personal replay scrape error for %s: %s", clean_personal, e)
 
-        # --- Personal replays: scrape first in warm context ---
-        if personal_tag and not stats["session_expired"]:
-            clean_personal = personal_tag.lstrip("#")
-            personal_page = await context.new_page()
-            await personal_page.route(
-                "**/*.{png,jpg,jpeg,gif,svg,ico,woff,woff2,ttf,eot,css}",
-                lambda route: route.abort(),
-            )
-            await personal_page.route("**/analytics**", lambda route: route.abort())
-            await personal_page.route("**/ads**", lambda route: route.abort())
-            await personal_page.route("**/tracking**", lambda route: route.abort())
-            await personal_page.route("**/google-analytics**", lambda route: route.abort())
-            await personal_page.route("**/gtag**", lambda route: route.abort())
-            await personal_page.route("**/adsbygoogle**", lambda route: route.abort())
-            try:
-                personal_count = await fetch_replays_for_player(
-                    session, personal_page, clean_personal,
-                    limit=25, max_pages=10,
-                )
-                if personal_count == -1:
-                    logger.warning("Personal replay scrape: session expired for %s", clean_personal)
-                    stats["session_expired"] = True
-                else:
-                    logger.info("Personal replays: %d fetched for %s", personal_count, clean_personal)
-                    stats["total_replays"] += max(0, personal_count)
-            except Exception as e:
-                logger.warning("Personal replay scrape error for %s: %s", clean_personal, e)
-            finally:
-                await personal_page.close()
+    # Process players in batches
+    for batch_start in range(0, len(players), effective_concurrency):
+        if stats["auth_error"] or stats["session_expired"]:
+            break
+        if stats["total_replays"] >= MAX_REPLAYS_PER_RUN:
+            logger.info("Per-run replay limit reached (%d).", MAX_REPLAYS_PER_RUN)
+            break
 
-        async def _replay_worker(page, player, stagger_secs=0):
-            """Scrape replays for one player on one tab."""
-            if stagger_secs > 0:
-                await asyncio.sleep(stagger_secs)
-            tag = player.player_tag.lstrip("#")
-            count = await fetch_replays_for_player(
-                session, page, tag,
-                limit=replays_per_player,
-                max_pages=max_pages,
-            )
-            return player, tag, count
+        batch = players[batch_start:batch_start + effective_concurrency]
 
-        # Process players in batches of `concurrency`
-        for batch_start in range(0, len(players), effective_concurrency):
-            if stats["auth_error"] or stats["session_expired"]:
-                break
-            if stats["total_replays"] >= MAX_REPLAYS_PER_RUN:
-                logger.info("Per-run replay limit reached (%d).", MAX_REPLAYS_PER_RUN)
-                break
-
-            batch = players[batch_start:batch_start + effective_concurrency]
-
-            # --- Phase 1: Fetch battles from CR API (sequential) ---
-            batch_battles = 0
-            for player in batch:
-                if stats["auth_error"]:
-                    break
-                tag = player.player_tag.lstrip("#")
-                try:
-                    battles = api.get_battle_log(tag)
-                    new_count = 0
-
-                    for battle in battles:
-                        battle_type = battle.get("type", "")
-                        if battle_type not in ("PvP", "pathOfLegend", "riverRacePvP"):
-                            continue
-                        if battle_type == "PvP":
-                            team = battle.get("team", [{}])[0]
-                            trophies = team.get("startingTrophies", 0)
-                            if trophies and trophies < 7000:
-                                continue
-
-                        battle_id, is_new = analytics.store_battle(
-                            session, battle, player.player_tag, corpus="top_ladder"
-                        )
-                        if is_new:
-                            new_count += 1
-
-                    mark_player_scraped(session, player.player_tag, games=new_count)
-                    batch_battles += new_count
-                    stats["total_new_battles"] += new_count
-
-                    if new_count > 0:
-                        logger.info(
-                            "  %s (%s): %d new battles",
-                            player.player_name or tag, tag, new_count,
-                        )
-
-                    time.sleep(DELAY_BETWEEN_PLAYERS)
-
-                except NotFoundError:
-                    logger.warning("Player %s not found (404), deactivating.", tag)
-                    player.active = 0
-                    session.commit()
-                    stats["deactivated"] += 1
-                    CORPUS_PLAYERS_DEACTIVATED.inc()
-
-                except AuthError as e:
-                    logger.error("API auth failed — check CR_API_KEY: %s", e)
-                    stats["auth_error"] = True
-                    break
-
-                except (RateLimitError, ServerError, ConnectionError_) as e:
-                    logger.warning("Battle fetch transient error for %s: %s", tag, e)
-                    stats["battle_errors"] += 1
-
-                except Exception as e:
-                    logger.warning("Battle fetch unexpected error for %s: %s", tag, e)
-                    stats["battle_errors"] += 1
-
+        # --- Phase 1: Fetch battles from CR API (sequential) ---
+        batch_battles = 0
+        batch_zero_yield = 0
+        batch_num = batch_start // effective_concurrency + 1
+        for player in batch:
             if stats["auth_error"]:
                 break
-
-            logger.info(
-                "Batch %d: %d new battles from %d players. Starting replay scrape...",
-                batch_start // effective_concurrency + 1,
-                batch_battles, len(batch),
-            )
-
-            # --- Phase 2: Scrape replays from RoyaleAPI (concurrent) ---
-            # Filter to active players only (some may have been deactivated above)
-            active_batch = [p for p in batch if p.active == 1]
-            if not active_batch:
-                continue
-
-            tasks = [
-                _replay_worker(pages[i], active_batch[i], stagger_secs=i * 2)
-                for i in range(len(active_batch))
-            ]
-
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-
-            for result in results:
-                if isinstance(result, Exception):
-                    logger.warning("Replay worker error: %s", result)
-                    stats["replay_errors"] += 1
-                    continue
-
-                player, tag, count = result
-
-                if count == -1:
-                    consecutive_auth_failures += 1
-                    stats["replay_errors"] += 1
-                    if consecutive_auth_failures >= 3:
-                        logger.error(
-                            "RoyaleAPI session expired — 3 consecutive auth "
-                            "failures. Stopping combined scrape."
-                        )
-                        stats["session_expired"] = True
-                else:
-                    consecutive_auth_failures = 0
-                    if count > 0:
-                        mark_player_scraped(session, player.player_tag, replays=count)
-                        stats["total_replays"] += count
-                        logger.info(
-                            "  %s (%s): %d replays",
-                            player.player_name or tag, tag, count,
-                        )
-
-                stats["total_players"] += 1
-
-            # Periodic metric flush after each batch
-            flush_metrics("corpus_combined")
-            logger.info(
-                "Progress: %d/%d players, %d battles, %d replays so far",
-                stats["total_players"], len(players),
-                stats["total_new_battles"], stats["total_replays"],
-            )
-
-        # Save refreshed cookies before closing context
-        if not stats["session_expired"]:
+            tag = player.player_tag.lstrip("#")
             try:
-                await context.storage_state(path=save_path)
-            except Exception:
-                pass
+                battles = api.get_battle_log(tag)
+                new_count = 0
 
-        # Cleanup
-        for page in pages:
-            await page.close()
-        await context.close()
+                for battle in battles:
+                    battle_type = battle.get("type", "")
+                    if battle_type not in ("PvP", "pathOfLegend", "riverRacePvP"):
+                        continue
+                    if battle_type == "PvP":
+                        team = battle.get("team", [{}])[0]
+                        trophies = team.get("startingTrophies", 0)
+                        if trophies and trophies < 7000:
+                            continue
+
+                    battle_id, is_new = analytics.store_battle(
+                        session, battle, player.player_tag, corpus="top_ladder"
+                    )
+                    if is_new:
+                        new_count += 1
+
+                mark_player_scraped(session, player.player_tag, games=new_count)
+                batch_battles += new_count
+                stats["total_new_battles"] += new_count
+
+                if new_count == 0:
+                    batch_zero_yield += 1
+                else:
+                    logger.info(
+                        "  %s (%s): %d new battles",
+                        player.player_name or tag, tag, new_count,
+                    )
+
+                time.sleep(DELAY_BETWEEN_PLAYERS)
+
+            except NotFoundError:
+                logger.warning("Player %s not found (404), deactivating.", tag)
+                player.active = 0
+                session.commit()
+                stats["deactivated"] += 1
+                CORPUS_PLAYERS_DEACTIVATED.inc()
+
+            except AuthError as e:
+                logger.error("API auth failed — check CR_API_KEY: %s", e)
+                stats["auth_error"] = True
+                break
+
+            except (RateLimitError, ServerError, ConnectionError_) as e:
+                logger.warning("Battle fetch transient error for %s: %s", tag, e)
+                stats["battle_errors"] += 1
+
+            except Exception as e:
+                logger.warning("Battle fetch unexpected error for %s: %s", tag, e)
+                stats["battle_errors"] += 1
+
+        if stats["auth_error"]:
+            break
+
+        CORPUS_BATCH_BATTLES.labels(batch=str(batch_num)).set(batch_battles)
+        CORPUS_BATCH_ZERO_YIELD.labels(batch=str(batch_num)).set(batch_zero_yield)
+
+        logger.info(
+            "Batch %d: %d new battles from %d players (%d zero-yield). Starting replay scrape...",
+            batch_num, batch_battles, len(batch), batch_zero_yield,
+        )
+
+        # --- Phase 2: Scrape replays via HTTP (sequential per player,
+        # concurrent replay fetches within each player via internal thread pool) ---
+        active_batch = [p for p in batch if p.active == 1]
+        if not active_batch:
+            continue
+
+        results = []
+        for player in active_batch:
+            tag = player.player_tag.lstrip("#")
+            try:
+                count = fetch_replays_http(
+                    session, tag, save_path,
+                    limit=replays_per_player,
+                    max_pages=max_pages,
+                )
+                results.append((player, tag, count))
+            except Exception as e:
+                logger.warning("HTTP replay error for %s: %s", tag, e)
+                results.append((player, tag, -2))
+
+        for player, tag, count in results:
+            if count == -1:
+                consecutive_auth_failures += 1
+                stats["replay_errors"] += 1
+                if consecutive_auth_failures >= 3:
+                    logger.error(
+                        "RoyaleAPI session expired — 3 consecutive auth "
+                        "failures. Stopping combined scrape."
+                    )
+                    stats["session_expired"] = True
+            elif count == -2:
+                stats["replay_errors"] += 1
+            else:
+                consecutive_auth_failures = 0
+                if count > 0:
+                    mark_player_scraped(session, player.player_tag, replays=count)
+                    stats["total_replays"] += count
+                    logger.info(
+                        "  %s (%s): %d replays",
+                        player.player_name or tag, tag, count,
+                    )
+
+            stats["total_players"] += 1
+
+        # Emit batch replay metric
+        batch_replays = sum(
+            c for _, _, c in results if isinstance(c, int) and c > 0
+        )
+        CORPUS_BATCH_REPLAYS.labels(batch=str(batch_num)).set(batch_replays)
+
+        # Periodic metric flush after each batch
+        flush_metrics("corpus_combined")
+        logger.info(
+            "Progress: %d/%d players, %d battles, %d replays so far",
+            stats["total_players"], len(players),
+            stats["total_new_battles"], stats["total_replays"],
+        )
+
+    # Emit summary metrics
+    if stats["total_players"] > 0:
+        CORPUS_BATTLES_PER_PLAYER.set(
+            round(stats["total_new_battles"] / stats["total_players"], 2)
+        )
+
+    # Activity score percentiles for processed players
+    try:
+        from tracker.ml.activity_model import score_corpus_players as _score
+        scores = _score(session)
+        if scores:
+            score_map = dict(scores)
+            processed_scores = [
+                score_map.get(p.player_tag, 0.0) for p in players[:stats["total_players"]]
+            ]
+            if processed_scores:
+                import numpy as np
+                CORPUS_ACTIVITY_SCORE_P50.set(round(float(np.median(processed_scores)), 4))
+                CORPUS_ACTIVITY_SCORE_P90.set(round(float(np.percentile(processed_scores, 90)), 4))
+    except Exception:
+        pass  # Don't break scrape for metric collection
 
     # Record metrics
     if stats["auth_error"] or stats["session_expired"]:

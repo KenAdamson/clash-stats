@@ -2,9 +2,10 @@
 
 import hashlib
 import json
+from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import case, cast, func, Integer, select
+from sqlalchemy import case, cast, extract, func, Integer, select
 from sqlalchemy.orm import Session
 
 from tracker.archetypes import classify_archetype
@@ -157,9 +158,20 @@ def store_battle(
     else:
         result = "draw"
 
+    # Parse API's compact ISO 8601 "20260228T200232.000Z" into datetime
+    bt_raw = battle.get("battleTime")
+    bt_parsed = None
+    if bt_raw:
+        try:
+            bt_parsed = datetime.strptime(bt_raw, "%Y%m%dT%H%M%S.000Z").replace(
+                tzinfo=timezone.utc
+            )
+        except (ValueError, TypeError):
+            pass
+
     b = Battle(
         battle_id=bid,
-        battle_time=battle.get("battleTime"),
+        battle_time=bt_parsed,
         battle_type=battle.get("type"),
         arena_name=battle.get("arena", {}).get("name"),
         game_mode_name=battle.get("gameMode", {}).get("name"),
@@ -390,7 +402,7 @@ def get_recent_battles(session: Session, limit: int = 10, ladder_only: bool = Fa
 
 def get_time_of_day_stats(session: Session, ladder_only: bool = False) -> list[dict]:
     """Get win rate by hour of day."""
-    hour_expr = cast(func.substr(Battle.battle_time, 10, 2), Integer)
+    hour_expr = extract("hour", Battle.battle_time)
     wins_case = func.sum(case((Battle.result == "win", 1), else_=0))
     stmt = (
         select(
@@ -412,7 +424,7 @@ def get_corpus_traffic_by_hour(session: Session) -> list[dict]:
 
     Returns normalized 0-100 traffic index for overlay on WR chart.
     """
-    hour_expr = cast(func.substr(Battle.battle_time, 10, 2), Integer)
+    hour_expr = extract("hour", Battle.battle_time)
     stmt = (
         select(
             hour_expr.label("hour"),
@@ -472,8 +484,8 @@ def get_streaks(session: Session, ladder_only: bool = False) -> dict:
             "length": length,
             "start_trophies": start_trophies,
             "end_trophies": end_trophies,
-            "start_date": (start.get("battle_time") or "")[:8],
-            "end_date": (end.get("battle_time") or "")[:8],
+            "start_date": start["battle_time"].strftime("%Y%m%d") if start.get("battle_time") else "",
+            "end_date": end["battle_time"].strftime("%Y%m%d") if end.get("battle_time") else "",
         }
 
     streaks: list[dict] = []

@@ -199,6 +199,8 @@ Environment variables:
                         help="Show top critical plays (highest WPA) for a game")
     parser.add_argument("--wp-cards", action="store_true",
                         help="Show aggregate card WPA impact across all games")
+    parser.add_argument("--train-activity-model", action="store_true",
+                        help="Train activity prediction model for corpus scheduling")
     parser.add_argument("--mark-stale-replays", action="store_true",
                         help="Mark unfetched battles older than 7 days as permanently missed")
     parser.add_argument("--manifold", action="store_true",
@@ -320,8 +322,12 @@ Environment variables:
             if not player_tag:
                 print("Error: --player-tag required for replay fetching")
                 return 1
-            from tracker.replays import run_fetch_replays
-            count = run_fetch_replays(session, player_tag.replace("#", ""))
+            from tracker.replay_http import run_fetch_replays_http
+            count = run_fetch_replays_http(session, player_tag.replace("#", ""))
+            if count == -1:
+                print("  ⚠ HTTP session expired, falling back to browser")
+                from tracker.replays import run_fetch_replays
+                count = run_fetch_replays(session, player_tag.replace("#", ""))
             print(f"  ✓ Fetched {count} replays")
 
         if args.personal_combined:
@@ -334,11 +340,15 @@ Environment variables:
             from tracker.metrics import SCRAPE_RUNS, flush_metrics
             if new_battles >= 0:
                 SCRAPE_RUNS.labels(scrape_type="battles", outcome="success").inc()
-            # Always scrape personal replays — don't depend on corpus_combined
-            # which may be locked/skipped. Uses the shared browser context.
+            # Fetch personal replays via HTTP (no browser needed).
+            # Falls back to browser-based fetcher if cookies are expired.
             try:
-                from tracker.replays import run_fetch_replays
-                replay_count = run_fetch_replays(session, tag_clean)
+                from tracker.replay_http import run_fetch_replays_http
+                replay_count = run_fetch_replays_http(session, tag_clean)
+                if replay_count == -1:
+                    logger.warning("HTTP replay fetch: session expired, falling back to browser")
+                    from tracker.replays import run_fetch_replays
+                    replay_count = run_fetch_replays(session, tag_clean)
                 if replay_count > 0:
                     print(f"  ✓ Fetched {replay_count} personal replays")
                     SCRAPE_RUNS.labels(scrape_type="personal_replays", outcome="success").inc()
@@ -741,6 +751,16 @@ Environment variables:
             else:
                 reporting.print_wp_cards(rows)
 
+        if args.train_activity_model:
+            from tracker.ml.activity_model import train_activity_model
+            metrics = train_activity_model(session, model_dir=_model_dir)
+            if metrics is None:
+                print("  ✗ Insufficient data to train activity model")
+            else:
+                print(f"  ✓ Activity model trained: accuracy={metrics['accuracy']:.3f}, "
+                      f"AUC={metrics['auc']:.3f}, "
+                      f"{metrics['players_profiled']} players profiled")
+
         if args.mark_stale_replays:
             from tracker.corpus_scraper import mark_stale_replays
             count = mark_stale_replays(session)
@@ -802,7 +822,7 @@ Environment variables:
             args.tilt_check, args.train_tcn, args.build_features, args.train_embeddings,
             args.clusters, args.similar, args.embed_new,
             args.train_wp, args.wp_infer, args.wp_infer_new, args.wp, args.wp_critical, args.wp_cards,
-            args.manifold,
+            args.manifold, args.train_activity_model,
             args.matchup_dive, args.broken_cycle, args.mark_stale_replays,
         ])
         if not has_action:

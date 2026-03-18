@@ -10,6 +10,7 @@ if [ -z "${DATABASE_URL}" ]; then
 fi
 DB_FLAG="--db ${DATABASE_URL}"
 LOCKDIR=/tmp/locks
+rm -rf "$LOCKDIR"
 mkdir -p "$LOCKDIR"
 
 # SSH setup for git push to GitHub
@@ -199,6 +200,17 @@ clash-stats --train-tcn ${DB_FLAG}
 ' || echo "tcn_train: previous run still active, skipping"
 EOF
 chmod +x /app/tcn_train.sh
+
+# Activity model retraining
+cat > /app/train_activity.sh << EOF
+#!/bin/sh
+exec flock -n ${LOCKDIR}/train_activity.lock sh -c '
+[ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
+export PYTHONUNBUFFERED=1
+clash-stats --train-activity-model ${DB_FLAG}
+' || echo "train_activity: previous run still active, skipping"
+EOF
+chmod +x /app/train_activity.sh
 
 PUSH_DEST="${STATS_REPO_URL:-origin}/${STATS_BRANCH:-stats}"
 echo "=== cr-tracker starting ==="

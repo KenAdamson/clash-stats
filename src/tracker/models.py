@@ -55,7 +55,7 @@ class Battle(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     battle_id: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     timestamp: Mapped[Optional[datetime]] = mapped_column(default=func.now())
-    battle_time: Mapped[Optional[str]]
+    battle_time: Mapped[Optional[datetime]]
     battle_type: Mapped[Optional[str]]
     arena_name: Mapped[Optional[str]]
     game_mode_name: Mapped[Optional[str]]

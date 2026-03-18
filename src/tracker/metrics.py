@@ -112,6 +112,43 @@ SCRAPE_RUNS = Counter(
     ["scrape_type", "outcome"],  # type=battles|replays, outcome=success|partial|failed
 )
 
+# ---------------------------------------------------------------------------
+# Activity model / corpus scheduling
+# ---------------------------------------------------------------------------
+
+CORPUS_BATCH_BATTLES = Gauge(
+    "corpus_batch_battles",
+    "New battles found per batch in corpus scrape",
+    ["batch"],  # batch number (1, 2, 3, ...)
+)
+
+CORPUS_BATCH_REPLAYS = Gauge(
+    "corpus_batch_replays",
+    "Replays found per batch in corpus scrape",
+    ["batch"],
+)
+
+CORPUS_BATCH_ZERO_YIELD = Gauge(
+    "corpus_batch_zero_yield",
+    "Players with 0 new battles per batch",
+    ["batch"],
+)
+
+CORPUS_BATTLES_PER_PLAYER = Gauge(
+    "corpus_battles_per_player",
+    "Average new battles per player for the entire corpus run",
+)
+
+CORPUS_ACTIVITY_SCORE_P50 = Gauge(
+    "corpus_activity_score_p50",
+    "Median activity model score for processed players",
+)
+
+CORPUS_ACTIVITY_SCORE_P90 = Gauge(
+    "corpus_activity_score_p90",
+    "90th percentile activity model score for processed players",
+)
+
 RATE_LIMIT_BACKOFF = Histogram(
     "rate_limit_backoff_seconds",
     "Total backoff time before a request succeeds after 429s",
@@ -195,6 +232,12 @@ BATCH_METRIC_NAMES = {
     "circuit_breaker_trips",
     "scrape_runs",
     "rate_limit_backoff_seconds",
+    "corpus_batch_battles",
+    "corpus_batch_replays",
+    "corpus_batch_zero_yield",
+    "corpus_battles_per_player",
+    "corpus_activity_score_p50",
+    "corpus_activity_score_p90",
 }
 
 
@@ -221,6 +264,12 @@ _METRIC_TYPE_MAP = {
     "circuit_breaker_trips": ("counter", "Circuit breaker trip events"),
     "scrape_runs": ("counter", "Scrape run completions"),
     "rate_limit_backoff_seconds": ("histogram", "Total backoff time after 429s"),
+    "corpus_batch_battles": ("gauge", "New battles found per batch"),
+    "corpus_batch_replays": ("gauge", "Replays found per batch"),
+    "corpus_batch_zero_yield": ("gauge", "Players with 0 new battles per batch"),
+    "corpus_battles_per_player": ("gauge", "Avg new battles per player"),
+    "corpus_activity_score_p50": ("gauge", "Median activity score for processed players"),
+    "corpus_activity_score_p90": ("gauge", "90th pctile activity score for processed players"),
 }
 
 

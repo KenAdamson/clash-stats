@@ -19,6 +19,8 @@ PATH=/usr/local/bin:/usr/bin:/bin
 */5 * * * * root /app/wp_infer_new.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Weekly: retrain TCN on full corpus (Sunday 4am UTC)
 0 4 * * 0 root /app/tcn_train.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
+# Weekly: retrain activity model for corpus scheduling (Monday 6:30am UTC, after corpus_update)
+30 6 * * 1 root /app/train_activity.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 
 # --- Discovery jobs ---
 # Hourly: add opponents I've lost to into the corpus

@@ -81,7 +81,8 @@
     {
       "title": "API Request Rate",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 16 },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 24 },
+
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
@@ -94,7 +95,7 @@
     {
       "title": "API Latency (p95)",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 16 },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 24 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
@@ -115,7 +116,7 @@
     {
       "title": "Pipeline Health",
       "type": "stat",
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 16 },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 24 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
@@ -189,7 +190,7 @@
     {
       "title": "Scrape Runs (24h)",
       "type": "stat",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
@@ -246,7 +247,7 @@
     {
       "title": "Container Logs",
       "type": "logs",
-      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 24 },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 32 },
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [
         {
@@ -258,6 +259,145 @@
         "showTime": true,
         "sortOrder": "Descending",
         "enableLogDetails": true
+      }
+    },
+    {
+      "title": "Batch Battle Yield",
+      "type": "barchart",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 42 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "corpus_batch_battles",
+          "legendFormat": "Batch {{batch}}",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "options": {
+        "orientation": "vertical",
+        "showValue": "auto",
+        "barWidth": 0.8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "color": { "mode": "palette-classic" }
+        }
+      }
+    },
+    {
+      "title": "Batch Replay Yield",
+      "type": "barchart",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 42 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "corpus_batch_replays",
+          "legendFormat": "Batch {{batch}}",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "options": {
+        "orientation": "vertical",
+        "showValue": "auto",
+        "barWidth": 0.8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "color": { "mode": "palette-classic" }
+        }
+      }
+    },
+    {
+      "title": "Batch Zero-Yield Players",
+      "type": "barchart",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 50 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "corpus_batch_zero_yield",
+          "legendFormat": "Batch {{batch}}",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "options": {
+        "orientation": "vertical",
+        "showValue": "auto",
+        "barWidth": 0.8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "color": { "mode": "palette-classic" }
+        }
+      }
+    },
+    {
+      "title": "Battles per Player",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 50 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "corpus_battles_per_player",
+          "legendFormat": "Avg battles/player",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 1,
+          "color": { "mode": "fixed", "fixedColor": "green" },
+          "custom": { "fillOpacity": 20, "lineWidth": 2 }
+        }
+      }
+    },
+    {
+      "title": "Activity Score P50",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 58 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "corpus_activity_score_p50",
+          "legendFormat": "Median",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 3,
+          "min": 0,
+          "max": 1,
+          "color": { "mode": "fixed", "fixedColor": "blue" },
+          "custom": { "fillOpacity": 20, "lineWidth": 2 }
+        }
+      }
+    },
+    {
+      "title": "Activity Score P90",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 58 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "corpus_activity_score_p90",
+          "legendFormat": "90th pctile",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 3,
+          "min": 0,
+          "max": 1,
+          "color": { "mode": "fixed", "fixedColor": "purple" },
+          "custom": { "fillOpacity": 20, "lineWidth": 2 }
+        }
       }
     }
   ],

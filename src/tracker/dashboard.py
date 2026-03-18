@@ -3,6 +3,7 @@
 import os
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,7 @@ from typing import Any
 os.environ.setdefault("PROMETHEUS_DISABLE_CREATED_SERIES", "true")
 
 from flask import Flask, Response, jsonify, render_template, request
+from flask.json.provider import DefaultJSONProvider
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 from tracker import analytics
@@ -76,6 +78,17 @@ def create_app(db_path: str | None = None) -> Flask:
         db_path = os.environ.get(
             "CR_DB_PATH", "data/clash_royale_history.db"
         )
+
+    # Serialize datetime as ISO 8601 (not Flask's default RFC 2822)
+    class _ISOJSONProvider(DefaultJSONProvider):
+        @staticmethod
+        def default(o: Any) -> Any:
+            if isinstance(o, datetime):
+                return o.strftime("%Y%m%dT%H%M%S.000Z")
+            return DefaultJSONProvider.default(o)
+
+    app.json_provider_class = _ISOJSONProvider
+    app.json = _ISOJSONProvider(app)
 
     engine = init_db(db_path)
     app.config["ENGINE"] = engine
