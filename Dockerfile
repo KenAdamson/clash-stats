@@ -1,7 +1,16 @@
 FROM python:3.11-slim-bookworm
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git openssh-client curl cron build-essential \
+    git openssh-client curl cron build-essential gnupg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Intel GPU compute runtime (Level Zero) — required for torch XPU
+RUN curl -fsSL https://repositories.intel.com/gpu/intel-graphics.key | \
+    gpg --dearmor -o /usr/share/keyrings/intel-graphics.gpg && \
+    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/intel-graphics.gpg] https://repositories.intel.com/gpu/ubuntu jammy unified" \
+    > /etc/apt/sources.list.d/intel-gpu.list && \
+    apt-get update && apt-get install -y --no-install-recommends \
+    intel-level-zero-gpu level-zero \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

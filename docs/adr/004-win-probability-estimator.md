@@ -1,8 +1,26 @@
 # ADR-004: Real-Time Win Probability Estimator
 
-**Status:** Proposed
-**Date:** 2026-02-22
+**Status:** Implemented (v2)
+**Date:** 2026-02-22 (proposed), 2026-03-17 (v2 implemented)
 **Depends on:** ADR-001 (Feature Engineering), ADR-003 (Game State Embeddings)
+
+## Implementation Status
+
+### v1 (2026-03-09)
+- Causal TCN with frozen ADR-003 encoder (transfer learning)
+- Per-tick P(win) + WPA + criticality stored in `win_probability` table
+- `game_wp_summary` table with carry/liability cards, volatility
+- CLI: `--train-wp`, `--wp BATTLE_ID`, `--wp-critical BATTLE_ID`
+- val_loss=0.6700, 75.7% accuracy on ~20K corpus games
+
+### v2 (2026-03-17)
+- Full fine-tune with `--wp-unfreeze` (unfrozen TCN encoder)
+- Platt scaling calibration (ECE=0.031) — `calibration.py`
+- Incremental inference via `--wp-infer-new` (5-min cron job)
+- bfloat16 autocast, batch size 256 for training efficiency
+- Dashboard: interactive P(win) curve, card WPA tables with archetype drill-down
+- **val_loss=0.6268, 78.4% accuracy** on 37.9K corpus games (24 epochs, early stopped)
+- Personal replay scraping restored in `--personal-combined` pipeline
 
 ## Context
 
@@ -157,19 +175,34 @@ Dashboard integration: render this as a Chart.js line chart on the web dashboard
 ```
 src/tracker/
 ├── ml/
-│   ├── win_probability.py    ← Model definition, training, inference
-│   ├── wpa.py                ← WPA computation, critical play extraction
-│   └── calibration.py        ← Platt scaling, calibration diagnostics
+│   ├── wp_training.py        ← WPTrainer, WinProbabilityModel, train/infer pipelines
+│   ├── wp_dataset.py         ← Collate function for variable-length sequences
+│   ├── wp_storage.py         ← WinProbability, GameWPSummary ORM models
+│   ├── calibration.py        ← PlattCalibrator — Platt scaling with ECE diagnostics
+│   └── sequence_dataset.py   ← SequenceDataset (shared with ADR-003 TCN)
 ```
 
-CLI additions:
+CLI commands (implemented):
 ```
-clash-stats --train-wp                     # Train win probability model
+clash-stats --train-wp                     # Train win probability model (frozen encoder)
+clash-stats --train-wp --wp-unfreeze       # Full fine-tune (unfrozen encoder)
+clash-stats --wp-infer                     # Re-run inference on all games
+clash-stats --wp-infer-new                 # Incremental inference (new games only)
 clash-stats --wp BATTLE_ID                 # Show P(win) curve for a game
 clash-stats --wp-critical BATTLE_ID        # Show top-5 critical plays
-clash-stats --wp-card-impact               # Aggregate WPA by card across all games
-clash-stats --wp-pregame                   # Pre-game odds for recent matchups
+clash-stats --wp-cards                     # Aggregate WPA by card across personal games
 ```
+
+Dashboard endpoints (implemented):
+```
+GET /api/wp/<battle_id>                    # Per-tick P(win) curve data
+GET /api/wp/cards                          # Aggregate card WPA tables (team/opp split)
+GET /api/wp/card/<card_name>               # Per-archetype WPA breakdown for a card
+```
+
+Cron automation:
+- `wp_infer_new.sh` runs every 5 minutes, processing games with replays but no WP data
+- Also hooks into `--personal-combined` pipeline inline
 
 ## Consequences
 

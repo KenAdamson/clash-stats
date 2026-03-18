@@ -1,6 +1,6 @@
 # ADR-009: Visual Game State Recognition
 
-**Status:** Proposed
+**Status:** In Progress (Phase 1.5 + early Phase 2)
 **Date:** 2026-03-06
 **Depends on:** ADR-003 (Game State Embeddings), ADR-004 (Win Probability), ADR-007 (Training Data Pipeline)
 

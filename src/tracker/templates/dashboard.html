@@ -56,6 +56,38 @@
         </div>
     </section>
 
+    <!-- Streaks & Rolling Stats -->
+    <section class="card full-width" id="streaks-section">
+        <h2>Streaks & Rolling Stats</h2>
+        <div class="stats-grid">
+            <div class="streak-cards" id="streak-cards"></div>
+            <div class="rolling-stats">
+                <div class="rolling-col">
+                    <h3>Last 35</h3>
+                    <div id="rolling-35"></div>
+                </div>
+                <div class="rolling-col">
+                    <h3>Last 10</h3>
+                    <div id="rolling-10"></div>
+                </div>
+            </div>
+            <div class="split-layout">
+                <div class="split-left">
+                    <h3>Crown Distribution</h3>
+                    <div class="chart-container small-chart">
+                        <canvas id="crownChart"></canvas>
+                    </div>
+                </div>
+                <div class="split-right">
+                    <h3>Win Rate by Hour (UTC)</h3>
+                    <div class="chart-container small-chart">
+                        <canvas id="timeChart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
     <!-- Matchups & Archetypes -->
     <section class="card full-width" id="matchups-section">
         <h2>Matchups & Archetypes</h2>
@@ -78,6 +110,46 @@
                     <tbody></tbody>
                 </table>
             </div>
+        </div>
+    </section>
+
+    <!-- Recent Battles -->
+    <section class="card full-width" id="recent-section">
+        <h2>Recent Battles</h2>
+        <div class="battle-feed" id="battle-feed"></div>
+    </section>
+
+    <!-- Win Probability Analysis (ADR-004) -->
+    <section class="card full-width" id="wp-section" style="display:none">
+        <h2>Win Probability Analysis <span class="sub-header" id="wp-total-games"></span></h2>
+        <div class="split-layout">
+            <div class="split-left">
+                <h3>My Cards</h3>
+                <table id="wp-team-table" class="matchup-table">
+                    <thead><tr><th>Card</th><th>Carry</th><th>Liab</th><th>Crit</th><th>Net</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+                <h3>Opponent Cards</h3>
+                <table id="wp-opp-table" class="matchup-table">
+                    <thead><tr><th>Card</th><th>Carry</th><th>Liab</th><th>Crit</th><th>Net</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+            <div class="split-right">
+                <h3>Game WP Curve <span class="sub-header" id="wp-game-label">Click a recent battle</span></h3>
+                <div class="chart-container">
+                    <canvas id="wpChart"></canvas>
+                </div>
+                <div id="wp-summary" class="wp-summary"></div>
+                <div id="wp-critical-plays" class="wp-crits-list"></div>
+            </div>
+        </div>
+        <div id="wp-archetype-detail" style="display:none">
+            <h3>Archetype Breakdown: <span id="wp-arch-card"></span> <span class="sub-header" id="wp-arch-side"></span></h3>
+            <table id="wp-arch-table" class="matchup-table">
+                <thead><tr><th>Archetype</th><th>Games</th><th>W</th><th>L</th><th>Avg WPA</th><th>Total WPA</th></tr></thead>
+                <tbody></tbody>
+            </table>
         </div>
     </section>
 
@@ -122,44 +194,6 @@
         <div id="similar-panel" class="similar-panel" style="display:none">
             <h3>Similar Games to <span id="similar-ref"></span></h3>
             <div id="similar-tables"></div>
-        </div>
-    </section>
-
-    <!-- Recent Battles -->
-    <section class="card full-width" id="recent-section">
-        <h2>Recent Battles</h2>
-        <div class="battle-feed" id="battle-feed"></div>
-    </section>
-
-    <!-- Streaks & Rolling Stats -->
-    <section class="card full-width" id="streaks-section">
-        <h2>Streaks & Rolling Stats</h2>
-        <div class="stats-grid">
-            <div class="streak-cards" id="streak-cards"></div>
-            <div class="rolling-stats">
-                <div class="rolling-col">
-                    <h3>Last 35</h3>
-                    <div id="rolling-35"></div>
-                </div>
-                <div class="rolling-col">
-                    <h3>Last 10</h3>
-                    <div id="rolling-10"></div>
-                </div>
-            </div>
-            <div class="split-layout">
-                <div class="split-left">
-                    <h3>Crown Distribution</h3>
-                    <div class="chart-container small-chart">
-                        <canvas id="crownChart"></canvas>
-                    </div>
-                </div>
-                <div class="split-right">
-                    <h3>Win Rate by Hour (UTC)</h3>
-                    <div class="chart-container small-chart">
-                        <canvas id="timeChart"></canvas>
-                    </div>
-                </div>
-            </div>
         </div>
     </section>
 

@@ -21,6 +21,13 @@ _TIER1: dict[str, list[str]] = {
     "Egiant": ["Elixir Golem"],
 }
 
+# Tier 1.5: Multi-card signature archetypes.
+# These require 2+ specific cards to match, checked before single-card tiers.
+_MULTI: list[tuple[str, set[str], int]] = [
+    # (name, required_cards, min_match)
+    ("Boss Bandit Ram Rider", {"Ram Rider", "Boss Bandit", "Furnace", "Executioner"}, 3),
+]
+
 # Tier 2: Strong win conditions, but can co-exist with tier 1.
 _TIER2: dict[str, list[str]] = {
     "Hog Cycle": ["Hog Rider"],
@@ -44,7 +51,12 @@ _TIER3: dict[str, list[str]] = {
 }
 
 # Flat dict for backwards compatibility (used by similarity.py, etc.)
-ARCHETYPES: dict[str, list[str]] = {**_TIER1, **_TIER2, **_TIER3}
+ARCHETYPES: dict[str, list[str]] = {
+    **_TIER1,
+    **{name: list(cards) for name, cards, _ in _MULTI},
+    **_TIER2,
+    **_TIER3,
+}
 
 
 def classify_archetype(deck: list[dict]) -> str:
@@ -60,7 +72,19 @@ def classify_archetype(deck: list[dict]) -> str:
         Archetype name string, or "Unknown" if no match.
     """
     card_names = {card.get("name", "") for card in deck}
-    for tier in (_TIER1, _TIER2, _TIER3):
+
+    # Tier 1: single-card build-arounds
+    for archetype, win_conditions in _TIER1.items():
+        if any(wc in card_names for wc in win_conditions):
+            return archetype
+
+    # Tier 1.5: multi-card signature archetypes (before single-card tier 2)
+    for archetype, sig_cards, min_match in _MULTI:
+        if len(card_names & sig_cards) >= min_match:
+            return archetype
+
+    # Tier 2 & 3: single-card win conditions and support
+    for tier in (_TIER2, _TIER3):
         for archetype, win_conditions in tier.items():
             if any(wc in card_names for wc in win_conditions):
                 return archetype

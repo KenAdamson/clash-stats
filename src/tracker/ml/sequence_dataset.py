@@ -92,7 +92,12 @@ class SequenceDataset(Dataset):
         vocab: CardVocabulary for card→index mapping.
     """
 
-    def __init__(self, session: Session, vocab: CardVocabulary):
+    def __init__(
+        self,
+        session: Session,
+        vocab: CardVocabulary,
+        battle_ids: list[str] | None = None,
+    ):
         self.vocab = vocab
 
         # Build evo set: cards that have ability_used=1 in replay_events
@@ -107,23 +112,44 @@ class SequenceDataset(Dataset):
         # Use a pre-aggregated JOIN instead of a correlated subquery — the correlated
         # version scans 13M replay_events rows for every battle (O(n*m)), whereas
         # the JOIN aggregates once then filters (O(m) + index lookup).
-        battle_rows = session.execute(
-            text("""
-                SELECT b.battle_id, b.result
-                FROM battles b
-                JOIN (
-                    SELECT battle_id, COUNT(*) as event_count
-                    FROM replay_events
-                    WHERE card_name != '_invalid'
-                    GROUP BY battle_id
-                    HAVING COUNT(*) >= :min_events
-                ) re_counts ON re_counts.battle_id = b.battle_id
-                WHERE b.battle_type = 'PvP'
-                  AND b.result IN ('win', 'loss')
-                ORDER BY b.battle_time
-            """),
-            {"min_events": MIN_EVENTS},
-        ).all()
+        if battle_ids is not None:
+            # Scoped to specific battles (for incremental inference)
+            battle_rows = session.execute(
+                text("""
+                    SELECT b.battle_id, b.result
+                    FROM battles b
+                    JOIN (
+                        SELECT battle_id, COUNT(*) as event_count
+                        FROM replay_events
+                        WHERE card_name != '_invalid'
+                        GROUP BY battle_id
+                        HAVING COUNT(*) >= :min_events
+                    ) re_counts ON re_counts.battle_id = b.battle_id
+                    WHERE b.battle_type = 'PvP'
+                      AND b.result IN ('win', 'loss')
+                      AND b.battle_id IN :bids
+                    ORDER BY b.battle_time
+                """),
+                {"min_events": MIN_EVENTS, "bids": tuple(battle_ids)},
+            ).all()
+        else:
+            battle_rows = session.execute(
+                text("""
+                    SELECT b.battle_id, b.result
+                    FROM battles b
+                    JOIN (
+                        SELECT battle_id, COUNT(*) as event_count
+                        FROM replay_events
+                        WHERE card_name != '_invalid'
+                        GROUP BY battle_id
+                        HAVING COUNT(*) >= :min_events
+                    ) re_counts ON re_counts.battle_id = b.battle_id
+                    WHERE b.battle_type = 'PvP'
+                      AND b.result IN ('win', 'loss')
+                    ORDER BY b.battle_time
+                """),
+                {"min_events": MIN_EVENTS},
+            ).all()
 
         logger.info("Loading %d games with replay data", len(battle_rows))
 

@@ -578,6 +578,61 @@ def print_wp_curve(rows: list, battle_id: str) -> None:
                   f"WPA {sign}{(r.wpa or 0):.1%}")
 
 
+def print_wp_cards(summaries: list) -> None:
+    """Print aggregate card WPA impact across all personal games.
+
+    Args:
+        summaries: GameWPSummary ORM objects for personal games.
+    """
+    from collections import Counter
+
+    carry = Counter()
+    liability = Counter()
+    critical = Counter()
+
+    for s in summaries:
+        if s.top_positive_wpa_card:
+            carry[s.top_positive_wpa_card] += 1
+        if s.top_negative_wpa_card:
+            liability[s.top_negative_wpa_card] += 1
+        if s.critical_card:
+            critical[s.critical_card] += 1
+
+    # Merge all cards
+    all_cards = set(carry) | set(liability) | set(critical)
+    rows = []
+    for card in all_cards:
+        c = carry.get(card, 0)
+        l = liability.get(card, 0)
+        cr = critical.get(card, 0)
+        net = c - l
+        rows.append((card, c, l, cr, net))
+
+    rows.sort(key=lambda r: r[4], reverse=True)
+
+    total = len(summaries)
+    avg_vol = sum(s.volatility or 0 for s in summaries) / max(total, 1)
+
+    print(f"\nWin Probability — Card Impact ({total} personal games)")
+    print(f"  Avg game volatility: {avg_vol:.4f}")
+    print()
+    print(f"  {'Card':<28} {'Carry':>6} {'Liab':>6} {'Crit':>6} {'Net':>6}")
+    print(f"  {'─' * 56}")
+
+    for card, c, l, cr, net in rows:
+        # Convert kebab-case to title case for display
+        display = card.replace("-", " ").title()
+        sign = "+" if net > 0 else "" if net < 0 else " "
+        print(f"  {display:<28} {c:>6} {l:>6} {cr:>6} {sign}{net:>5}")
+
+    # Context: carry = times the card was the most positive WPA contributor
+    print()
+    print("  Carry: games where card had highest cumulative positive WPA")
+    print("  Liab:  games where card had highest cumulative negative WPA")
+    print("  Crit:  games where card produced the single largest WPA swing")
+    print()
+
+
 def print_wp_critical(rows: list, battle_id: str) -> None:
     """Print top critical plays (highest WPA) for a game.
 

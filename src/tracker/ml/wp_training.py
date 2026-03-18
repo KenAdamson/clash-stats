@@ -20,6 +20,7 @@ from torch.utils.data import DataLoader, Subset
 from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Session
 
+from tracker.ml.calibration import PlattCalibrator
 from tracker.ml.card_metadata import CardVocabulary, kebab_to_title
 from tracker.ml.sequence_dataset import SequenceDataset, MIN_EVENTS
 from tracker.ml.wp_dataset import wp_collate_fn
@@ -31,7 +32,7 @@ logger = logging.getLogger(__name__)
 WP_MODEL_VERSION = "wp-v1"
 
 # Training hyperparameters
-BATCH_SIZE = 64
+BATCH_SIZE = 256
 LEARNING_RATE = 5e-4
 WEIGHT_DECAY = 1e-4
 EPOCHS = 50
@@ -151,11 +152,10 @@ class WPTrainer:
                 mask = mask.to(self.device)
 
                 self.optimizer.zero_grad()
-                logits = self.model(card_ids, features, lengths)  # (batch, seq_len)
-
-                # Masked per-tick BCE
-                loss_per_tick = self.criterion(logits, labels)  # (batch, seq_len)
-                loss = (loss_per_tick * mask).sum() / mask.sum().clamp(min=1)
+                with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
+                    logits = self.model(card_ids, features, lengths)
+                    loss_per_tick = self.criterion(logits, labels)
+                    loss = (loss_per_tick * mask).sum() / mask.sum().clamp(min=1)
                 loss.backward()
                 self.optimizer.step()
 
@@ -216,8 +216,9 @@ class WPTrainer:
                 labels = labels.to(self.device)
                 mask = mask.to(self.device)
 
-                logits = self.model(card_ids, features, lengths)
-                loss_per_tick = self.criterion(logits, labels)
+                with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
+                    logits = self.model(card_ids, features, lengths)
+                    loss_per_tick = self.criterion(logits, labels)
                 total_loss += (loss_per_tick * mask).sum().item()
                 total_ticks += mask.sum().item()
 
@@ -233,12 +234,43 @@ class WPTrainer:
         return total_loss / max(total_ticks, 1), correct / max(total_games, 1)
 
     @torch.no_grad()
+    def collect_val_logits(self) -> tuple[np.ndarray, np.ndarray]:
+        """Collect last-tick logits and labels from validation set for calibration.
+
+        Returns:
+            Tuple of (logits, labels) arrays, each shape (N,).
+        """
+        self.model.eval()
+        all_logits: list[np.ndarray] = []
+        all_labels: list[np.ndarray] = []
+
+        for card_ids, features, lengths, labels, mask in self.val_loader:
+            card_ids = card_ids.to(self.device)
+            features = features.to(self.device)
+            lengths = lengths.to(self.device)
+
+            logits = self.model(card_ids, features, lengths)
+
+            batch_size = logits.size(0)
+            last_indices = (lengths - 1).clamp(min=0).long()
+            last_logits = logits[
+                torch.arange(batch_size, device=self.device), last_indices
+            ]
+            last_labels = labels[:, 0]
+
+            all_logits.append(last_logits.cpu().numpy())
+            all_labels.append(last_labels.numpy())
+
+        return np.concatenate(all_logits), np.concatenate(all_labels)
+
+    @torch.no_grad()
     def run_inference(
         self,
         session: Session,
         dataset: SequenceDataset,
         battle_ids: list[str],
         vocab: CardVocabulary,
+        calibrator: Optional[PlattCalibrator] = None,
     ) -> int:
         """Run WP inference on all games and store results.
 
@@ -250,6 +282,7 @@ class WPTrainer:
             dataset: The full SequenceDataset.
             battle_ids: Battle IDs in dataset order.
             vocab: Card vocabulary for reverse lookups.
+            calibrator: Optional Platt scaling calibrator for probability correction.
 
         Returns:
             Number of games processed.
@@ -269,7 +302,11 @@ class WPTrainer:
             lengths = lengths.to(self.device)
 
             logits = self.model(card_ids, features, lengths)  # (batch, seq_len)
-            probs = torch.sigmoid(logits).cpu().numpy()  # (batch, seq_len)
+            logits_np = logits.cpu().numpy()
+            if calibrator is not None and calibrator.fitted:
+                probs = calibrator.calibrate_logits(logits_np)
+            else:
+                probs = 1.0 / (1.0 + np.exp(-logits_np))  # sigmoid
             lengths_np = lengths.cpu().numpy()
 
             batch_size = card_ids.size(0)
@@ -400,6 +437,15 @@ def infer_wp(session: Session, model_dir: Optional[Path] = None) -> None:
         checkpoint["epoch"], checkpoint["val_loss"], checkpoint["val_acc"],
     )
 
+    # Load calibrator if available
+    calibrator_path = model_dir / "wp_calibrator.json"
+    calibrator = None
+    if calibrator_path.exists():
+        calibrator = PlattCalibrator.load(calibrator_path)
+        print(f"  → Platt calibration loaded (a={calibrator.a:.4f}, b={calibrator.b:.4f})")
+    else:
+        print("  · No calibration file found — using raw sigmoid probabilities")
+
     dataset = SequenceDataset(session, vocab)
     if not dataset:
         print("  ✗ No games with replay data found.")
@@ -431,17 +477,106 @@ def infer_wp(session: Session, model_dir: Optional[Path] = None) -> None:
     )
 
     print(f"  → Running WP inference on {len(battle_ids)} games...")
-    processed = trainer.run_inference(session, dataset, battle_ids, vocab)
+    processed = trainer.run_inference(
+        session, dataset, battle_ids, vocab, calibrator=calibrator,
+    )
     print(f"  ✓ {processed} games processed with per-tick P(win) + WPA")
+    if calibrator:
+        print(f"  ✓ Platt-calibrated probabilities")
     print(f"  ✓ val_loss={checkpoint['val_loss']:.4f}, val_acc={checkpoint['val_acc']:.3f}")
 
 
-def train_wp(session: Session, model_dir: Optional[Path] = None) -> None:
+def infer_wp_incremental(session: Session, model_dir: Optional[Path] = None) -> int:
+    """Run WP inference only on games that have replay events but no WP data.
+
+    Lightweight enough to run on every personal_combined cycle. Loads the
+    model once and processes only the delta.
+
+    Args:
+        session: Database session.
+        model_dir: Directory containing wp_v1.pt.
+
+    Returns:
+        Number of new games processed, or -1 if no model available.
+    """
+    if model_dir is None:
+        model_dir = Path("data/ml_models")
+
+    wp_path = model_dir / "wp_v1.pt"
+    if not wp_path.exists():
+        return -1
+
+    # Find games with replay events but no WP summary
+    missing = session.execute(
+        sa_text("""
+            SELECT b.battle_id
+            FROM battles b
+            JOIN (
+                SELECT battle_id FROM replay_events
+                WHERE card_name != '_invalid'
+                GROUP BY battle_id HAVING COUNT(*) >= :min_events
+            ) re_counts ON re_counts.battle_id = b.battle_id
+            LEFT JOIN game_wp_summary gws ON gws.battle_id = b.battle_id
+            WHERE b.battle_type = 'PvP' AND b.result IN ('win', 'loss')
+              AND gws.battle_id IS NULL
+            ORDER BY b.battle_time
+        """),
+        {"min_events": MIN_EVENTS},
+    ).scalars().all()
+
+    if not missing:
+        return 0
+
+    device = _detect_device()
+    vocab = CardVocabulary(session)
+
+    checkpoint = torch.load(wp_path, map_location=device, weights_only=True)
+    model = WinProbabilityModel(vocab_size=checkpoint["vocab_size"], dropout=0.0)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.to(device)
+    model.eval()
+
+    # Load calibrator
+    calibrator_path = model_dir / "wp_calibrator.json"
+    calibrator = None
+    if calibrator_path.exists():
+        calibrator = PlattCalibrator.load(calibrator_path)
+
+    # Build dataset for only the missing games
+    missing_set = set(missing)
+    dataset = SequenceDataset(session, vocab, battle_ids=missing)
+    if not dataset:
+        return 0
+
+    battle_ids = list(missing)[:len(dataset)]
+
+    trainer = WPTrainer.__new__(WPTrainer)
+    trainer.model = model
+    trainer.device = device
+    trainer.full_loader = DataLoader(
+        dataset, batch_size=BATCH_SIZE, shuffle=False,
+        collate_fn=wp_collate_fn, num_workers=0,
+    )
+
+    processed = trainer.run_inference(
+        session, dataset, battle_ids, vocab, calibrator=calibrator,
+    )
+    logger.info("Incremental WP inference: %d new games processed", processed)
+    return processed
+
+
+def train_wp(
+    session: Session,
+    model_dir: Optional[Path] = None,
+    unfreeze_encoder: bool = False,
+) -> None:
     """Full win probability pipeline: train, infer, store.
 
     Args:
         session: Database session.
         model_dir: Directory for model files.
+        unfreeze_encoder: If True, fine-tune the full model including TCN encoder.
+            Requires more data (~50K+ games) but can improve accuracy.
     """
     if model_dir is None:
         model_dir = Path("data/ml_models")
@@ -472,12 +607,16 @@ def train_wp(session: Session, model_dir: Optional[Path] = None) -> None:
 
     # 4. Initialize model — try transfer learning from ADR-003 TCN
     tcn_path = model_dir / "tcn_v1.pt"
+    freeze = not unfreeze_encoder
     if tcn_path.exists():
         logger.info("Loading pretrained TCN encoder from %s", tcn_path)
-        print("  → Transfer learning from ADR-003 TCN encoder")
+        if unfreeze_encoder:
+            print("  → Transfer learning from ADR-003 TCN encoder (UNFROZEN — full fine-tune)")
+        else:
+            print("  → Transfer learning from ADR-003 TCN encoder")
         model = WinProbabilityModel.from_pretrained_tcn(
             str(tcn_path), vocab.size, device,
-            freeze_encoder=True, dropout=DROPOUT,
+            freeze_encoder=freeze, dropout=DROPOUT,
         )
     else:
         logger.info("No pretrained TCN found — training from scratch")
@@ -501,6 +640,13 @@ def train_wp(session: Session, model_dir: Optional[Path] = None) -> None:
         "Loaded best model from epoch %d (val_loss=%.4f, val_acc=%.3f)",
         checkpoint["epoch"], checkpoint["val_loss"], checkpoint["val_acc"],
     )
+
+    # 6b. Fit Platt scaling calibration on validation set
+    val_logits, val_labels = trainer.collect_val_logits()
+    calibrator = PlattCalibrator().fit(val_logits, val_labels)
+    calibrator_path = model_dir / "wp_calibrator.json"
+    calibrator.save(calibrator_path)
+    print(f"  ✓ Platt calibration: a={calibrator.a:.4f}, b={calibrator.b:.4f}")
 
     # 7. Derive battle_ids in dataset order using JOIN (avoids slow correlated subquery)
     battle_ids = session.execute(
@@ -532,7 +678,9 @@ def train_wp(session: Session, model_dir: Optional[Path] = None) -> None:
 
     # 9. Run inference and store
     print(f"  → Running WP inference on {len(battle_ids)} games...")
-    processed = trainer.run_inference(session, dataset, battle_ids, vocab)
+    processed = trainer.run_inference(
+        session, dataset, battle_ids, vocab, calibrator=calibrator,
+    )
 
     print(f"  ✓ Win probability training complete")
     print(f"  ✓ Model: {n_total:,} params ({n_trainable:,} trainable)")

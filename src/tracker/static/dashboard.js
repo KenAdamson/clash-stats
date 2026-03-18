@@ -12,6 +12,7 @@ let trophyChart = null;
 let archetypeChart = null;
 let crownChart = null;
 let timeChart = null;
+let wpChart = null;
 
 // Accumulated data for paginated endpoints
 let trophyHistory = [];
@@ -358,7 +359,8 @@ function renderRecentBattles(battles) {
         const change = b.player_trophy_change || 0;
         const changeStr = change >= 0 ? "+" + change : "" + change;
         const changeClass = change >= 0 ? "trophy-pos" : "trophy-neg";
-        return `<div class="battle-row">
+        const bid = b.battle_id || "";
+        return `<div class="battle-row clickable" onclick="showWPCurve('${bid}')" title="Click for WP curve">
             <span class="result-icon ${resultClass}">${icon}</span>
             <span class="score">${b.player_crowns}-${b.opponent_crowns}</span>
             <span class="opponent">${b.opponent_name || "Unknown"}</span>
@@ -994,11 +996,216 @@ function renderTiltBanner(data) {
     document.getElementById("tilt-stats").textContent = stats.join("  \u00b7  ");
 }
 
+// ─── Win Probability (ADR-004) ───────────────────────────────────
+
+function kebabToTitle(s) {
+    return s.replace(/-/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+}
+
+async function fetchWPCards() {
+    try {
+        const resp = await fetch("/api/wp/cards");
+        if (!resp.ok) return;
+        const data = await resp.json();
+        renderWPCards(data);
+    } catch (e) {
+        // WP data not available yet
+    }
+}
+
+function wpCardRows(cards) {
+    return cards.map(c => {
+        const netClass = c.net > 0 ? "wr-good" : c.net < 0 ? "wr-bad" : "";
+        const netStr = c.net > 0 ? "+" + c.net : "" + c.net;
+        return `<tr class="clickable" onclick="showCardArchetypes('${c.card}')" title="Click for archetype breakdown">
+            <td>${kebabToTitle(c.card)}</td>
+            <td>${c.carry}</td>
+            <td>${c.liability}</td>
+            <td>${c.critical}</td>
+            <td class="${netClass}">${netStr}</td>
+        </tr>`;
+    }).join("");
+}
+
+function renderWPCards(data) {
+    const section = document.getElementById("wp-section");
+    section.style.display = "";
+
+    document.getElementById("wp-total-games").textContent =
+        `${data.total_games} games \u00b7 volatility ${data.avg_volatility.toFixed(4)}`;
+
+    document.querySelector("#wp-team-table tbody").innerHTML =
+        wpCardRows(data.team_cards || []);
+    document.querySelector("#wp-opp-table tbody").innerHTML =
+        wpCardRows(data.opp_cards || []);
+}
+
+async function showWPCurve(battleId) {
+    if (!battleId) return;
+    try {
+        const resp = await fetch(`/api/wp/${battleId}`);
+        if (!resp.ok) {
+            document.getElementById("wp-game-label").textContent = "No WP data for this game";
+            return;
+        }
+        const data = await resp.json();
+        renderWPCurve(data);
+    } catch (e) {
+        console.error("Failed to fetch WP curve:", e);
+    }
+}
+
+function renderWPCurve(data) {
+    const section = document.getElementById("wp-section");
+    section.style.display = "";
+
+    const label = data.battle_id.length > 20
+        ? data.battle_id.slice(0, 20) + "\u2026"
+        : data.battle_id;
+    document.getElementById("wp-game-label").textContent = label;
+
+    const ctx = document.getElementById("wpChart").getContext("2d");
+    if (wpChart) wpChart.destroy();
+
+    const points = data.points;
+    const critThreshold = 0.03;
+
+    wpChart = new Chart(ctx, {
+        type: "line",
+        data: {
+            labels: points.map(p => p.tick),
+            datasets: [{
+                label: "P(win)",
+                data: points.map(p => p.win_prob * 100),
+                borderColor: "#4f8cff",
+                borderWidth: 2,
+                fill: false,
+                tension: 0.1,
+                pointRadius: points.map(p =>
+                    Math.abs(p.wpa || 0) > critThreshold ? 5 : 0
+                ),
+                pointBackgroundColor: points.map(p => {
+                    const wpa = p.wpa || 0;
+                    if (wpa > critThreshold) return "#34d399";
+                    if (wpa < -critThreshold) return "#f87171";
+                    return "#4f8cff";
+                }),
+                pointBorderWidth: 0,
+            }],
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: false,
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    callbacks: {
+                        title: (items) => `Tick ${points[items[0].dataIndex].tick}`,
+                        afterLabel: (item) => {
+                            const p = points[item.dataIndex];
+                            const wpa = p.wpa || 0;
+                            const sign = wpa >= 0 ? "+" : "";
+                            return `WPA: ${sign}${(wpa * 100).toFixed(1)}%`;
+                        },
+                    },
+                },
+            },
+            scales: {
+                y: {
+                    min: 0,
+                    max: 100,
+                    title: { display: true, text: "P(win) %" },
+                    grid: {
+                        color: (ctx) => ctx.tick.value === 50
+                            ? "rgba(139, 143, 163, 0.5)"
+                            : "rgba(42, 45, 58, 0.8)",
+                    },
+                },
+                x: {
+                    title: { display: true, text: "Game Tick" },
+                    ticks: { maxTicksLimit: 10 },
+                },
+            },
+        },
+    });
+
+    // Summary
+    const s = data.summary;
+    if (s) {
+        const posCard = s.top_positive_wpa_card ? kebabToTitle(s.top_positive_wpa_card) : "—";
+        const negCard = s.top_negative_wpa_card ? kebabToTitle(s.top_negative_wpa_card) : "—";
+        document.getElementById("wp-summary").innerHTML =
+            `<div class="wp-summary-row">
+                <span>Start: ${(s.pre_game_wp * 100).toFixed(1)}%</span>
+                <span>Final: ${(s.final_wp * 100).toFixed(1)}%</span>
+                <span>Range: ${(s.min_wp * 100).toFixed(1)}–${(s.max_wp * 100).toFixed(1)}%</span>
+                <span>Vol: ${s.volatility.toFixed(4)}</span>
+            </div>
+            <div class="wp-summary-row">
+                <span class="wr-good">Carry: ${posCard}</span>
+                <span class="wr-bad">Liability: ${negCard}</span>
+            </div>`;
+    }
+
+    // Critical plays
+    const crits = points
+        .filter(p => Math.abs(p.wpa || 0) > critThreshold)
+        .sort((a, b) => Math.abs(b.wpa) - Math.abs(a.wpa))
+        .slice(0, 5);
+
+    if (crits.length > 0) {
+        document.getElementById("wp-critical-plays").innerHTML =
+            `<div class="wp-crits"><strong>Top Swings:</strong> ` +
+            crits.map(c => {
+                const sign = c.wpa >= 0 ? "+" : "";
+                const cls = c.wpa >= 0 ? "wr-good" : "wr-bad";
+                return `<span class="${cls}">t${c.tick} ${sign}${(c.wpa * 100).toFixed(1)}%</span>`;
+            }).join("  ") + `</div>`;
+    } else {
+        document.getElementById("wp-critical-plays").innerHTML = "";
+    }
+}
+
+async function showCardArchetypes(cardName) {
+    try {
+        const resp = await fetch(`/api/wp/card/${cardName}`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+
+        const detail = document.getElementById("wp-archetype-detail");
+        detail.style.display = "";
+        document.getElementById("wp-arch-card").textContent = kebabToTitle(data.card);
+        document.getElementById("wp-arch-side").textContent =
+            `(${data.side === "team" ? "my card" : "opponent card"} \u00b7 ${data.total_games} games)`;
+
+        const tbody = document.querySelector("#wp-arch-table tbody");
+        tbody.innerHTML = data.archetypes.map(a => {
+            const wpaClass = a.avg_wpa > 0.01 ? "wr-good" : a.avg_wpa < -0.01 ? "wr-bad" : "";
+            const sign = a.avg_wpa >= 0 ? "+" : "";
+            const totalSign = a.total_wpa >= 0 ? "+" : "";
+            return `<tr>
+                <td>${a.archetype}</td>
+                <td>${a.games}</td>
+                <td>${a.wins}</td>
+                <td>${a.losses}</td>
+                <td class="${wpaClass}">${sign}${(a.avg_wpa * 100).toFixed(1)}%</td>
+                <td class="${wpaClass}">${totalSign}${(a.total_wpa * 100).toFixed(1)}%</td>
+            </tr>`;
+        }).join("");
+
+        detail.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    } catch (e) {
+        console.error("Failed to fetch card archetype detail:", e);
+    }
+}
+
 // ─── Init & poll ────────────────────────────────────────────────
 
 fetchAll();
 fetchTilt();
 fetchSimulation();
+fetchWPCards();
 fetchEmbeddings();
 setInterval(fetchAll, POLL_INTERVAL);
 setInterval(fetchTilt, POLL_INTERVAL);
