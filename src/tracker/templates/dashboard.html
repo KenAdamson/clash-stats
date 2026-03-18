@@ -56,6 +56,38 @@
         </div>
     </section>
 
+    <!-- Streaks & Rolling Stats -->
+    <section class="card full-width" id="streaks-section">
+        <h2>Streaks & Rolling Stats</h2>
+        <div class="stats-grid">
+            <div class="streak-cards" id="streak-cards"></div>
+            <div class="rolling-stats">
+                <div class="rolling-col">
+                    <h3>Last 35</h3>
+                    <div id="rolling-35"></div>
+                </div>
+                <div class="rolling-col">
+                    <h3>Last 10</h3>
+                    <div id="rolling-10"></div>
+                </div>
+            </div>
+            <div class="split-layout">
+                <div class="split-left">
+                    <h3>Crown Distribution</h3>
+                    <div class="chart-container small-chart">
+                        <canvas id="crownChart"></canvas>
+                    </div>
+                </div>
+                <div class="split-right">
+                    <h3>Win Rate by Hour (UTC)</h3>
+                    <div class="chart-container small-chart">
+                        <canvas id="timeChart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
     <!-- Matchups & Archetypes -->
     <section class="card full-width" id="matchups-section">
         <h2>Matchups & Archetypes</h2>
@@ -79,28 +111,6 @@
                 </table>
             </div>
         </div>
-    </section>
-
-    <!-- Monte Carlo Analysis (ADR-002) -->
-    <section class="card full-width" id="sim-section" style="display:none">
-        <h2>Monte Carlo Analysis <span class="badge" id="sim-timestamp"></span></h2>
-        <div class="split-layout">
-            <div class="split-left">
-                <h3>Matchup Posteriors <span class="sub-header">Beta(W+1, L+1)</span></h3>
-                <table id="threat-table" class="matchup-table">
-                    <thead><tr><th>Archetype</th><th>W</th><th>L</th><th>P(win)</th><th>95% CI</th></tr></thead>
-                    <tbody></tbody>
-                </table>
-            </div>
-            <div class="split-right">
-                <h3>Card Threat Matrix <span class="sub-header">P(win | opp has card)</span></h3>
-                <table id="card-threat-table" class="matchup-table">
-                    <thead><tr><th>Card</th><th>Faced</th><th>P(win)</th><th>95% CI</th></tr></thead>
-                    <tbody></tbody>
-                </table>
-            </div>
-        </div>
-        <div id="sub-archetype-section"></div>
     </section>
 
     <!-- Recent Battles -->
@@ -143,6 +153,28 @@
         </div>
     </section>
 
+    <!-- Monte Carlo Analysis (ADR-002) -->
+    <section class="card full-width" id="sim-section" style="display:none">
+        <h2>Monte Carlo Analysis <span class="badge" id="sim-timestamp"></span></h2>
+        <div class="split-layout">
+            <div class="split-left">
+                <h3>Matchup Posteriors <span class="sub-header">Beta(W+1, L+1)</span></h3>
+                <table id="threat-table" class="matchup-table">
+                    <thead><tr><th>Archetype</th><th>W</th><th>L</th><th>P(win)</th><th>95% CI</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+            <div class="split-right">
+                <h3>Card Threat Matrix <span class="sub-header">P(win | opp has card)</span></h3>
+                <table id="card-threat-table" class="matchup-table">
+                    <thead><tr><th>Card</th><th>Faced</th><th>P(win)</th><th>95% CI</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+        <div id="sub-archetype-section"></div>
+    </section>
+
     <!-- Game Embeddings (ML Phase 0) -->
     <section class="card full-width" id="embeddings-section" style="display:none">
         <h2>Game Embeddings <span class="sub-header">UMAP 3D projection — click a point for similar games</span></h2>
@@ -162,38 +194,6 @@
         <div id="similar-panel" class="similar-panel" style="display:none">
             <h3>Similar Games to <span id="similar-ref"></span></h3>
             <div id="similar-tables"></div>
-        </div>
-    </section>
-
-    <!-- Streaks & Rolling Stats -->
-    <section class="card full-width" id="streaks-section">
-        <h2>Streaks & Rolling Stats</h2>
-        <div class="stats-grid">
-            <div class="streak-cards" id="streak-cards"></div>
-            <div class="rolling-stats">
-                <div class="rolling-col">
-                    <h3>Last 35</h3>
-                    <div id="rolling-35"></div>
-                </div>
-                <div class="rolling-col">
-                    <h3>Last 10</h3>
-                    <div id="rolling-10"></div>
-                </div>
-            </div>
-            <div class="split-layout">
-                <div class="split-left">
-                    <h3>Crown Distribution</h3>
-                    <div class="chart-container small-chart">
-                        <canvas id="crownChart"></canvas>
-                    </div>
-                </div>
-                <div class="split-right">
-                    <h3>Win Rate by Hour (UTC)</h3>
-                    <div class="chart-container small-chart">
-                        <canvas id="timeChart"></canvas>
-                    </div>
-                </div>
-            </div>
         </div>
     </section>
 
