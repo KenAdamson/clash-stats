@@ -1,7 +1,10 @@
 """Flask dashboard for Clash Royale battle analytics."""
 
 import os
+import threading
+import time
 from pathlib import Path
+from typing import Any
 
 # Must be set before prometheus_client is first imported
 os.environ.setdefault("PROMETHEUS_DISABLE_CREATED_SERIES", "true")
@@ -12,6 +15,34 @@ from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from tracker import analytics
 from tracker.database import get_engine, get_session, init_db
 from tracker.metrics import filter_in_process_metrics, render_accumulated_metrics
+
+
+class _TTLCache:
+    """Thread-safe in-memory cache with per-key TTL.
+
+    Prevents duplicate expensive DB queries when the dashboard polls
+    every 3 minutes and multiple browser tabs are open.
+    """
+
+    def __init__(self) -> None:
+        self._store: dict[str, tuple[float, Any]] = {}
+        self._lock = threading.Lock()
+
+    def get(self, key: str) -> Any | None:
+        """Return cached value if not expired, else None."""
+        with self._lock:
+            entry = self._store.get(key)
+            if entry and time.monotonic() < entry[0]:
+                return entry[1]
+            return None
+
+    def set(self, key: str, value: Any, ttl: float) -> None:
+        """Cache value with TTL in seconds."""
+        with self._lock:
+            self._store[key] = (time.monotonic() + ttl, value)
+
+
+_cache = _TTLCache()
 
 TEMPLATE_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
@@ -53,19 +84,30 @@ def create_app(db_path: str | None = None) -> Flask:
     def index():
         return render_template("dashboard.html")
 
+    # Cache TTL for dashboard endpoints (seconds).
+    # Poll interval is 3 min — 90s TTL prevents duplicate queries
+    # while staying reasonably fresh.
+    CACHE_TTL = 90
+
     @app.route("/api/overview")
     def api_overview():
+        cache_key = f"overview:{_ladder_only()}"
+        cached = _cache.get(cache_key)
+        if cached is not None:
+            return jsonify(cached)
         session = get_session(engine)
         try:
             lo = _ladder_only()
             stats = analytics.get_overall_stats(session, ladder_only=lo)
             api_stats = analytics.get_all_time_api_stats(session)
             diff = analytics.get_snapshot_diff(session)
-            return jsonify({
+            result = {
                 "tracked": stats,
                 "api_stats": api_stats,
                 "snapshot_diff": diff,
-            })
+            }
+            _cache.set(cache_key, result, CACHE_TTL)
+            return jsonify(result)
         finally:
             session.close()
 
@@ -92,15 +134,21 @@ def create_app(db_path: str | None = None) -> Flask:
 
     @app.route("/api/matchups")
     def api_matchups():
+        cache_key = f"matchups:{_ladder_only()}"
+        cached = _cache.get(cache_key)
+        if cached is not None:
+            return jsonify(cached)
         session = get_session(engine)
         try:
             lo = _ladder_only()
             card_matchups = analytics.get_card_matchup_stats(session, min_battles=3, ladder_only=lo)
             archetypes = analytics.get_archetype_stats(session, min_battles=3, ladder_only=lo)
-            return jsonify({
+            result = {
                 "card_matchups": card_matchups,
                 "archetypes": archetypes,
-            })
+            }
+            _cache.set(cache_key, result, CACHE_TTL)
+            return jsonify(result)
         finally:
             session.close()
 
@@ -141,6 +189,10 @@ def create_app(db_path: str | None = None) -> Flask:
 
     @app.route("/api/streaks")
     def api_streaks():
+        cache_key = f"streaks:{_ladder_only()}"
+        cached = _cache.get(cache_key)
+        if cached is not None:
+            return jsonify(cached)
         session = get_session(engine)
         try:
             lo = _ladder_only()
@@ -150,25 +202,30 @@ def create_app(db_path: str | None = None) -> Flask:
             crowns = analytics.get_crown_distribution(session, ladder_only=lo)
             time_of_day = analytics.get_time_of_day_stats(session, ladder_only=lo)
             corpus_traffic = analytics.get_corpus_traffic_by_hour(session)
-            return jsonify({
+            result = {
                 "streaks": streaks,
                 "rolling_35": rolling_35,
                 "rolling_10": rolling_10,
                 "crown_distribution": crowns,
                 "time_of_day": time_of_day,
                 "corpus_traffic": corpus_traffic,
-            })
+            }
+            _cache.set(cache_key, result, CACHE_TTL)
+            return jsonify(result)
         finally:
             session.close()
 
     @app.route("/api/tilt")
     def api_tilt():
         """Return current tilt detection status."""
+        cached = _cache.get("tilt")
+        if cached is not None:
+            return jsonify(cached)
         session = get_session(engine)
         try:
             from tracker.ml.tilt_detector import detect_tilt
             status = detect_tilt(session)
-            return jsonify({
+            result = {
                 "level": status.level,
                 "consecutive_losses": status.consecutive_losses,
                 "recent_record": status.recent_record,
@@ -177,7 +234,9 @@ def create_app(db_path: str | None = None) -> Flask:
                 "tilt_game_count": status.tilt_game_count,
                 "embedding_matches": status.embedding_matches,
                 "message": status.message,
-            })
+            }
+            _cache.set("tilt", result, CACHE_TTL)
+            return jsonify(result)
         finally:
             session.close()
 
@@ -229,6 +288,9 @@ def create_app(db_path: str | None = None) -> Flask:
     @app.route("/api/wp/cards")
     def api_wp_cards():
         """Return aggregate card WPA impact across personal games, split by side."""
+        cached = _cache.get("wp_cards")
+        if cached is not None:
+            return jsonify(cached)
         session = get_session(engine)
         try:
             from tracker.ml.wp_storage import WinProbability, GameWPSummary
@@ -334,12 +396,14 @@ def create_app(db_path: str | None = None) -> Flask:
             ).scalars().all()
             avg_vol = sum(v or 0 for v in summaries) / max(len(summaries), 1)
 
-            return jsonify({
+            result = {
                 "total_games": len(personal_bids),
                 "avg_volatility": round(avg_vol, 4),
                 "team_cards": team_cards,
                 "opp_cards": opp_cards,
-            })
+            }
+            _cache.set("wp_cards", result, CACHE_TTL)
+            return jsonify(result)
         finally:
             session.close()
 
@@ -445,6 +509,12 @@ def create_app(db_path: str | None = None) -> Flask:
         Downsamples corpus points to ~3K for browser performance while
         keeping all personal games at full resolution.
         """
+        # Longer TTL — embeddings change only on retrain
+        cached = _cache.get("embeddings")
+        if cached is not None:
+            page = request.args.get("page", type=int)
+            if page is None:
+                return jsonify(cached)
         import random as _random
         session = get_session(engine)
         try:
@@ -514,11 +584,13 @@ def create_app(db_path: str | None = None) -> Flask:
                     "total_corpus_full": total_corpus,
                     "has_more": start + per_page < len(points),
                 })
-            return jsonify({
+            result = {
                 "points": points,
                 "count": len(points),
                 "total_corpus_full": total_corpus,
-            })
+            }
+            _cache.set("embeddings", result, CACHE_TTL * 4)  # 6 min — changes rarely
+            return jsonify(result)
         finally:
             session.close()
 
