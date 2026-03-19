@@ -205,6 +205,15 @@ Environment variables:
                         help="Mark unfetched battles older than 7 days as permanently missed")
     parser.add_argument("--manifold", action="store_true",
                         help="Profile the 3-leg TCN embedding manifold")
+    # Counterfactual Simulator (ADR-006)
+    parser.add_argument("--train-cvae", action="store_true",
+                        help="Train CVAE counterfactual model (ADR-006)")
+    parser.add_argument("--counterfactual", nargs=3, metavar=("BATTLE_ID", "OLD_CARD", "NEW_CARD"),
+                        help="Generate counterfactual for a game (swap OLD_CARD with NEW_CARD)")
+    parser.add_argument("--deck-gradient", action="store_true",
+                        help="Rank best single-card swaps by expected WR delta")
+    parser.add_argument("--cf-samples", type=int, default=10, metavar="N",
+                        help="Samples per counterfactual (default: 10)")
     # Temporal analysis
     parser.add_argument("--matchup-dive", type=str, metavar="ARCHETYPE",
                         help="Deep temporal analysis against an archetype (e.g. 'Hog Cycle')")
@@ -751,6 +760,40 @@ Environment variables:
             else:
                 reporting.print_wp_cards(rows)
 
+        if args.train_cvae:
+            from tracker.ml.cvae_training import train_cvae
+            train_cvae(session, model_dir=_model_dir)
+
+        if args.counterfactual:
+            battle_id, old_card, new_card = args.counterfactual
+            from tracker.ml.counterfactual import CounterfactualGenerator
+            gen = CounterfactualGenerator(session, model_dir=_model_dir)
+            if gen.cvae is None:
+                print("  ✗ No trained CVAE model. Run --train-cvae first.")
+            elif gen.wp_model is None:
+                print("  ✗ No trained WP model. Run --train-wp first.")
+            else:
+                result = gen.run_counterfactual(
+                    battle_id, old_card, new_card, n_samples=args.cf_samples,
+                )
+                if result:
+                    reporting.print_counterfactual(result)
+                else:
+                    print(f"  ✗ Could not generate counterfactual for {battle_id}")
+
+        if args.deck_gradient:
+            from tracker.ml.counterfactual import CounterfactualGenerator
+            gen = CounterfactualGenerator(session, model_dir=_model_dir)
+            if gen.cvae is None:
+                print("  ✗ No trained CVAE model. Run --train-cvae first.")
+            elif gen.wp_model is None:
+                print("  ✗ No trained WP model. Run --train-wp first.")
+            else:
+                results = gen.compute_deck_gradient(
+                    n_games=20, n_samples=args.cf_samples,
+                )
+                reporting.print_deck_gradient(results)
+
         if args.train_activity_model:
             from tracker.ml.activity_model import train_activity_model
             metrics = train_activity_model(session, model_dir=_model_dir)
@@ -822,6 +865,7 @@ Environment variables:
             args.tilt_check, args.train_tcn, args.build_features, args.train_embeddings,
             args.clusters, args.similar, args.embed_new,
             args.train_wp, args.wp_infer, args.wp_infer_new, args.wp, args.wp_critical, args.wp_cards,
+            args.train_cvae, args.counterfactual, args.deck_gradient,
             args.manifold, args.train_activity_model,
             args.matchup_dive, args.broken_cycle, args.mark_stale_replays,
         ])
