@@ -5,7 +5,7 @@ set -e
 # --db flag is only used as a fallback label; DATABASE_URL always takes precedence in cli.py.
 # If DATABASE_URL is not set, fail fast rather than silently writing to SQLite.
 if [ -z "${DATABASE_URL}" ]; then
-    echo "FATAL: DATABASE_URL is not set. Refusing to start — MariaDB is the only supported backend."
+    echo "FATAL: DATABASE_URL is not set. Refusing to start — PostgreSQL is the only supported backend."
     exit 1
 fi
 DB_FLAG="--db ${DATABASE_URL}"
@@ -173,7 +173,7 @@ export ROYALEAPI_SESSION_PATH="${ROYALEAPI_SESSION_PATH:-/app/data/royaleapi_ses
 export REPLAYS_PER_PLAYER="${REPLAYS_PER_PLAYER:-25}"
 [ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
-clash-stats --corpus-combined --corpus-limit 500 --concurrency 12 --max-pages 2 ${DB_FLAG}
+clash-stats --corpus-combined --corpus-limit 50 --concurrency 12 --max-pages 2 ${DB_FLAG}
 ' || echo "corpus_combined: previous run still active, skipping"
 EOF
 chmod +x /app/corpus_combined.sh
@@ -220,7 +220,7 @@ echo "  Personal:   every 2 min combined (battles + replays, atomic)"
 echo "  Database:   ${DATABASE_URL}"
 echo "  Dashboard:  http://0.0.0.0:8078"
 echo "  Stats push: every 5 min → ${PUSH_DEST}"
-echo "  Corpus:     every 5 min combined (battles + replays, 500 players, 12 tabs)"
+echo "  Corpus:     every 1 min combined (battles + replays, 50 players, 12 tabs)"
 echo "  Discovery:  daily 3am opponent network + weekly Mon 7am regional leaderboards"
 echo "  Metrics:    http://0.0.0.0:8001/metrics (Prometheus)"
 echo "  noVNC:      http://0.0.0.0:6080 (browser sidecar)"

@@ -116,7 +116,7 @@ def store_player_snapshot(session: Session, player: dict) -> None:
         clan_tag=player.get("clan", {}).get("tag"),
         clan_name=player.get("clan", {}).get("name"),
         arena_name=player.get("arena", {}).get("name"),
-        raw_json=json.dumps(player),
+        raw_json=player,
     )
     session.add(snapshot)
     session.commit()
@@ -198,7 +198,7 @@ def store_battle(
         opponent_deck_hash=generate_deck_hash(opponent_deck),
         result=result,
         crown_differential=player_crowns - opponent_crowns,
-        raw_json=json.dumps(battle),
+        raw_json=battle,
         player_elixir_leaked=team.get("elixirLeaked"),
         opponent_elixir_leaked=opponent.get("elixirLeaked"),
         battle_duration=battle.get("battleDuration"),

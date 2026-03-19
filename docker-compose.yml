@@ -1,8 +1,35 @@
 services:
+  postgres:
+    image: postgres:16-bookworm
+    container_name: clash-postgres
+    restart: always
+    profiles: [local]
+    volumes:
+      - ./data/postgres-local:/var/lib/postgresql/data
+    ports:
+      - "192.168.7.58:5432:5432"
+    environment:
+      - POSTGRES_DB=clash_stats
+      - POSTGRES_USER=clash_stats
+      - POSTGRES_PASSWORD=clash_stats_pw_2026
+    command: >
+      -c shared_buffers=2GB
+      -c work_mem=256MB
+      -c maintenance_work_mem=1GB
+      -c effective_cache_size=4GB
+    networks:
+      - media-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U clash_stats"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   mariadb:
+    # KEPT AS FAILSAFE — do not remove yet
     image: mariadb:lts
     container_name: clash-mariadb
-    restart: always
+    restart: "no"
     profiles: [local]
     volumes:
       - ./data/mariadb-local:/var/lib/mysql
@@ -26,6 +53,36 @@ services:
       timeout: 5s
       retries: 5
 
+  cr-tracker-mdb:
+    # OLD cr-tracker pointing at MariaDB — stopped, kept as rollback option
+    build:
+      context: .
+      network: host
+    container_name: cr-tracker-mdb
+    restart: "no"
+    env_file: .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - FETCH_INTERVAL=14400
+      - BROWSER_WS_URL=http://cr-browser:9223
+      - ROYALEAPI_SESSION_PATH=/app/data/royaleapi_session.json
+      - DATABASE_URL=mysql+pymysql://clash_stats:clash_stats_pw_2026@clash-mariadb/clash_stats
+    volumes:
+      - ./data:/app/data
+      - ./.git:/app/.git:rw
+      - ~/.ssh/id_ed25519:/root/.ssh/id_ed25519:ro
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "109"
+    depends_on:
+      - cr-browser
+      - mariadb
+    networks:
+      - media-network
+    ports:
+      - "8079:8078"
+
   cr-tracker:
     build:
       context: .
@@ -38,7 +95,7 @@ services:
       - FETCH_INTERVAL=14400  # 4 hours in seconds
       - BROWSER_WS_URL=http://cr-browser:9223
       - ROYALEAPI_SESSION_PATH=/app/data/royaleapi_session.json
-      - DATABASE_URL=mysql+pymysql://clash_stats:clash_stats_pw_2026@clash-mariadb/clash_stats
+      - DATABASE_URL=postgresql://clash_stats:clash_stats_pw_2026@clash-postgres/clash_stats
     volumes:
       - ./data:/app/data
       - ./.git:/app/.git:rw
@@ -49,7 +106,7 @@ services:
       - "109"  # render group GID for Intel GPU access
     depends_on:
       - cr-browser
-      - mariadb
+      - postgres
     networks:
       - media-network
     ports:
