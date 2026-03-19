@@ -215,7 +215,7 @@ class CVAEDecoder(nn.Module):
         dropout: float = 0.2,
         deck_embed_dim: int = 32,
         latent_dim: int = 64,
-        max_events: int = 200,
+        max_events: int = 500,
     ):
         super().__init__()
         self.vocab_size = vocab_size

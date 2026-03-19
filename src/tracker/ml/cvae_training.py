@@ -7,6 +7,7 @@ KL annealing: beta linearly 0->1 over 20 epochs to prevent posterior collapse.
 Transfer learning: TCN + card_embedding from wp_v1.pt, frozen first 10 epochs.
 """
 
+import contextlib
 import logging
 import time
 from pathlib import Path
@@ -53,17 +54,30 @@ FREEZE_EPOCHS = 10
 
 
 def _detect_device() -> torch.device:
-    """Detect the best available device: XPU -> CUDA -> CPU."""
-    if hasattr(torch, "xpu") and torch.xpu.is_available():
-        device = torch.device("xpu")
-        logger.info("Using Intel XPU: %s", torch.xpu.get_device_name(0))
-        return device
+    """Detect the best available device for CVAE: CUDA -> CPU.
+
+    XPU (Intel Arc) is excluded because its oneDNN backend lacks primitives
+    for scaled_dot_product_attention used by nn.TransformerDecoder. The
+    TCN-only WP model works fine on XPU, but the CVAE's Transformer
+    decoder does not. CPU with AVX-512 is fast enough for 4.4M params.
+    """
     if torch.cuda.is_available():
         device = torch.device("cuda")
         logger.info("Using CUDA: %s", torch.cuda.get_device_name(0))
         return device
-    logger.info("Using CPU")
+    logger.info("Using CPU (XPU excluded — Transformer attention unsupported)")
     return torch.device("cpu")
+
+
+def _autocast_ctx(device: torch.device):
+    """Return autocast context for CUDA, no-op for XPU/CPU.
+
+    IPEX's autocast can't handle Transformer Linear ops ("could not create
+    a primitive"), so we skip mixed precision on XPU entirely.
+    """
+    if device.type == "cuda":
+        return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+    return contextlib.nullcontext()
 
 
 class CVAETrainer:
@@ -238,7 +252,7 @@ class CVAETrainer:
                 ]
 
                 self.optimizer.zero_grad()
-                with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
+                with _autocast_ctx(self.device):
                     outputs = self.model(card_ids, features, lengths, p_decks, o_decks)
                     loss, loss_dict = self._compute_loss(
                         outputs, card_ids, features, mask, beta,
@@ -312,7 +326,7 @@ class CVAETrainer:
                     b.to(self.device) for b in batch
                 ]
 
-                with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
+                with _autocast_ctx(self.device):
                     outputs = self.model(card_ids, features, lengths, p_decks, o_decks)
                     _, loss_dict = self._compute_loss(
                         outputs, card_ids, features, mask, beta,
