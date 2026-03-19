@@ -2,13 +2,13 @@
 
 ## Project Overview
 
-A Python tool for analyzing Clash Royale gameplay at a level the community ecosystem doesn't support. This isn't a hobbyist script — it's the analytics backend for a player who has climbed to 10,900+ trophies with a deck that literally zero other humans play, in ~2,800 lifetime games while peers at the same trophy range have 10,000-15,000+.
+A Python tool for analyzing Clash Royale gameplay at a level the community ecosystem doesn't support. This isn't a hobbyist script — it's the analytics backend for a player who has climbed to 11,400+ trophies (PB 11,461 — 39 from ranked) with a deck that literally zero other humans play, in ~2,800 lifetime games while peers at the same trophy range have 10,000-15,000+.
 
 The existing community tools (RoyaleAPI, StatsRoyale, Deckshop) are built for meta players running popular decks. They show aggregate stats, not individualized probabilistic analysis. This tool fills that gap.
 
 ### `cr_tracker.py` — Battle History Archiver
 
-The CR API only exposes the last 25 battles. No pagination, no historical queries. Community sites only capture games if they happen to poll your tag during the window. This tool polls the API on a schedule, deduplicates via SHA-256 hashing, and archives every battle into SQLite with full card-level data for long-term analysis.
+The CR API only exposes the last 25 battles. No pagination, no historical queries. Community sites only capture games if they happen to poll your tag during the window. This tool polls the API on a schedule, deduplicates via SHA-256 hashing, and archives every battle into PostgreSQL with full card-level data for long-term analysis.
 
 **Intended deployment:** Docker container on a home server alongside an existing media stack. Third-party packages are welcome — use the best tool for the job (e.g., `requests` for HTTP, `rich` for terminal output, `pytest` for testing).
 
@@ -30,8 +30,8 @@ Third-party dependencies are fine everywhere — tracker, analytics, dashboard. 
 ### SQLAlchemy + Alembic
 ORM models in `models.py`, versioned migrations via Alembic. The `database.py` module handles engine/session creation and runs migrations automatically on startup. For existing pre-Alembic databases, the migration runner stamps the initial revision without re-creating tables. Installed as a proper package with `pip install .` and a `clash-stats` CLI entrypoint.
 
-### SQLite as the data store
-Single-file database, portable, zero-config. The `raw_json` column in the battles table preserves the complete API response so no data is lost even if the schema evolves. This is the right call — don't change it.
+### PostgreSQL as the data store
+PostgreSQL 16 with JSONB for the `raw_json` columns. TOAST automatically stores large JSON values out-of-line, so full table scans on non-JSON columns are fast. The `raw_json` column preserves the complete API response as native JSONB — queryable with `->>`/`@>` operators and GIN-indexable. Connection pooling via SQLAlchemy (`pool_size=20, max_overflow=20`). Tests use SQLite in-memory via SQLAlchemy's `JSON` type fallback.
 
 ### Deduplication via content hashing
 The API returns overlapping windows (last 25 battles). The SHA-256 hash on `battleTime + tags + crowns` handles dedup cleanly. Don't switch to timestamp-only dedup — the current approach is more robust.
@@ -53,7 +53,7 @@ All original known issues have been resolved:
 
 ### Schema Migrations (Alembic)
 
-Database migrations are managed by Alembic. The `database.py` module auto-detects pre-Alembic databases and stamps the initial revision. New migrations go in `src/tracker/alembic/versions/`. Run `alembic upgrade head` programmatically on startup via `init_db()`.
+Database migrations are managed by Alembic. Migrations were consolidated into a single `001_initial_schema.py` during the PostgreSQL migration. New migrations go in `src/tracker/alembic/versions/` starting from `002`. Run `alembic upgrade head` programmatically on startup via `init_db()`.
 
 ## Coding Standards
 
@@ -69,14 +69,14 @@ Database migrations are managed by Alembic. The `database.py` module auto-detect
 These data points inform what analytics matter:
 
 - **Play style:** ~17 games/day in the current active stretch (434 games in 25 days). The ~1.35 games/day lifetime average is misleading — it includes an 8-9 year break from the game.
-- **Efficiency:** ~2,800 games to 10,900+ trophies. Peers at same range: 10,000-15,000+ games.
+- **Efficiency:** ~2,800 games to 11,400+ trophies (PB 11,461). Peers at same range: 10,000-15,000+ games.
 - **Three-crown rate:** ~73% lifetime (overwhelmingly wins by destruction, not chip)
 - **Matchup data matters.** Both problem matchups and hard counters exist — the tracker should surface these from real battle data rather than relying on assumptions.
 - **Tilt pattern:** Rare but devastating.
 
 ## API Reference
 
-**Base URL:** `https://api.clashroyale.com/v1` (direct) or `https://proxy.royaleapi.dev/v1` (via RoyaleAPI proxy, configurable with `CR_API_URL`)
+**Base URL:** `https://api.clashroyale.com/v1` (direct). The RoyaleAPI proxy (`proxy.royaleapi.dev`) is Cloudflare-blocked — use the official API only.
 
 **Key endpoints:**
 - `GET /players/{tag}` — Player profile (all-time stats, current trophies, clan)
@@ -124,7 +124,20 @@ Priorities:
 
 ## Deployment
 
-Docker container designed to run alongside an existing media/services stack.
+Docker Compose stack on a home server (local NVMe machine at 192.168.7.58).
+
+### Services
+
+| Service | Container | Purpose |
+|---------|-----------|---------|
+| `postgres` | `clash-postgres` | PostgreSQL 16 — primary data store |
+| `cr-tracker` | `cr-tracker` | Battle tracker, dashboard, cron jobs |
+| `cr-browser` | `cr-browser` | Headless Chromium sidecar for replay scraping |
+| `cr-samv2` | `cr-samv2` | SAMv2 tracking API on Intel Arc A770 XPU |
+| `prometheus` | `prometheus` | Metrics collection |
+| `loki` | `loki` | Log aggregation |
+| `alloy` | `alloy` | Docker log shipping to Loki |
+| `grafana` | `grafana` | Dashboards and alerting |
 
 ### Docker Container Design
 
@@ -133,20 +146,15 @@ clash-stats/
 ├── Dockerfile
 ├── docker-compose.yml
 ├── pyproject.toml
+├── crontab                ← Debian cron schedule for all periodic jobs
+├── entrypoint.sh          ← Container startup: fetch, dashboard, cron
+├── publish_stats.sh       ← Git-push stats JSON to GitHub
 ├── docs/
 │   └── adr/               ← Architecture Decision Records for ML/simulation layer
-│       ├── README.md
-│       ├── 001-feature-engineering.md
-│       ├── 002-monte-carlo-simulation.md
-│       ├── 003-game-state-embeddings.md
-│       ├── 004-win-probability-estimator.md
-│       ├── 005-opponent-prediction.md
-│       ├── 006-counterfactual-simulator.md
-│       └── 007-training-data-pipeline.md
 ├── docker/
-│   └── browser/            ← Playwright + NoVNC sidecar for replay scraping
-│       ├── Dockerfile
-│       └── entrypoint.sh
+│   ├── browser/           ← Headless Chromium + NoVNC sidecar
+│   ├── samv2/             ← SAMv2 tracking sidecar (Intel Arc XPU)
+│   └── monitoring/        ← Prometheus, Loki, Alloy, Grafana configs
 ├── src/
 │   └── tracker/
 │       ├── __init__.py
@@ -155,15 +163,18 @@ clash-stats/
 │       ├── database.py          ← Engine/session setup, Alembic migration runner
 │       ├── api.py               ← ClashRoyaleAPI client
 │       ├── analytics.py         ← All query/storage functions
-│       ├── replays.py           ← RoyaleAPI replay scraper and parser
+│       ├── replays.py           ← RoyaleAPI replay scraper (Playwright)
+│       ├── replay_http.py       ← HTTP-based replay fetcher (replaces Playwright)
+│       ├── corpus_scraper.py    ← Combined corpus pipeline: battles + replays
 │       ├── reporting.py         ← Terminal output formatting
+│       ├── dashboard.py         ← Flask web dashboard
 │       ├── export.py            ← CSV/JSON export
 │       ├── archetypes.py        ← Opponent deck classification
+│       ├── metrics.py           ← Prometheus metrics + accumulated JSON flush
 │       ├── cli.py               ← argparse + main() dispatch
-│       ├── alembic/             ← Alembic migration config + versions
-│       ├── simulation/          ← (planned) Monte Carlo framework (ADR-002)
-│       ├── ml/                  ← ML: embeddings, win probability, clustering, similarity
-│       │   ├── __init__.py
+│       ├── alembic/             ← Alembic migration config + versions (consolidated 001)
+│       ├── simulation/          ← Monte Carlo framework (ADR-002)
+│       ├── ml/                  ← ML: embeddings, win probability, clustering, activity
 │       │   ├── card_metadata.py ← CardVocabulary — dynamic card→index mapping from DB
 │       │   ├── features.py      ← 50-dim feature extraction from replay data
 │       │   ├── sequence_dataset.py ← SequenceDataset — replay events → padded tensors
@@ -171,39 +182,37 @@ clash-stats/
 │       │   ├── clustering.py    ← HDBSCAN clustering + cluster profiling
 │       │   ├── similarity.py    ← Euclidean distance + percentile rank + Gaussian kernel
 │       │   ├── storage.py       ← GameFeature/GameEmbedding ORM models, numpy↔BLOB
-│       │   ├── wp_training.py   ← WPTrainer, WinProbabilityModel, train/infer pipelines
+│       │   ├── win_probability.py ← WinProbabilityModel — causal TCN architecture
+│       │   ├── wp_training.py   ← WPTrainer, train/infer pipelines
 │       │   ├── wp_dataset.py    ← Collate function for variable-length sequences
 │       │   ├── wp_storage.py    ← WinProbability, GameWPSummary ORM models
-│       │   └── calibration.py   ← PlattCalibrator — Platt scaling + ECE diagnostics
+│       │   ├── calibration.py   ← PlattCalibrator — Platt scaling + ECE diagnostics
+│       │   └── activity_model.py ← GBM activity predictor for corpus scheduling
+│       ├── vision/              ← Visual game state recognition (ADR-009)
 │       └── tests/
-│           ├── conftest.py      ← Shared fixtures
-│           ├── fixtures/        ← Static HTML fixtures for replay parser tests
-│           ├── test_models.py
-│           ├── test_analytics.py
-│           ├── test_api.py
-│           ├── test_replays.py
-│           ├── test_reporting.py
-│           ├── test_cli.py
-│           ├── test_dashboard.py
-│           └── test_export.py
-├── data/                  <- Volume mount, persists SQLite DB + feature cache
-│   └── clash_royale_history.db
-└── .env                   <- CR_API_KEY, CR_PLAYER_TAG (not committed)
+├── data/                  ← Volume mount: ML models, metrics, session state
+│   ├── postgres-local/    ← PostgreSQL data directory
+│   └── ml_models/         ← Trained model checkpoints (.pt, .pkl)
+└── .env                   ← CR_API_KEY, CR_PLAYER_TAG, DB_PASSWORD (not committed)
 ```
 
 **Container requirements:**
-- Base image: `python:3.11-slim-bookworm`
+- Base image: `python:3.11-slim-bookworm` with Intel Level Zero runtime for XPU
 - Dependencies managed via `pyproject.toml`, installed with `pip install .[ml]` in the Dockerfile
-- SQLite database lives on a Docker volume mount (`./data:/app/data`) so it survives container rebuilds
-- Environment variables via `.env` file: `CR_API_KEY`, `CR_PLAYER_TAG`
-- BusyBox crond schedule: personal combined (battles + replays) every 2 min, corpus combined every 5 min
-- Container runs `--personal-combined` on schedule and keeps the DB accessible for ad-hoc analytics via `docker exec`
+- PostgreSQL data at `./data/postgres-local`, ML models at `./data/ml_models`
+- Environment variables via `.env` file: `CR_API_KEY`, `CR_PLAYER_TAG`, `DB_PASSWORD`
+- Debian cron schedule: personal combined every 2 min, corpus combined every 1 min (50 players/batch)
+- Flask dashboard on port 8078, Prometheus metrics on port 8001
 - Logging to stdout so Docker's log driver captures it
 
 **Health/monitoring:**
 - Log each fetch cycle with timestamp, new battle count, and current trophy count
 - If the API returns errors for 3+ consecutive fetches, log a clear warning (don't silently fail — this runs unattended)
+- Prometheus metrics: battle counts, replay counts, batch yields, rate limit backoffs, scrape timing
+- Grafana dashboards: corpus throughput, player activity, pipeline health
+- Discord webhook alerting via Grafana unified alerting
 
 **Network:**
-- Container needs outbound HTTPS (port 443) to the configured API URL
-- Port 8078 reserved for future web dashboard
+- All services on `media-network` (Docker external network)
+- Container needs outbound HTTPS (port 443) to the CR API
+- Dashboard: port 8078, Grafana: port 3000, noVNC: port 6080
