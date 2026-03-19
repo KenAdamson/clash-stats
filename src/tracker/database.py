@@ -19,7 +19,7 @@ def _db_url(db_ref: str) -> str:
 
     Args:
         db_ref: Either a SQLite file path or a full database URL
-                (e.g. ``mysql+pymysql://user:pw@host/db``).
+                (e.g. ``postgresql://user:pw@host/db``).
 
     Returns:
         Full SQLAlchemy connection URL string.
@@ -50,7 +50,7 @@ def get_engine(db_ref: str) -> Engine:
 
     Args:
         db_ref: Either a SQLite file path or a full database URL
-                (e.g. ``mysql+pymysql://user:pw@host/db``).
+                (e.g. ``postgresql://user:pw@host/db``).
 
     Returns:
         SQLAlchemy Engine instance.
@@ -60,7 +60,7 @@ def get_engine(db_ref: str) -> Engine:
         engine = create_engine(url, echo=False)
         event.listen(engine, "connect", _set_sqlite_pragmas)
     else:
-        # PostgreSQL/MariaDB — connection pooling with reconnect on stale connections
+        # PostgreSQL — connection pooling with reconnect on stale connections
         engine = create_engine(
             url,
             echo=False,
@@ -148,7 +148,7 @@ def init_db(db_ref: str) -> Engine:
 
     Args:
         db_ref: Either a SQLite file path or a full database URL
-                (e.g. ``mysql+pymysql://user:pw@host/db``).  Also honours
+                (e.g. ``postgresql://user:pw@host/db``).  Also honours
                 the ``DATABASE_URL`` environment variable — if set it takes
                 precedence over ``db_ref``.
 

@@ -224,13 +224,13 @@ Environment variables:
     player_tag = args.player_tag or os.environ.get("CR_PLAYER_TAG")
     api_url = args.api_url or os.environ.get("CR_API_URL", DEFAULT_API_URL)
 
-    # DATABASE_URL env var overrides --db (enables MariaDB backend)
+    # DATABASE_URL env var overrides --db (enables PostgreSQL backend)
     _db_ref = _DATABASE_URL or args.db
     engine = init_db(_db_ref)
     session = get_session(engine)
 
     # model_dir lives next to the DB file for SQLite; fall back to data/ml_models
-    # when using a URL-based backend (MariaDB).
+    # when using a URL-based backend (PostgreSQL).
     from pathlib import Path
     _model_dir = (
         Path("data/ml_models")

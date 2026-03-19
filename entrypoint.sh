@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-# DATABASE_URL is the canonical DB connection string (MariaDB).
+# DATABASE_URL is the canonical DB connection string (PostgreSQL).
 # --db flag is only used as a fallback label; DATABASE_URL always takes precedence in cli.py.
 # If DATABASE_URL is not set, fail fast rather than silently writing to SQLite.
 if [ -z "${DATABASE_URL}" ]; then
