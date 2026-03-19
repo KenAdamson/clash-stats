@@ -32,6 +32,11 @@ logger = logging.getLogger(__name__)
 # Number of cards in a deck
 DECK_SIZE = 8
 
+# Truncate sequences longer than this in the collate function.
+# Attention is O(n^2) — a single 450-event game pads the whole batch.
+# P99 is 140, so 200 covers 99%+ of games with minimal data loss.
+MAX_SEQ_LEN = 200
+
 
 class CVAEDataset(Dataset):
     """Dataset that yields event sequences + deck card IDs for CVAE training.
@@ -182,7 +187,11 @@ def cvae_collate_fn(
         mask: (batch, max_len) float32
     """
     card_ids_list, features_list, labels_list, p_decks, o_decks = zip(*batch)
-    lengths = torch.tensor([len(c) for c in card_ids_list], dtype=torch.int64)
+
+    # Truncate sequences to MAX_SEQ_LEN to bound attention cost
+    lengths = torch.tensor(
+        [min(len(c), MAX_SEQ_LEN) for c in card_ids_list], dtype=torch.int64,
+    )
     max_len = int(lengths.max())
 
     batch_size = len(batch)
@@ -190,9 +199,9 @@ def cvae_collate_fn(
     padded_features = torch.zeros(batch_size, max_len, 17, dtype=torch.float32)
 
     for i, (cids, feats) in enumerate(zip(card_ids_list, features_list)):
-        seq_len = len(cids)
-        padded_card_ids[i, :seq_len] = cids
-        padded_features[i, :seq_len] = feats
+        seq_len = int(lengths[i])
+        padded_card_ids[i, :seq_len] = cids[:seq_len]
+        padded_features[i, :seq_len] = feats[:seq_len]
 
     labels = torch.tensor(labels_list, dtype=torch.float32)
     player_deck_ids = torch.stack(list(p_decks))

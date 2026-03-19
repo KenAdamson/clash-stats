@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 CVAE_MODEL_VERSION = "cvae-v1"
 
 # Training hyperparameters
-BATCH_SIZE = 128
+BATCH_SIZE = 256
 LEARNING_RATE = 3e-4
 WEIGHT_DECAY = 1e-4
 EPOCHS = 80
