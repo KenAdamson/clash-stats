@@ -7,8 +7,8 @@ PATH=/usr/local/bin:/usr/bin:/bin
 # Publish stats JSON to GitHub every 5 minutes
 */5 * * * * root /app/publish_wrapper.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Combined corpus scrape: battles + replays in one pass
-# Fires every 5 min; lockfile ensures only one runs at a time
-*/5 * * * * root /app/corpus_combined.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
+# Fires every 1 min; 50-player batches for fresher data, lockfile prevents overlap
+* * * * * root /app/corpus_combined.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Weekly: refresh top-ladder player tags (Monday 6am UTC)
 0 6 * * 1 root /app/corpus_update.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Refresh simulation results after corpus scrape (every 6h, offset 2h)

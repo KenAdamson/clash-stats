@@ -25,6 +25,9 @@ def _db_url(db_ref: str) -> str:
         Full SQLAlchemy connection URL string.
     """
     if "://" in db_ref:
+        # Normalize postgres:// to postgresql:// for SQLAlchemy compatibility
+        if db_ref.startswith("postgres://"):
+            db_ref = "postgresql://" + db_ref[len("postgres://"):]
         return db_ref
     return f"sqlite:///{db_ref}"
 
@@ -57,7 +60,7 @@ def get_engine(db_ref: str) -> Engine:
         engine = create_engine(url, echo=False)
         event.listen(engine, "connect", _set_sqlite_pragmas)
     else:
-        # MariaDB/MySQL — connection pooling with reconnect on stale connections
+        # PostgreSQL/MariaDB — connection pooling with reconnect on stale connections
         engine = create_engine(
             url,
             echo=False,
@@ -108,7 +111,7 @@ def run_migrations(db_ref: str) -> None:
 
     For existing SQLite databases created before Alembic was added, this stamps
     the initial revision so Alembic knows the schema is current, then runs
-    any subsequent migrations.  Fresh MariaDB databases always run all
+    any subsequent migrations.  Fresh PostgreSQL databases always run all
     migrations from revision 001 to head.
 
     Args:

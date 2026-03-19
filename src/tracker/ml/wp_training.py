@@ -341,20 +341,21 @@ class WPTrainer:
                 # Store per-tick records — dialect-aware upsert so re-runs
                 # never hit UNIQUE constraint violations.
                 dialect = session.bind.dialect.name
-                if dialect == "mysql":
-                    _upsert_sql = sa_text("""
-                        INSERT INTO win_probability
-                            (battle_id, game_tick, win_prob, wpa, criticality, event_index, model_version)
-                        VALUES (:bid, :tick, :wp, :wpa, :crit, :eidx, :ver)
-                        ON DUPLICATE KEY UPDATE
-                            win_prob=VALUES(win_prob), wpa=VALUES(wpa),
-                            criticality=VALUES(criticality), event_index=VALUES(event_index)
-                    """)
-                else:
+                if dialect == "sqlite":
                     _upsert_sql = sa_text("""
                         INSERT OR REPLACE INTO win_probability
                             (battle_id, game_tick, win_prob, wpa, criticality, event_index, model_version)
                         VALUES (:bid, :tick, :wp, :wpa, :crit, :eidx, :ver)
+                    """)
+                else:
+                    # PostgreSQL (and any other dialect with ON CONFLICT support)
+                    _upsert_sql = sa_text("""
+                        INSERT INTO win_probability
+                            (battle_id, game_tick, win_prob, wpa, criticality, event_index, model_version)
+                        VALUES (:bid, :tick, :wp, :wpa, :crit, :eidx, :ver)
+                        ON CONFLICT (battle_id, game_tick, model_version) DO UPDATE SET
+                            win_prob = EXCLUDED.win_prob, wpa = EXCLUDED.wpa,
+                            criticality = EXCLUDED.criticality, event_index = EXCLUDED.event_index
                     """)
                 for j in range(seq_len):
                     game_tick = events[j][1] if j < len(events) else j

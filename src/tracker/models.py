@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import ForeignKey, Index, String, func
+from sqlalchemy import ForeignKey, Index, JSON, String, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -37,7 +37,7 @@ class PlayerSnapshot(Base):
     clan_tag: Mapped[Optional[str]]
     clan_name: Mapped[Optional[str]]
     arena_name: Mapped[Optional[str]]
-    raw_json: Mapped[Optional[str]]
+    raw_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
 
 class Battle(Base):
@@ -86,7 +86,7 @@ class Battle(Base):
     # Derived
     result: Mapped[Optional[str]]
     crown_differential: Mapped[Optional[int]]
-    raw_json: Mapped[Optional[str]]
+    raw_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
     # Added in migration v1
     player_elixir_leaked: Mapped[Optional[float]]

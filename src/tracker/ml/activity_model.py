@@ -42,13 +42,14 @@ def _build_player_profiles(session: Session) -> dict[str, dict]:
         }
     """
     # Get per-player hourly + dow histograms from battle_time.
-    # battle_time is a DATETIME column — HOUR() and DAYOFWEEK() are native and fast.
+    # battle_time is a DATETIME column — EXTRACT() works on both PostgreSQL and SQLite.
+    # ISODOW: 1=Monday ... 7=Sunday (ISO 8601).
     rows = session.execute(
         text("""
             SELECT
                 player_tag,
-                HOUR(battle_time) AS hour_utc,
-                DAYOFWEEK(battle_time) AS dow,
+                EXTRACT(HOUR FROM battle_time) AS hour_utc,
+                EXTRACT(ISODOW FROM battle_time) AS dow,
                 COUNT(*) AS cnt
             FROM battles
             WHERE corpus IS NOT NULL
@@ -78,9 +79,9 @@ def _build_player_profiles(session: Session) -> dict[str, dict]:
         p['hourly_counts'][int(hour)] = p['hourly_counts'].get(int(hour), 0) + cnt
         p['total_battles'] += cnt
 
-        # dow from MySQL: 1=Sunday, 2=Monday, ..., 7=Saturday
+        # ISODOW from PostgreSQL: 1=Monday, ..., 7=Sunday
         # Convert to 0=Monday, ..., 6=Sunday
-        dow_py = (dow - 2) % 7
+        dow_py = int(dow) - 1
         p['dow_counts'][dow_py] = p['dow_counts'].get(dow_py, 0) + cnt
 
     # Get last/first battle time per player — native DATETIME, so

@@ -1,6 +1,5 @@
 """Tests for ORM models, schema, battle ID/hash generation, and battle storage."""
 
-import json
 import pytest
 
 from tracker import analytics
@@ -151,8 +150,7 @@ class TestBattleStorage:
         battle = make_battle()
         analytics.store_battle(session, battle, "#L90009GPP")
         stored = session.query(Battle).first()
-        restored = json.loads(stored.raw_json)
-        assert restored["battleTime"] == battle["battleTime"]
+        assert stored.raw_json["battleTime"] == battle["battleTime"]
 
     def test_preserves_trophy_data(self, session):
         analytics.store_battle(session, make_battle(trophy_change=30), "#L90009GPP")

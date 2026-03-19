@@ -502,12 +502,10 @@ async def scrape_corpus_combined(
     }
     consecutive_auth_failures = 0
 
-    # Reset per-batch gauges from previous run
-    total_batches = (len(players) + effective_concurrency - 1) // effective_concurrency
-    for i in range(1, total_batches + 1):
-        CORPUS_BATCH_BATTLES.labels(batch=str(i)).set(0)
-        CORPUS_BATCH_REPLAYS.labels(batch=str(i)).set(0)
-        CORPUS_BATCH_ZERO_YIELD.labels(batch=str(i)).set(0)
+    # Clear all batch labels from previous run (handles varying batch counts)
+    CORPUS_BATCH_BATTLES._metrics.clear()
+    CORPUS_BATCH_REPLAYS._metrics.clear()
+    CORPUS_BATCH_ZERO_YIELD._metrics.clear()
 
     from tracker.replay_http import fetch_replays_http
 
