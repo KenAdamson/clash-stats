@@ -41,10 +41,9 @@ END_TOKEN = "<END>"
 
 
 def _detect_device() -> torch.device:
-    """Detect best available device for CVAE inference.
-
-    XPU excluded — Transformer attention lacks oneDNN primitives.
-    """
+    """Detect best available device for CVAE inference."""
+    if hasattr(torch, "xpu") and torch.xpu.is_available():
+        return torch.device("xpu")
     if torch.cuda.is_available():
         return torch.device("cuda")
     return torch.device("cpu")

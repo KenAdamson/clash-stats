@@ -27,6 +27,7 @@ from tracker.ml.card_metadata import CardVocabulary
 from tracker.ml.cvae import CounterfactualVAE
 from tracker.ml.cvae_dataset import CVAEDataset, cvae_collate_fn
 from tracker.ml.sequence_dataset import MIN_EVENTS
+from tracker.models import Battle
 
 logger = logging.getLogger(__name__)
 
@@ -54,18 +55,20 @@ FREEZE_EPOCHS = 10
 
 
 def _detect_device() -> torch.device:
-    """Detect the best available device for CVAE: CUDA -> CPU.
+    """Detect the best available device: XPU -> CUDA -> CPU.
 
-    XPU (Intel Arc) is excluded because its oneDNN backend lacks primitives
-    for scaled_dot_product_attention used by nn.TransformerDecoder. The
-    TCN-only WP model works fine on XPU, but the CVAE's Transformer
-    decoder does not. CPU with AVX-512 is fast enough for 4.4M params.
+    XPU requires intel-opencl-icd for oneDNN's SDPA primitive. Without it,
+    Transformer attention fails with "could not create a primitive".
     """
+    if hasattr(torch, "xpu") and torch.xpu.is_available():
+        device = torch.device("xpu")
+        logger.info("Using Intel XPU: %s", torch.xpu.get_device_name(0))
+        return device
     if torch.cuda.is_available():
         device = torch.device("cuda")
         logger.info("Using CUDA: %s", torch.cuda.get_device_name(0))
         return device
-    logger.info("Using CPU (XPU excluded — Transformer attention unsupported)")
+    logger.info("Using CPU")
     return torch.device("cpu")
 
 
@@ -96,10 +99,12 @@ class CVAETrainer:
         dataset: CVAEDataset,
         device: torch.device,
         model_dir: Path,
+        training_cutoff: str | None = None,
     ):
         self.model = model.to(device)
         self.device = device
         self.model_dir = model_dir
+        self.training_cutoff = training_cutoff
 
         # Train/val split
         n = len(dataset)
@@ -296,6 +301,7 @@ class CVAETrainer:
                     "epoch": epoch,
                     "val_loss": val_loss,
                     "beta": beta,
+                    "training_cutoff": self.training_cutoff,
                 }, best_path)
                 logger.info("  -> New best model saved (val_loss=%.4f)", val_loss)
             else:
@@ -386,12 +392,19 @@ def train_cvae(
     n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"  -> Model: {n_total:,} params ({n_trainable:,} trainable)")
 
-    # 4. Train
-    trainer = CVAETrainer(model, dataset, device, model_dir)
+    # 4. Query training data cutoff date
+    from sqlalchemy import func
+    cutoff = session.query(func.max(Battle.battle_time)).scalar()
+    cutoff_str = cutoff.isoformat() if cutoff else None
+    logger.info("Training data cutoff: %s", cutoff_str)
+
+    # 5. Train
+    trainer = CVAETrainer(model, dataset, device, model_dir, training_cutoff=cutoff_str)
     best_path = trainer.train()
 
-    # 5. Report
+    # 6. Report
     checkpoint = torch.load(best_path, map_location=device, weights_only=True)
     print(f"  ✓ CVAE training complete")
     print(f"  ✓ Best val_loss={checkpoint['val_loss']:.4f} at epoch {checkpoint['epoch']}")
+    print(f"  ✓ Training data cutoff: {checkpoint.get('training_cutoff', 'unknown')}")
     print(f"  ✓ Saved to {best_path}")
