@@ -254,7 +254,7 @@ Embeddings are recomputed when the model is retrained. The `model_version` colum
 
 #### Vector Search Backend
 
-**Shortlisted:** pgvector (PostgreSQL extension) and Qdrant (standalone Rust vector DB). Decision pending based on whether the project migrates from SQLite to PostgreSQL.
+**Shortlisted:** pgvector (PostgreSQL extension) and Qdrant (standalone Rust vector DB). PostgreSQL is now the primary backend (migrated 2026-03-18), making pgvector the natural choice — no additional infrastructure needed.
 
 | Criteria | pgvector | Qdrant |
 |---|---|---|

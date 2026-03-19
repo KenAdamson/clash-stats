@@ -38,8 +38,8 @@ This is transfer learning applied to game analytics: learn the general dynamics 
 
 ```
 ┌─────────────────┐     ┌──────────────────┐     ┌───────────────────┐
-│ CR API           │     │ RoyaleAPI        │     │ SQLite            │
-│ /v1/locations/   │────►│ /player/{tag}/   │────►│ battles           │
+│ CR API           │     │ RoyaleAPI        │     │ PostgreSQL        │
+│ /v1/locations/   │────►│ /player/{tag}/   │────►│ battles (JSONB)   │
 │   global/        │     │   battles        │     │ replay_events     │
 │   rankings       │     │ /replay?...      │     │ replay_summaries  │
 │                  │     │                  │     │ player_corpus     │
@@ -188,7 +188,7 @@ The Clash Royale meta shifts with balance patches (typically every 1-3 months) a
 
 **Data usage:** All scraped data is used for personal analytics only. No redistribution, no public dashboards showing other players' data. The corpus is a training set, not a surveillance tool.
 
-**Storage:** At 60K games/year with ~50 events each, the replay_events table grows by ~3M rows/year. SQLite handles this fine with proper indexing, but the feature cache (.npz files) may reach 5-10 GB. Archive older feature caches when models are retrained.
+**Storage:** At 60K games/year with ~50 events each, the replay_events table grows by ~3M rows/year. PostgreSQL with TOAST handles this well — `raw_json` JSONB values are stored out-of-line, keeping table scans fast. The feature cache (.npz files) may reach 5-10 GB. Archive older feature caches when models are retrained.
 
 **ITAR note:** None of this involves controlled technical data. Game analytics is firmly in the public domain. But the engineering discipline (comprehensive data collection, provenance tracking, version-controlled models) reflects the same rigor.
 
@@ -264,4 +264,4 @@ Crontab additions:
 | Month 1 | 200 | 100,000 | 100,200 | All sequence models, dense interaction matrices |
 | Month 3 | 300 | 300,000 | 300,300 | Per-card embeddings, meta evolution tracking |
 
-All neural model scale thresholds (ADR-003 through ADR-006) are expected to be met within 2 weeks rather than 3-6 months. The bottleneck has shifted from data volume to replay coverage (currently 2.6% of corpus battles have replay event data) and engineering time to build the models.
+All neural model scale thresholds (ADR-003 through ADR-006) are expected to be met within 2 weeks rather than 3-6 months. The bottleneck has shifted from data volume to replay coverage and engineering time to build the models. Note: the RoyaleAPI proxy (`proxy.royaleapi.dev`) is currently Cloudflare-blocked (Error 1010); replay scraping uses HTTP-based fetching directly from RoyaleAPI's web interface.

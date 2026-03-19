@@ -62,6 +62,6 @@ In addition to the ADRs, detailed implementation documentation is available in `
 ## Guiding Principles
 
 1. **Statistical models first, deep learning second.** Monte Carlo runs on day one with 200 games. Neural models need scale. Build the pipeline so both consume the same features.
-2. **Everything is queryable.** Model outputs go back into SQLite. Predictions are data, not just console output.
+2. **Everything is queryable.** Model outputs go back into PostgreSQL. Predictions are data, not just console output.
 3. **Train on the meta, fine-tune on you.** General models from top-ladder corpus, specialized via transfer learning on KrylarPrime's games.
 4. **Offline-first.** All training and inference runs locally on idle compute. No cloud dependencies, no API costs for inference.
