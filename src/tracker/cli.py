@@ -214,6 +214,8 @@ Environment variables:
                         help="Rank best single-card swaps by expected WR delta")
     parser.add_argument("--cf-samples", type=int, default=10, metavar="N",
                         help="Samples per counterfactual (default: 10)")
+    parser.add_argument("--replay-swap", nargs=3, metavar=("BATTLE_ID", "OLD_CARD", "NEW_CARD"),
+                        help="Swap card plays in a real replay and compare P(win) curves")
     # Temporal analysis
     parser.add_argument("--matchup-dive", type=str, metavar="ARCHETYPE",
                         help="Deep temporal analysis against an archetype (e.g. 'Hog Cycle')")
@@ -794,6 +796,17 @@ Environment variables:
                 )
                 reporting.print_deck_gradient(results)
 
+        if args.replay_swap:
+            battle_id, old_card, new_card = args.replay_swap
+            from tracker.ml.counterfactual import replay_swap
+            result = replay_swap(
+                session, battle_id, old_card, new_card, model_dir=_model_dir,
+            )
+            if result:
+                reporting.print_replay_swap(result)
+            else:
+                print(f"  ✗ Could not run replay swap for {battle_id}")
+
         if args.train_activity_model:
             from tracker.ml.activity_model import train_activity_model
             metrics = train_activity_model(session, model_dir=_model_dir)
@@ -865,7 +878,7 @@ Environment variables:
             args.tilt_check, args.train_tcn, args.build_features, args.train_embeddings,
             args.clusters, args.similar, args.embed_new,
             args.train_wp, args.wp_infer, args.wp_infer_new, args.wp, args.wp_critical, args.wp_cards,
-            args.train_cvae, args.counterfactual, args.deck_gradient,
+            args.train_cvae, args.counterfactual, args.deck_gradient, args.replay_swap,
             args.manifold, args.train_activity_model,
             args.matchup_dive, args.broken_cycle, args.mark_stale_replays,
         ])

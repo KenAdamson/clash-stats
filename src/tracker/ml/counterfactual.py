@@ -185,7 +185,148 @@ def _build_wp_features_from_generated(
     return features
 
 
-class CounterfactualGenerator:
+def replay_swap(
+    session: Session,
+    battle_id: str,
+    old_card: str,
+    new_card: str,
+    model_dir: Optional[Path] = None,
+    ticks: list[int] | None = None,
+) -> Optional[dict]:
+    """Counterfactual by swapping card plays in a real replay.
+
+    Takes a real game's event sequence, replaces plays of old_card with
+    new_card (which must already be in the player's deck), and reruns
+    the WP model to compare P(win) curves.
+
+    No CVAE needed — pure replay modification + WP evaluation.
+
+    Args:
+        session: Database session.
+        battle_id: Source battle.
+        old_card: Card to replace (Title Case, e.g. "Bats").
+        new_card: Card to substitute (must be in player's deck).
+        model_dir: Directory containing wp_v1.pt.
+        ticks: Optional list of specific game ticks to swap at.
+               If None, swaps all occurrences.
+
+    Returns:
+        Dict with original/modified P(win) curves and delta, or None on error.
+    """
+    if model_dir is None:
+        model_dir = Path("data/ml_models")
+
+    device = _detect_device()
+    wp_model = _load_wp_model(model_dir, device)
+    if wp_model is None:
+        logger.error("No WP model found")
+        return None
+
+    vocab = CardVocabulary(session)
+
+    # Load the real game sequence via SequenceDataset
+    from tracker.ml.sequence_dataset import SequenceDataset
+    dataset = SequenceDataset(session, vocab, battle_ids=[battle_id])
+    if len(dataset) == 0:
+        logger.warning("No replay data for battle %s", battle_id)
+        return None
+
+    card_ids_t, features_t, label = dataset[0]
+
+    # Load replay events to map indices to card names and ticks
+    from tracker.models import ReplayEvent
+    events = session.execute(
+        select(ReplayEvent)
+        .where(ReplayEvent.battle_id == battle_id, ReplayEvent.card_name != "_invalid")
+        .order_by(ReplayEvent.game_tick)
+    ).scalars().all()
+
+    old_card_kebab = old_card.lower().replace(" ", "-").replace(".", "")
+    new_idx = vocab.encode(new_card)
+    if new_idx == 1:  # UNK
+        logger.warning("Card '%s' not in vocabulary", new_card)
+        return None
+
+    # Verify new_card is in player's deck
+    player_deck, _ = _get_deck_ids(session, battle_id, vocab)
+    deck_names = [vocab.decode(int(idx)) for idx in player_deck if idx != 0]
+    if new_card not in deck_names:
+        logger.warning("'%s' is not in the player's deck: %s", new_card, deck_names)
+        return None
+
+    # Find which event indices to swap
+    swap_indices = []
+    for i, ev in enumerate(events):
+        if i >= len(card_ids_t):
+            break
+        if ev.side == "team" and ev.card_name == old_card_kebab:
+            if ticks is None or ev.game_tick in ticks:
+                swap_indices.append(i)
+
+    if not swap_indices:
+        logger.warning("No plays of '%s' (team side) found in battle %s", old_card, battle_id)
+        return None
+
+    # Build modified sequence
+    card_ids_orig = card_ids_t.clone()
+    card_ids_mod = card_ids_t.clone()
+
+    # Also update the elixir cost feature (index 13) for swapped events
+    features_mod = features_t.clone()
+    new_elixir = vocab.elixir(new_card)
+
+    for i in swap_indices:
+        card_ids_mod[i] = new_idx
+        if new_elixir is not None:
+            features_mod[i, 13] = new_elixir / 10.0
+
+    # Run WP model on both sequences
+    seq_len = len(card_ids_t)
+    lengths = torch.tensor([seq_len], dtype=torch.long, device=device)
+
+    orig_cids = card_ids_orig.unsqueeze(0).to(device)
+    orig_feats = features_t.unsqueeze(0).to(device)
+    mod_cids = card_ids_mod.unsqueeze(0).to(device)
+    mod_feats = features_mod.unsqueeze(0).to(device)
+
+    with torch.no_grad():
+        orig_logits = wp_model(orig_cids, orig_feats, lengths)
+        mod_logits = wp_model(mod_cids, mod_feats, lengths)
+
+    orig_probs = torch.sigmoid(orig_logits).squeeze(0).cpu().numpy()
+    mod_probs = torch.sigmoid(mod_logits).squeeze(0).cpu().numpy()
+
+    # Build tick list from events
+    event_ticks = [ev.game_tick for ev in events[:seq_len]]
+
+    # Compute deltas at swap points
+    swap_deltas = []
+    for i in swap_indices:
+        swap_deltas.append({
+            "tick": events[i].game_tick,
+            "original_wp": float(orig_probs[i]),
+            "modified_wp": float(mod_probs[i]),
+            "delta": float(mod_probs[i] - orig_probs[i]),
+        })
+
+    result = {
+        "battle_id": battle_id,
+        "old_card": old_card,
+        "new_card": new_card,
+        "swaps": len(swap_indices),
+        "original_final_wp": float(orig_probs[-1]),
+        "modified_final_wp": float(mod_probs[-1]),
+        "delta_final_wp": float(mod_probs[-1] - orig_probs[-1]),
+        "swap_details": swap_deltas,
+        "original_curve": orig_probs.tolist(),
+        "modified_curve": mod_probs.tolist(),
+        "ticks": event_ticks,
+    }
+
+    return result
+
+
+
     """Generates counterfactual game sequences with modified decks.
 
     Args:
