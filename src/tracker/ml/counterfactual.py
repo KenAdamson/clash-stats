@@ -53,7 +53,10 @@ def _load_cvae(
     model_dir: Path, device: torch.device,
 ) -> Optional[CounterfactualVAE]:
     """Load trained CVAE from checkpoint."""
-    cvae_path = model_dir / "cvae_v1.pt"
+    # Prefer v2 checkpoint, fall back to v1
+    cvae_path = model_dir / "cvae_v2.pt"
+    if not cvae_path.exists():
+        cvae_path = model_dir / "cvae_v1.pt"
     if not cvae_path.exists():
         return None
 

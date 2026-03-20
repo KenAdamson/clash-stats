@@ -43,6 +43,7 @@ services:
       - ./data:/app/data
       - ./.git:/app/.git:rw
       - ~/.ssh/id_ed25519:/root/.ssh/id_ed25519:ro
+    shm_size: '2gb'
     devices:
       - /dev/dri:/dev/dri
     group_add:

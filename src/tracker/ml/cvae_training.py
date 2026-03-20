@@ -9,6 +9,7 @@ Transfer learning: TCN + card_embedding from wp_v1.pt, frozen first 10 epochs.
 
 import contextlib
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Optional
@@ -37,7 +38,7 @@ CVAE_MODEL_VERSION = "cvae-v1"
 BATCH_SIZE = 256
 LEARNING_RATE = 3e-4
 WEIGHT_DECAY = 1e-4
-EPOCHS = 80
+EPOCHS = 150
 EARLY_STOPPING_PATIENCE = 15
 DROPOUT = 0.2
 VAL_FRACTION = 0.2
@@ -53,17 +54,20 @@ WEIGHT_SIDE = 0.3
 # Encoder freeze schedule
 FREEZE_EPOCHS = 10
 
+# Warmup epochs (linear LR ramp from 0 to LEARNING_RATE)
+WARMUP_EPOCHS = 5
+
 
 def _detect_device() -> torch.device:
     """Detect the best available device: XPU -> CUDA -> CPU.
 
     XPU requires intel-opencl-icd for oneDNN's SDPA primitive. Without it,
     Transformer attention fails with "could not create a primitive".
+    On XPU, IPEX_FP32_MATH_MODE=FP32 prevents NaN from bfloat16 auto-promotion.
     """
-    if hasattr(torch, "xpu") and torch.xpu.is_available():
-        device = torch.device("xpu")
-        logger.info("Using Intel XPU: %s", torch.xpu.get_device_name(0))
-        return device
+    # XPU disabled for training — fused SDPA kernel produces NaN on Intel Arc
+    # with OpenCL ICD. MATH backend alone isn't sufficient; NaN originates
+    # elsewhere in the full model graph. CPU is stable. Debug XPU separately.
     if torch.cuda.is_available():
         device = torch.device("cuda")
         logger.info("Using CUDA: %s", torch.cuda.get_device_name(0))
@@ -73,13 +77,20 @@ def _detect_device() -> torch.device:
 
 
 def _autocast_ctx(device: torch.device):
-    """Return autocast context for CUDA, no-op for XPU/CPU.
-
-    IPEX's autocast can't handle Transformer Linear ops ("could not create
-    a primitive"), so we skip mixed precision on XPU entirely.
-    """
+    """Return autocast context for CUDA, no-op for XPU/CPU."""
     if device.type == "cuda":
         return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+    return contextlib.nullcontext()
+
+
+def _sdpa_ctx(device: torch.device):
+    """Force MATH attention backend on XPU.
+
+    The fused SDPA kernel on Intel Arc (with OpenCL ICD) produces NaN
+    during training. The MATH backend is numerically stable.
+    """
+    if device.type == "xpu":
+        return torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH)
     return contextlib.nullcontext()
 
 
@@ -119,14 +130,14 @@ class CVAETrainer:
             batch_size=BATCH_SIZE,
             shuffle=True,
             collate_fn=cvae_collate_fn,
-            num_workers=0,
+            num_workers=2,
         )
         self.val_loader = DataLoader(
             Subset(dataset, val_indices),
             batch_size=BATCH_SIZE,
             shuffle=False,
             collate_fn=cvae_collate_fn,
-            num_workers=0,
+            num_workers=2,
         )
 
         self.card_criterion = nn.CrossEntropyLoss(
@@ -216,7 +227,7 @@ class CVAETrainer:
             Path to saved best model checkpoint.
         """
         self.model_dir.mkdir(parents=True, exist_ok=True)
-        best_path = self.model_dir / "cvae_v1.pt"
+        best_path = self.model_dir / "cvae_v2.pt"
 
         best_val_loss = float("inf")
         patience_counter = 0
@@ -227,7 +238,7 @@ class CVAETrainer:
             # KL annealing
             beta = min(1.0, epoch / KL_ANNEAL_EPOCHS)
 
-            # Unfreeze encoder after FREEZE_EPOCHS
+            # Unfreeze encoder after FREEZE_EPOCHS with differential LR
             if epoch == FREEZE_EPOCHS + 1:
                 unfrozen = 0
                 for name, param in self.model.encoder.named_parameters():
@@ -235,16 +246,19 @@ class CVAETrainer:
                         param.requires_grad = True
                         unfrozen += 1
                 if unfrozen > 0:
-                    # Rebuild optimizer with newly unfrozen params
-                    trainable = [p for p in self.model.parameters() if p.requires_grad]
-                    self.optimizer = AdamW(
-                        trainable, lr=LEARNING_RATE * 0.1,
-                        weight_decay=WEIGHT_DECAY,
-                    )
+                    # Differential LR: encoder at 0.01x, rest at current LR
+                    encoder_params = list(self.model.encoder.parameters())
+                    encoder_ids = {id(p) for p in encoder_params}
+                    other_params = [p for p in self.model.parameters()
+                                    if p.requires_grad and id(p) not in encoder_ids]
+                    self.optimizer = AdamW([
+                        {"params": encoder_params, "lr": LEARNING_RATE * 0.01},
+                        {"params": other_params, "lr": LEARNING_RATE},
+                    ], weight_decay=WEIGHT_DECAY)
                     self.scheduler = CosineAnnealingLR(
                         self.optimizer, T_max=EPOCHS - epoch,
                     )
-                    logger.info("Unfroze %d encoder params at epoch %d", unfrozen, epoch)
+                    logger.info("Unfroze %d encoder params at epoch %d (lr=%.1e)", unfrozen, epoch, LEARNING_RATE * 0.01)
 
             # Training
             self.model.train()
@@ -257,7 +271,7 @@ class CVAETrainer:
                 ]
 
                 self.optimizer.zero_grad()
-                with _autocast_ctx(self.device):
+                with _autocast_ctx(self.device), _sdpa_ctx(self.device):
                     outputs = self.model(card_ids, features, lengths, p_decks, o_decks)
                     loss, loss_dict = self._compute_loss(
                         outputs, card_ids, features, mask, beta,
@@ -332,7 +346,7 @@ class CVAETrainer:
                     b.to(self.device) for b in batch
                 ]
 
-                with _autocast_ctx(self.device):
+                with _autocast_ctx(self.device), _sdpa_ctx(self.device):
                     outputs = self.model(card_ids, features, lengths, p_decks, o_decks)
                     _, loss_dict = self._compute_loss(
                         outputs, card_ids, features, mask, beta,
