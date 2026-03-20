@@ -444,11 +444,24 @@ class CVAEDecoder(nn.Module):
 class CounterfactualVAE(nn.Module):
     """Full CVAE model combining encoder, decoder, and deck embedders.
 
+    v3 changes to prevent posterior collapse:
+      - Deck bottleneck: 32-dim deck embeddings compressed to 8-dim before
+        decoder, forcing z to carry game information the deck can't.
+      - Deck dropout: 30% dropout on bottlenecked deck embeddings during
+        training, ensuring decoder learns to rely on z.
+      - KL targeting: loss uses |KL - target| instead of beta*KL, explicitly
+        controlling information content of z (configured in training loop).
+
+    The encoder sees full 32-dim deck embeddings (no bottleneck) so it can
+    produce informative z. Only the decoder's view of the deck is restricted.
+
     Args:
         vocab_size: Card vocabulary size.
         latent_dim: Variational latent dimension.
-        deck_embed_dim: Deck embedding dimension.
-        dropout: Dropout rate.
+        deck_embed_dim: Deck embedding dimension (before bottleneck).
+        deck_bottleneck_dim: Deck dimension seen by decoder (after bottleneck).
+        deck_dropout: Dropout rate on bottlenecked deck embeddings.
+        dropout: General dropout rate.
     """
 
     def __init__(
@@ -456,11 +469,14 @@ class CounterfactualVAE(nn.Module):
         vocab_size: int,
         latent_dim: int = 64,
         deck_embed_dim: int = 32,
+        deck_bottleneck_dim: int = 8,
+        deck_dropout: float = 0.3,
         dropout: float = 0.2,
     ):
         super().__init__()
         self.vocab_size = vocab_size
         self.latent_dim = latent_dim
+        self.deck_bottleneck_dim = deck_bottleneck_dim
 
         self.player_deck_embedder = DeckEmbedder(
             vocab_size, output_dim=deck_embed_dim,
@@ -469,6 +485,11 @@ class CounterfactualVAE(nn.Module):
             vocab_size, output_dim=deck_embed_dim,
         )
 
+        # Bottleneck: compress deck embeddings before decoder sees them
+        self.deck_bottleneck = nn.Linear(deck_embed_dim, deck_bottleneck_dim)
+        self.deck_dropout = nn.Dropout(deck_dropout)
+
+        # Encoder sees full deck embeddings (no bottleneck)
         self.encoder = CVAEEncoder(
             vocab_size=vocab_size,
             dropout=dropout,
@@ -476,12 +497,24 @@ class CounterfactualVAE(nn.Module):
             latent_dim=latent_dim,
         )
 
+        # Decoder sees bottlenecked deck embeddings
         self.decoder = CVAEDecoder(
             vocab_size=vocab_size,
             dropout=dropout,
-            deck_embed_dim=deck_embed_dim,
+            deck_embed_dim=deck_bottleneck_dim,
             latent_dim=latent_dim,
         )
+
+    def bottleneck_deck(self, deck_emb: torch.Tensor) -> torch.Tensor:
+        """Apply deck bottleneck (+ dropout if training) for decoder input.
+
+        Args:
+            deck_emb: (batch, deck_embed_dim) full deck embedding.
+
+        Returns:
+            (batch, deck_bottleneck_dim) compressed deck embedding.
+        """
+        return self.deck_dropout(self.deck_bottleneck(deck_emb))
 
     @staticmethod
     def reparameterize(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
@@ -513,15 +546,20 @@ class CounterfactualVAE(nn.Module):
         player_deck_emb = self.player_deck_embedder(player_deck_ids)
         opponent_deck_emb = self.opponent_deck_embedder(opponent_deck_ids)
 
+        # Encoder sees full deck embeddings
         mu, logvar = self.encoder(
             card_ids, features, lengths,
             player_deck_emb, opponent_deck_emb,
         )
         z = self.reparameterize(mu, logvar)
 
+        # Decoder sees bottlenecked + dropped-out deck embeddings
+        p_deck_bn = self.deck_dropout(self.deck_bottleneck(player_deck_emb))
+        o_deck_bn = self.deck_dropout(self.deck_bottleneck(opponent_deck_emb))
+
         decoder_out = self.decoder(
             card_ids, features, lengths,
-            z, player_deck_emb, opponent_deck_emb,
+            z, p_deck_bn, o_deck_bn,
         )
 
         decoder_out["mu"] = mu
@@ -536,6 +574,7 @@ class CounterfactualVAE(nn.Module):
         device: torch.device,
         freeze_encoder: bool = True,
         dropout: float = 0.2,
+        **kwargs,
     ) -> "CounterfactualVAE":
         """Initialize CVAE with encoder weights from a trained WP model.
 
@@ -547,6 +586,8 @@ class CounterfactualVAE(nn.Module):
             device: Target device.
             freeze_encoder: Freeze TCN weights initially.
             dropout: Dropout rate.
+            **kwargs: Additional args passed to CounterfactualVAE (e.g.
+                deck_bottleneck_dim, deck_dropout).
 
         Returns:
             CounterfactualVAE with transferred encoder weights.
@@ -554,7 +595,7 @@ class CounterfactualVAE(nn.Module):
         checkpoint = torch.load(wp_checkpoint_path, map_location=device, weights_only=True)
         saved_vocab = checkpoint.get("vocab_size", vocab_size)
 
-        model = cls(vocab_size=saved_vocab, dropout=dropout)
+        model = cls(vocab_size=saved_vocab, dropout=dropout, **kwargs)
 
         # Transfer card_embedding and TCN weights to encoder
         source_state = checkpoint["model_state_dict"]

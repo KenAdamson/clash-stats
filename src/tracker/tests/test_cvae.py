@@ -266,8 +266,8 @@ class TestCounterfactualVAE:
         z = torch.randn(batch, 64)
         p_deck = torch.randint(2, 100, (batch, 8))
         o_deck = torch.randint(2, 100, (batch, 8))
-        p_emb = cvae.player_deck_embedder(p_deck)
-        o_emb = cvae.opponent_deck_embedder(o_deck)
+        p_emb = cvae.bottleneck_deck(cvae.player_deck_embedder(p_deck))
+        o_emb = cvae.bottleneck_deck(cvae.opponent_deck_embedder(o_deck))
 
         cvae.eval()
         gen = cvae.decoder.generate(

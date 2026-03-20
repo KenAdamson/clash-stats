@@ -53,17 +53,20 @@ def _load_cvae(
     model_dir: Path, device: torch.device,
 ) -> Optional[CounterfactualVAE]:
     """Load trained CVAE from checkpoint."""
-    # Prefer v2 checkpoint, fall back to v1
-    cvae_path = model_dir / "cvae_v2.pt"
-    if not cvae_path.exists():
-        cvae_path = model_dir / "cvae_v1.pt"
-    if not cvae_path.exists():
+    # Prefer v3 -> v2 -> v1
+    for name in ["cvae_v3.pt", "cvae_v2.pt", "cvae_v1.pt"]:
+        cvae_path = model_dir / name
+        if cvae_path.exists():
+            break
+    else:
         return None
 
     checkpoint = torch.load(cvae_path, map_location=device, weights_only=True)
     model = CounterfactualVAE(
         vocab_size=checkpoint["vocab_size"],
         latent_dim=checkpoint.get("latent_dim", 64),
+        deck_bottleneck_dim=checkpoint.get("deck_bottleneck_dim", 32),
+        deck_dropout=0.0,  # no dropout at inference
     )
     model.load_state_dict(checkpoint["model_state_dict"])
     model.to(device)
@@ -428,8 +431,11 @@ def replay_swap(
             logger.warning("Card '%s' not found in player deck for battle %s", old_card, battle_id)
             return None
 
-        # New deck embedding
-        modified_deck_emb = self.cvae.player_deck_embedder(modified_deck)
+        # New deck embedding (bottlenecked for decoder)
+        modified_deck_emb = self.cvae.bottleneck_deck(
+            self.cvae.player_deck_embedder(modified_deck)
+        )
+        opponent_deck_emb_bn = self.cvae.bottleneck_deck(opponent_deck_emb)
 
         # Sample and decode
         cf_wps = []
@@ -437,7 +443,7 @@ def replay_swap(
             z = CounterfactualVAE.reparameterize(mu, logvar)
 
             generated = self.cvae.decoder.generate(
-                z, modified_deck_emb, opponent_deck_emb,
+                z, modified_deck_emb, opponent_deck_emb_bn,
                 end_token_id=self.end_token_id,
                 player_deck_ids=modified_deck,
             )

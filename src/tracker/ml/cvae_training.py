@@ -43,8 +43,12 @@ EARLY_STOPPING_PATIENCE = 15
 DROPOUT = 0.2
 VAL_FRACTION = 0.2
 
-# KL annealing
-KL_ANNEAL_EPOCHS = 20
+# KL targeting: instead of beta*KL, use |KL - target|.
+# Target in nats — controls how much information z carries.
+# Too low = posterior collapse. Too high = noisy z, poor reconstruction.
+# 15 nats across 64 latent dims ≈ 0.23 nats/dim, a moderate information budget.
+KL_TARGET = 15.0
+KL_ANNEAL_EPOCHS = 20  # ramp KL weight from 0->1 over this many epochs
 
 # Loss weights
 WEIGHT_TICK = 0.5
@@ -192,10 +196,17 @@ class CVAETrainer:
         target_side = target_features[:, :, 0]  # side is feature index 0
         side_loss = (F.binary_cross_entropy_with_logits(outputs["side_logit"], target_side, reduction="none") * mask).sum() / mask.sum().clamp(min=1)
 
-        # KL divergence
+        # KL divergence with targeting
+        # Raw KL: sum over latent dims, mean over batch
         mu = outputs["mu"]
         logvar = outputs["logvar"]
-        kl_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+        kl_per_dim = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp())  # (batch, latent)
+        kl_total = kl_per_dim.sum(dim=1).mean()  # scalar, in nats
+
+        # KL targeting: penalize deviation from target in both directions.
+        # Ramp the KL weight from 0->1 over KL_ANNEAL_EPOCHS to let
+        # reconstruction stabilize first.
+        kl_loss = torch.abs(kl_total - KL_TARGET)
 
         total = card_loss + WEIGHT_TICK * tick_loss + WEIGHT_POS * pos_loss + WEIGHT_SIDE * side_loss + beta * kl_loss
 
@@ -204,7 +215,8 @@ class CVAETrainer:
             "tick": tick_loss.item(),
             "pos": pos_loss.item(),
             "side": side_loss.item(),
-            "kl": kl_loss.item(),
+            "kl": kl_total.item(),
+            "kl_target_loss": kl_loss.item(),
             "beta": beta,
             "total": total.item(),
         }
@@ -216,7 +228,7 @@ class CVAETrainer:
             Path to saved best model checkpoint.
         """
         self.model_dir.mkdir(parents=True, exist_ok=True)
-        best_path = self.model_dir / "cvae_v2.pt"
+        best_path = self.model_dir / "cvae_v3.pt"
 
         best_val_loss = float("inf")
         patience_counter = 0
@@ -285,11 +297,11 @@ class CVAETrainer:
             elapsed = time.time() - t0
             logger.info(
                 "Epoch %d/%d [%.1fs] beta=%.2f — "
-                "train: total=%.4f card=%.4f kl=%.4f | "
-                "val: total=%.4f card=%.4f kl=%.4f",
+                "train: total=%.4f card=%.4f kl=%.2f (target=%d) | "
+                "val: total=%.4f card=%.4f kl=%.2f",
                 epoch, EPOCHS, elapsed, beta,
                 epoch_losses.get("total", 0), epoch_losses.get("card", 0),
-                epoch_losses.get("kl", 0),
+                epoch_losses.get("kl", 0), KL_TARGET,
                 val_loss, val_losses.get("card", 0), val_losses.get("kl", 0),
             )
 
@@ -301,9 +313,11 @@ class CVAETrainer:
                     "model_state_dict": self.model.state_dict(),
                     "vocab_size": self.model.vocab_size,
                     "latent_dim": self.model.latent_dim,
+                    "deck_bottleneck_dim": self.model.deck_bottleneck_dim,
                     "epoch": epoch,
                     "val_loss": val_loss,
                     "beta": beta,
+                    "kl_target": KL_TARGET,
                     "training_cutoff": self.training_cutoff,
                 }, best_path)
                 logger.info("  -> New best model saved (val_loss=%.4f)", val_loss)
