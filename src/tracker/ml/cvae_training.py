@@ -65,10 +65,10 @@ def _detect_device() -> torch.device:
     Transformer attention fails with "could not create a primitive".
     On XPU, IPEX_FP32_MATH_MODE=FP32 prevents NaN from bfloat16 auto-promotion.
     """
-    if hasattr(torch, "xpu") and torch.xpu.is_available():
-        device = torch.device("xpu")
-        logger.info("Using Intel XPU: %s", torch.xpu.get_device_name(0))
-        return device
+    # XPU disabled for training — oneDNN accumulates numerical errors over
+    # ~100+ optimizer steps, producing NaN regardless of shuffle/validation/
+    # grad clip settings. CUDA and CPU are stable. XPU inference works fine.
+    # TODO: re-evaluate when T4 arrives for CUDA baseline comparison.
     if torch.cuda.is_available():
         device = torch.device("cuda")
         logger.info("Using CUDA: %s", torch.cuda.get_device_name(0))
@@ -296,8 +296,13 @@ class CVAETrainer:
             for k in epoch_losses:
                 epoch_losses[k] /= max(n_batches, 1)
 
-            # Validation
-            val_loss, val_losses = self._evaluate(beta)
+            # Validation — skip on XPU (val data triggers NaN in oneDNN
+            # even without eval mode). Use training loss for early stopping.
+            if self.device.type == "xpu":
+                val_loss = epoch_losses.get("total", 0)
+                val_losses = epoch_losses
+            else:
+                val_loss, val_losses = self._evaluate(beta)
 
             elapsed = time.time() - t0
             logger.info(
