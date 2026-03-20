@@ -54,9 +54,6 @@ WEIGHT_SIDE = 0.3
 # Encoder freeze schedule
 FREEZE_EPOCHS = 10
 
-# Warmup epochs (linear LR ramp from 0 to LEARNING_RATE)
-WARMUP_EPOCHS = 5
-
 
 def _detect_device() -> torch.device:
     """Detect the best available device: XPU -> CUDA -> CPU.
@@ -84,15 +81,6 @@ def _autocast_ctx(device: torch.device):
     return contextlib.nullcontext()
 
 
-def _sdpa_ctx(device: torch.device):
-    """Force MATH attention backend on XPU.
-
-    The fused SDPA kernel on Intel Arc (with OpenCL ICD) produces NaN
-    during training. The MATH backend is numerically stable.
-    """
-    if device.type == "xpu":
-        return torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH)
-    return contextlib.nullcontext()
 
 
 class CVAETrainer:
@@ -126,23 +114,19 @@ class CVAETrainer:
         train_indices = list(range(n_train))
         val_indices = list(range(n_train, n))
 
-        # Sequential batching on XPU — any form of shuffling (DataLoader shuffle,
-        # custom samplers with randperm) triggers NaN in oneDNN after ~126 batches.
-        # Sequential order is stable for 188+ batches. Time-ordered data provides
-        # natural variation; the CPU v1 model converged fine without shuffle.
         self.train_loader = DataLoader(
             Subset(dataset, train_indices),
             batch_size=BATCH_SIZE,
-            shuffle=False,
+            shuffle=True,
             collate_fn=cvae_collate_fn,
-            num_workers=0,
+            num_workers=6,
         )
         self.val_loader = DataLoader(
             Subset(dataset, val_indices),
             batch_size=BATCH_SIZE,
             shuffle=False,
             collate_fn=cvae_collate_fn,
-            num_workers=0,
+            num_workers=6,
         )
 
         self.card_criterion = nn.CrossEntropyLoss(
@@ -244,8 +228,7 @@ class CVAETrainer:
             beta = min(1.0, epoch / KL_ANNEAL_EPOCHS)
 
             # Unfreeze encoder after FREEZE_EPOCHS with differential LR
-            # Skip on XPU — unfreezing causes NaN even at lr=3e-6
-            if epoch == FREEZE_EPOCHS + 1 and self.device.type != "xpu":
+            if epoch == FREEZE_EPOCHS + 1:
                 unfrozen = 0
                 for name, param in self.model.encoder.named_parameters():
                     if not param.requires_grad:
@@ -277,13 +260,13 @@ class CVAETrainer:
                 ]
 
                 self.optimizer.zero_grad()
-                if True:  # no autocast/sdpa wrapper — clean on XPU
+                with _autocast_ctx(self.device):
                     outputs = self.model(card_ids, features, lengths, p_decks, o_decks)
                     loss, loss_dict = self._compute_loss(
                         outputs, card_ids, features, mask, beta,
                     )
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 0.1)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
                 self.optimizer.step()
 
                 for k, v in loss_dict.items():
@@ -296,13 +279,8 @@ class CVAETrainer:
             for k in epoch_losses:
                 epoch_losses[k] /= max(n_batches, 1)
 
-            # Validation — skip on XPU (val data triggers NaN in oneDNN
-            # even without eval mode). Use training loss for early stopping.
-            if self.device.type == "xpu":
-                val_loss = epoch_losses.get("total", 0)
-                val_losses = epoch_losses
-            else:
-                val_loss, val_losses = self._evaluate(beta)
+            # Validation
+            val_loss, val_losses = self._evaluate(beta)
 
             elapsed = time.time() - t0
             logger.info(
@@ -315,7 +293,7 @@ class CVAETrainer:
                 val_loss, val_losses.get("card", 0), val_losses.get("kl", 0),
             )
 
-            # Early stopping on val loss (or train loss on XPU)
+            # Early stopping on val loss
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 patience_counter = 0
@@ -347,11 +325,7 @@ class CVAETrainer:
         Returns:
             (total_loss, loss_dict)
         """
-        # Skip model.eval() on XPU — BatchNorm running stats get corrupted
-        # in eval mode on Intel Arc, poisoning subsequent train() forward passes.
-        # torch.no_grad() is sufficient for disabling gradient computation.
-        if self.device.type != "xpu":
-            self.model.eval()
+        self.model.eval()
         total_losses: dict[str, float] = {}
         n_batches = 0
 
@@ -361,7 +335,7 @@ class CVAETrainer:
                     b.to(self.device) for b in batch
                 ]
 
-                if True:  # no autocast/sdpa wrapper — clean on XPU
+                with _autocast_ctx(self.device):
                     outputs = self.model(card_ids, features, lengths, p_decks, o_decks)
                     _, loss_dict = self._compute_loss(
                         outputs, card_ids, features, mask, beta,
