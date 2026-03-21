@@ -14,6 +14,10 @@ PUSH_TARGET="${STATS_REPO_URL:-$REMOTE}"
 
 cd "$REPO_DIR"
 
+# Container runs as root but .git is volume-mounted from host user.
+# Ensure new git objects are group-writable so the host user can commit.
+umask 002
+
 # Fetch all endpoints (mode=ladder filters out war/boat games)
 MODE="?mode=ladder"
 overview=$(curl -sf "$API_BASE/api/overview$MODE")
