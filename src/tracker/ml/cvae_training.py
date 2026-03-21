@@ -46,8 +46,8 @@ VAL_FRACTION = 0.2
 # KL targeting: instead of beta*KL, use |KL - target|.
 # Target in nats — controls how much information z carries.
 # Too low = posterior collapse. Too high = noisy z, poor reconstruction.
-# 15 nats across 64 latent dims ≈ 0.23 nats/dim, a moderate information budget.
-KL_TARGET = 15.0
+# 12 nats matches the natural val KL level observed in v3 training.
+KL_TARGET = 12.0
 KL_ANNEAL_EPOCHS = 20  # ramp KL weight from 0->1 over this many epochs
 
 # Loss weights
@@ -305,9 +305,12 @@ class CVAETrainer:
                 val_loss, val_losses.get("card", 0), val_losses.get("kl", 0),
             )
 
-            # Early stopping on val loss
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
+            # Early stopping on val card reconstruction loss only — the KL
+            # target penalty inflates val total loss even when reconstruction
+            # is improving (because val KL lags behind train KL).
+            val_card_loss = val_losses.get("card", val_loss)
+            if val_card_loss < best_val_loss:
+                best_val_loss = val_card_loss
                 patience_counter = 0
                 torch.save({
                     "model_state_dict": self.model.state_dict(),

@@ -43,7 +43,7 @@ DROPOUT = 0.2
 VAL_FRACTION = 0.2
 
 # KL targeting
-KL_TARGET = 15.0
+KL_TARGET = 12.0
 KL_ANNEAL_EPOCHS = 20
 
 # Loss weights
@@ -302,8 +302,11 @@ def main():
             val_loss, val_losses.get("card", 0), val_losses.get("kl", 0),
         )
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        # Early stop on card reconstruction only — KL target penalty
+        # inflates total val loss even when reconstruction is improving
+        val_card_loss = val_losses.get("card", val_loss)
+        if val_card_loss < best_val_loss:
+            best_val_loss = val_card_loss
             patience_counter = 0
             torch.save({
                 "model_state_dict": model.state_dict(),
