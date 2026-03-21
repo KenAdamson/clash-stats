@@ -191,6 +191,8 @@ Environment variables:
                         help="Unfreeze TCN encoder during WP training (full fine-tune)")
     parser.add_argument("--auto-promote", action="store_true",
                         help="Auto-promote trained model if accuracy improves (with --train-wp)")
+    parser.add_argument("--lazy", action="store_true",
+                        help="Use lazy DB-backed dataset (low memory, slower per epoch)")
     # Model registry
     parser.add_argument("--promote-model", nargs=2, metavar=("TYPE", "VERSION"),
                         help="Promote a candidate model to production (e.g. --promote-model wp 3)")
@@ -720,7 +722,7 @@ Environment variables:
         if args.train_wp:
             from tracker.ml.wp_training import train_wp
             train_wp(session, model_dir=_model_dir, unfreeze_encoder=args.wp_unfreeze,
-                     auto_promote=args.auto_promote)
+                     auto_promote=args.auto_promote, lazy=args.lazy)
 
         if args.wp_infer:
             from tracker.ml.wp_training import infer_wp

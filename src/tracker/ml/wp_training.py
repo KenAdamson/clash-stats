@@ -55,7 +55,7 @@ def _resolve_wp_path(session: Session, model_dir: Path) -> Optional[Path]:
     return None
 
 # Training hyperparameters
-BATCH_SIZE = 256
+BATCH_SIZE = 4096
 LEARNING_RATE = 5e-4
 WEIGHT_DECAY = 1e-4
 EPOCHS = 50
@@ -92,7 +92,7 @@ class WPTrainer:
     def __init__(
         self,
         model: WinProbabilityModel,
-        dataset: SequenceDataset,
+        dataset,
         device: torch.device,
         model_dir: Path,
         class_weight: Optional[float] = None,
@@ -109,27 +109,43 @@ class WPTrainer:
         train_indices = list(range(n_train))
         val_indices = list(range(n_train, n))
 
-        self.train_loader = DataLoader(
-            Subset(dataset, train_indices),
-            batch_size=BATCH_SIZE,
-            shuffle=True,
-            collate_fn=wp_collate_fn,
-            num_workers=0,
-        )
-        self.val_loader = DataLoader(
-            Subset(dataset, val_indices),
-            batch_size=BATCH_SIZE,
-            shuffle=False,
-            collate_fn=wp_collate_fn,
-            num_workers=0,
-        )
-        self.full_loader = DataLoader(
-            dataset,
-            batch_size=BATCH_SIZE,
-            shuffle=False,
-            collate_fn=wp_collate_fn,
-            num_workers=0,
-        )
+        # Use LazyBatchLoader for lazy datasets, DataLoader for in-memory
+        from tracker.ml.lazy_dataset import LazySequenceDataset, LazyBatchLoader
+        if isinstance(dataset, LazySequenceDataset):
+            self.train_loader = LazyBatchLoader(
+                dataset, train_indices, batch_size=BATCH_SIZE,
+                shuffle=True, collate_fn=wp_collate_fn,
+            )
+            self.val_loader = LazyBatchLoader(
+                dataset, val_indices, batch_size=BATCH_SIZE,
+                shuffle=False, collate_fn=wp_collate_fn,
+            )
+            self.full_loader = LazyBatchLoader(
+                dataset, list(range(n)), batch_size=BATCH_SIZE,
+                shuffle=False, collate_fn=wp_collate_fn,
+            )
+        else:
+            self.train_loader = DataLoader(
+                Subset(dataset, train_indices),
+                batch_size=BATCH_SIZE,
+                shuffle=True,
+                collate_fn=wp_collate_fn,
+                num_workers=0,
+            )
+            self.val_loader = DataLoader(
+                Subset(dataset, val_indices),
+                batch_size=BATCH_SIZE,
+                shuffle=False,
+                collate_fn=wp_collate_fn,
+                num_workers=0,
+            )
+            self.full_loader = DataLoader(
+                dataset,
+                batch_size=BATCH_SIZE,
+                shuffle=False,
+                collate_fn=wp_collate_fn,
+                num_workers=0,
+            )
 
         # Class-weighted BCE for imbalanced win/loss
         pos_weight = torch.tensor([class_weight], device=device) if class_weight else None
@@ -604,6 +620,7 @@ def train_wp(
     model_dir: Optional[Path] = None,
     unfreeze_encoder: bool = False,
     auto_promote: bool = False,
+    lazy: bool = False,
 ) -> None:
     """Full win probability pipeline: train, register, optionally promote + infer.
 
@@ -635,14 +652,25 @@ def train_wp(
     logger.info("Vocabulary size: %d", vocab.size)
 
     # 2. Create dataset
-    dataset = SequenceDataset(session, vocab)
+    if lazy:
+        import os
+        from tracker.ml.lazy_dataset import LazySequenceDataset
+        db_url = os.environ.get("DATABASE_URL", str(session.bind.url))
+        dataset = LazySequenceDataset(session, vocab, db_url=db_url)
+        print(f"  → Lazy dataset: {len(dataset)} games (DB-backed, low memory)")
+    else:
+        dataset = SequenceDataset(session, vocab)
     if len(dataset) < 50:
         logger.error("Need at least 50 games with replay data (have %d)", len(dataset))
         print(f"  ✗ Need at least 50 games with replay data (have {len(dataset)})")
         return
 
     # 3. Compute class weight for imbalanced data
-    labels = [s[2] for s in dataset._samples]
+    if lazy:
+        # Lazy dataset stores labels directly
+        labels = dataset._labels
+    else:
+        labels = [s[2] for s in dataset._samples]
     n_wins = sum(labels)
     n_losses = len(labels) - n_wins
     if n_losses > 0 and n_wins > 0:
