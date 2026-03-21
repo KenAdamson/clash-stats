@@ -31,6 +31,29 @@ logger = logging.getLogger(__name__)
 
 WP_MODEL_VERSION = "wp-v1"
 
+
+def _resolve_wp_path(session: Session, model_dir: Path) -> Optional[Path]:
+    """Resolve the production WP model path.
+
+    Checks the model registry first, falls back to wp_v1.pt for
+    backwards compatibility with pre-registry checkpoints.
+    """
+    try:
+        from tracker.ml.model_registry import get_production_filename
+        prod_filename = get_production_filename(session, "wp")
+        if prod_filename:
+            path = model_dir / prod_filename
+            if path.exists():
+                return path
+    except Exception:
+        pass  # Registry table may not exist yet
+
+    # Fallback: scan for latest wp_vN.pt
+    candidates = sorted(model_dir.glob("wp_v*.pt"), reverse=True)
+    if candidates:
+        return candidates[0]
+    return None
+
 # Training hyperparameters
 BATCH_SIZE = 256
 LEARNING_RATE = 5e-4
@@ -124,14 +147,18 @@ class WPTrainer:
             n_train, n_val, f"{n_trainable:,}", f"{n_total:,}",
         )
 
-    def train(self) -> Path:
+    def train(self, checkpoint_path: Optional[Path] = None) -> Path:
         """Run training loop with early stopping.
+
+        Args:
+            checkpoint_path: Override path for saving checkpoint.
+                If None, uses model_dir / "wp_v1.pt" for backwards compat.
 
         Returns:
             Path to saved best model checkpoint.
         """
         self.model_dir.mkdir(parents=True, exist_ok=True)
-        best_path = self.model_dir / "wp_v1.pt"
+        best_path = checkpoint_path or (self.model_dir / "wp_v1.pt")
 
         best_val_loss = float("inf")
         patience_counter = 0
@@ -417,8 +444,8 @@ def infer_wp(session: Session, model_dir: Optional[Path] = None) -> None:
     if model_dir is None:
         model_dir = Path("data/ml_models")
 
-    wp_path = model_dir / "wp_v1.pt"
-    if not wp_path.exists():
+    wp_path = _resolve_wp_path(session, model_dir)
+    if not wp_path:
         print("  ✗ No trained WP model found. Run --train-wp first.")
         return
 
@@ -434,12 +461,15 @@ def infer_wp(session: Session, model_dir: Optional[Path] = None) -> None:
     model.eval()
 
     logger.info(
-        "Loaded WP checkpoint from epoch %d (val_loss=%.4f, val_acc=%.3f)",
-        checkpoint["epoch"], checkpoint["val_loss"], checkpoint["val_acc"],
+        "Loaded WP checkpoint %s epoch %d (val_loss=%.4f, val_acc=%.3f)",
+        wp_path.name, checkpoint["epoch"], checkpoint["val_loss"], checkpoint["val_acc"],
     )
 
-    # Load calibrator if available
-    calibrator_path = model_dir / "wp_calibrator.json"
+    # Load calibrator — try versioned name first, then generic
+    calibrator_stem = wp_path.stem  # e.g. "wp_v2"
+    calibrator_path = model_dir / f"{calibrator_stem}_calibrator.json"
+    if not calibrator_path.exists():
+        calibrator_path = model_dir / "wp_calibrator.json"
     calibrator = None
     if calibrator_path.exists():
         calibrator = PlattCalibrator.load(calibrator_path)
@@ -503,8 +533,8 @@ def infer_wp_incremental(session: Session, model_dir: Optional[Path] = None) -> 
     if model_dir is None:
         model_dir = Path("data/ml_models")
 
-    wp_path = model_dir / "wp_v1.pt"
-    if not wp_path.exists():
+    wp_path = _resolve_wp_path(session, model_dir)
+    if not wp_path:
         return -1
 
     # Find games with replay events but no WP summary
@@ -537,8 +567,11 @@ def infer_wp_incremental(session: Session, model_dir: Optional[Path] = None) -> 
     model.to(device)
     model.eval()
 
-    # Load calibrator
-    calibrator_path = model_dir / "wp_calibrator.json"
+    # Load calibrator — try versioned name first, then generic
+    calibrator_stem = wp_path.stem
+    calibrator_path = model_dir / f"{calibrator_stem}_calibrator.json"
+    if not calibrator_path.exists():
+        calibrator_path = model_dir / "wp_calibrator.json"
     calibrator = None
     if calibrator_path.exists():
         calibrator = PlattCalibrator.load(calibrator_path)
@@ -570,18 +603,31 @@ def train_wp(
     session: Session,
     model_dir: Optional[Path] = None,
     unfreeze_encoder: bool = False,
+    auto_promote: bool = False,
 ) -> None:
-    """Full win probability pipeline: train, infer, store.
+    """Full win probability pipeline: train, register, optionally promote + infer.
+
+    Trains to a versioned checkpoint (wp_vN.pt), registers as a candidate
+    in the model registry, and optionally promotes if accuracy improves
+    over the current production model.
 
     Args:
         session: Database session.
         model_dir: Directory for model files.
         unfreeze_encoder: If True, fine-tune the full model including TCN encoder.
-            Requires more data (~50K+ games) but can improve accuracy.
+        auto_promote: If True, promote and run inference if accuracy improves.
     """
+    import time as _time
+    from tracker.ml.model_registry import (
+        register_model, get_production, promote, next_version,
+    )
+    from tracker.models import Battle
+    from sqlalchemy import func
+
     if model_dir is None:
         model_dir = Path("data/ml_models")
 
+    t_start = _time.time()
     device = _detect_device()
 
     # 1. Build vocabulary
@@ -593,7 +639,6 @@ def train_wp(
     if len(dataset) < 50:
         logger.error("Need at least 50 games with replay data (have %d)", len(dataset))
         print(f"  ✗ Need at least 50 games with replay data (have {len(dataset)})")
-        print("    Run --fetch-replays first")
         return
 
     # 3. Compute class weight for imbalanced data
@@ -606,85 +651,154 @@ def train_wp(
     else:
         class_weight = None
 
-    # 4. Initialize model — try transfer learning from ADR-003 TCN
-    tcn_path = model_dir / "tcn_v1.pt"
-    freeze = not unfreeze_encoder
-    if tcn_path.exists():
-        logger.info("Loading pretrained TCN encoder from %s", tcn_path)
-        if unfreeze_encoder:
-            print("  → Transfer learning from ADR-003 TCN encoder (UNFROZEN — full fine-tune)")
-        else:
-            print("  → Transfer learning from ADR-003 TCN encoder")
+    # 4. Determine version number
+    version = next_version(session, "wp")
+    filename = f"wp_v{version}.pt"
+    checkpoint_path = model_dir / filename
+    print(f"  → Training WP v{version} ({filename})")
+
+    # 5. Initialize model — try transfer from current production or TCN
+    prod = get_production(session, "wp")
+    if prod and (model_dir / prod.filename).exists():
+        logger.info("Transfer learning from production %s", prod.filename)
+        print(f"  → Transfer learning from production {prod.filename}")
         model = WinProbabilityModel.from_pretrained_tcn(
-            str(tcn_path), vocab.size, device,
-            freeze_encoder=freeze, dropout=DROPOUT,
+            str(model_dir / prod.filename), vocab.size, device,
+            freeze_encoder=not unfreeze_encoder, dropout=DROPOUT,
         )
     else:
-        logger.info("No pretrained TCN found — training from scratch")
-        print("  → Training from scratch (no TCN checkpoint)")
-        model = WinProbabilityModel(vocab_size=vocab.size, dropout=DROPOUT)
+        tcn_path = model_dir / "tcn_v1.pt"
+        freeze = not unfreeze_encoder
+        if tcn_path.exists():
+            logger.info("Loading pretrained TCN encoder from %s", tcn_path)
+            print("  → Transfer learning from ADR-003 TCN encoder")
+            model = WinProbabilityModel.from_pretrained_tcn(
+                str(tcn_path), vocab.size, device,
+                freeze_encoder=freeze, dropout=DROPOUT,
+            )
+        else:
+            # Fallback: try any existing wp checkpoint
+            existing = _resolve_wp_path(session, model_dir)
+            if existing:
+                logger.info("Transfer learning from %s", existing)
+                print(f"  → Transfer learning from {existing.name}")
+                model = WinProbabilityModel.from_pretrained_tcn(
+                    str(existing), vocab.size, device,
+                    freeze_encoder=freeze, dropout=DROPOUT,
+                )
+            else:
+                logger.info("No pretrained model found — training from scratch")
+                print("  → Training from scratch")
+                model = WinProbabilityModel(vocab_size=vocab.size, dropout=DROPOUT)
 
     n_total = sum(p.numel() for p in model.parameters())
     n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    logger.info("Model: %s total params, %s trainable", f"{n_total:,}", f"{n_trainable:,}")
 
-    # 5. Train
+    # 6. Train
     trainer = WPTrainer(model, dataset, device, model_dir, class_weight=class_weight)
-    best_path = trainer.train()
+    best_path = trainer.train(checkpoint_path=checkpoint_path)
 
-    # 6. Load best model for inference
+    # 7. Load best model
     checkpoint = torch.load(best_path, map_location=device, weights_only=True)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.to(device)
     trainer.model = model
-    logger.info(
-        "Loaded best model from epoch %d (val_loss=%.4f, val_acc=%.3f)",
-        checkpoint["epoch"], checkpoint["val_loss"], checkpoint["val_acc"],
-    )
 
-    # 6b. Fit Platt scaling calibration on validation set
+    # 8. Fit Platt scaling calibration
     val_logits, val_labels = trainer.collect_val_logits()
     calibrator = PlattCalibrator().fit(val_logits, val_labels)
-    calibrator_path = model_dir / "wp_calibrator.json"
+    calibrator_path = model_dir / f"wp_v{version}_calibrator.json"
     calibrator.save(calibrator_path)
-    print(f"  ✓ Platt calibration: a={calibrator.a:.4f}, b={calibrator.b:.4f}")
 
-    # 7. Derive battle_ids in dataset order using JOIN (avoids slow correlated subquery)
-    battle_ids = session.execute(
-        sa_text("""
-            SELECT b.battle_id
-            FROM battles b
-            JOIN (
-                SELECT battle_id FROM replay_events
-                WHERE card_name != '_invalid'
-                GROUP BY battle_id HAVING COUNT(*) >= :min_events
-            ) re_counts ON re_counts.battle_id = b.battle_id
-            WHERE b.battle_type = 'PvP' AND b.result IN ('win', 'loss')
-            ORDER BY b.battle_time
-        """),
-        {"min_events": MIN_EVENTS},
-    ).scalars().all()
-    battle_ids = list(battle_ids)[:len(dataset)]
+    wall_time = int(_time.time() - t_start)
+    cutoff = session.query(func.max(Battle.battle_time)).scalar()
 
-    # 8. Clear old WP data for this model version
-    session.execute(
-        sa_text("DELETE FROM win_probability WHERE model_version = :v"),
-        {"v": WP_MODEL_VERSION},
+    # 9. Register in model registry
+    mv = register_model(
+        session,
+        model_type="wp",
+        filename=filename,
+        status="candidate",
+        epochs=EPOCHS,
+        best_epoch=checkpoint["epoch"],
+        training_games=len(dataset),
+        training_cutoff=cutoff.isoformat() if cutoff else None,
+        wall_time_seconds=wall_time,
+        device=str(device),
+        val_loss=checkpoint["val_loss"],
+        val_accuracy=checkpoint["val_acc"],
+        metrics_json={
+            "platt_a": calibrator.a,
+            "platt_b": calibrator.b,
+            "calibrator_path": str(calibrator_path),
+            "n_wins": int(n_wins),
+            "n_losses": int(n_losses),
+            "n_total_params": n_total,
+            "n_trainable_params": n_trainable,
+        },
     )
-    session.execute(
-        sa_text("DELETE FROM game_wp_summary WHERE model_version = :v"),
-        {"v": WP_MODEL_VERSION},
-    )
+
+    # 10. Auto-promote if better than current production
+    promoted = False
+    if auto_promote and prod:
+        if checkpoint["val_acc"] > (prod.val_accuracy or 0):
+            delta = checkpoint["val_acc"] - (prod.val_accuracy or 0)
+            mv.improvement_delta = delta
+            mv.prev_version_id = prod.id
+            promote(session, "wp", version)
+            promoted = True
+            print(f"  ✓ Promoted v{version} (acc {checkpoint['val_acc']:.3f} > "
+                  f"v{prod.version} acc {prod.val_accuracy:.3f}, +{delta:.3f})")
+        else:
+            print(f"  · v{version} acc {checkpoint['val_acc']:.3f} <= "
+                  f"v{prod.version} acc {prod.val_accuracy:.3f} — kept as candidate")
+    elif auto_promote and not prod:
+        # No production model — auto-promote the first one
+        promote(session, "wp", version)
+        promoted = True
+        print(f"  ✓ Promoted v{version} (first model)")
+    else:
+        print(f"  → Registered as candidate v{version} — use --promote-model wp {version} to promote")
+
     session.commit()
 
-    # 9. Run inference and store
-    print(f"  → Running WP inference on {len(battle_ids)} games...")
-    processed = trainer.run_inference(
-        session, dataset, battle_ids, vocab, calibrator=calibrator,
-    )
+    # 11. Run inference only if promoted
+    if promoted:
+        # Derive battle_ids
+        battle_ids = session.execute(
+            sa_text("""
+                SELECT b.battle_id
+                FROM battles b
+                JOIN (
+                    SELECT battle_id FROM replay_events
+                    WHERE card_name != '_invalid'
+                    GROUP BY battle_id HAVING COUNT(*) >= :min_events
+                ) re_counts ON re_counts.battle_id = b.battle_id
+                WHERE b.battle_type = 'PvP' AND b.result IN ('win', 'loss')
+                ORDER BY b.battle_time
+            """),
+            {"min_events": MIN_EVENTS},
+        ).scalars().all()
+        battle_ids = list(battle_ids)[:len(dataset)]
 
-    print(f"  ✓ Win probability training complete")
-    print(f"  ✓ Model: {n_total:,} params ({n_trainable:,} trainable)")
-    print(f"  ✓ Best val_loss={checkpoint['val_loss']:.4f}, val_acc={checkpoint['val_acc']:.3f}")
-    print(f"  ✓ {processed} games processed with per-tick P(win) + WPA")
+        # Clear old WP data
+        session.execute(
+            sa_text("DELETE FROM win_probability WHERE model_version = :v"),
+            {"v": WP_MODEL_VERSION},
+        )
+        session.execute(
+            sa_text("DELETE FROM game_wp_summary WHERE model_version = :v"),
+            {"v": WP_MODEL_VERSION},
+        )
+        session.commit()
+
+        print(f"  → Running WP inference on {len(battle_ids)} games...")
+        processed = trainer.run_inference(
+            session, dataset, battle_ids, vocab, calibrator=calibrator,
+        )
+        print(f"  ✓ {processed} games processed with per-tick P(win) + WPA")
+
+    print(f"  ✓ WP v{version}: val_loss={checkpoint['val_loss']:.4f}, "
+          f"val_acc={checkpoint['val_acc']:.3f}, {len(dataset)} games, "
+          f"{wall_time}s on {device}")
     print(f"  ✓ Saved to {best_path}")
