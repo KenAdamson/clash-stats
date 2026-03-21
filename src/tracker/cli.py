@@ -215,6 +215,8 @@ Environment variables:
     # Counterfactual Simulator (ADR-006)
     parser.add_argument("--train-cvae", action="store_true",
                         help="Train CVAE counterfactual model (ADR-006)")
+    parser.add_argument("--resume-cvae", action="store_true",
+                        help="Resume CVAE training from existing checkpoint")
     parser.add_argument("--counterfactual", nargs=3, metavar=("BATTLE_ID", "OLD_CARD", "NEW_CARD"),
                         help="Generate counterfactual for a game (swap OLD_CARD with NEW_CARD)")
     parser.add_argument("--deck-gradient", action="store_true",
@@ -770,9 +772,9 @@ Environment variables:
             else:
                 reporting.print_wp_cards(rows)
 
-        if args.train_cvae:
+        if args.train_cvae or args.resume_cvae:
             from tracker.ml.cvae_training import train_cvae
-            train_cvae(session, model_dir=_model_dir)
+            train_cvae(session, model_dir=_model_dir, resume=args.resume_cvae)
 
         if args.counterfactual:
             battle_id, old_card, new_card = args.counterfactual
@@ -920,7 +922,7 @@ Environment variables:
             args.tilt_check, args.train_tcn, args.build_features, args.train_embeddings,
             args.clusters, args.similar, args.embed_new,
             args.train_wp, args.wp_infer, args.wp_infer_new, args.wp, args.wp_critical, args.wp_cards,
-            args.train_cvae, args.counterfactual, args.deck_gradient, args.replay_swap,
+            args.train_cvae, args.resume_cvae, args.counterfactual, args.deck_gradient, args.replay_swap,
             args.promote_model, args.list_models,
             args.manifold, args.train_activity_model,
             args.matchup_dive, args.broken_cycle, args.mark_stale_replays,

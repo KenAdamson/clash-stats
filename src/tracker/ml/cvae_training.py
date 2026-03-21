@@ -371,12 +371,15 @@ class CVAETrainer:
 def train_cvae(
     session: Session,
     model_dir: Optional[Path] = None,
+    resume: bool = False,
 ) -> None:
     """Full CVAE training pipeline.
 
     Args:
         session: Database session.
         model_dir: Directory for model files.
+        resume: If True, resume from existing cvae_v3.pt checkpoint
+                instead of starting from WP transfer weights.
     """
     if model_dir is None:
         model_dir = Path("data/ml_models")
@@ -394,19 +397,37 @@ def train_cvae(
         print(f"  ✗ Need at least 100 games (have {len(dataset)})")
         return
 
-    # 3. Initialize model — try transfer from WP model
-    wp_path = model_dir / "wp_v1.pt"
-    if wp_path.exists():
-        logger.info("Loading pretrained weights from %s", wp_path)
-        print("  -> Transfer learning from WP model (ADR-004)")
-        model = CounterfactualVAE.from_pretrained_wp(
-            str(wp_path), vocab.size, device,
-            freeze_encoder=True, dropout=DROPOUT,
+    # 3. Initialize model
+    cvae_path = model_dir / "cvae_v3.pt"
+    if resume and cvae_path.exists():
+        logger.info("Resuming from %s", cvae_path)
+        checkpoint = torch.load(cvae_path, map_location=device, weights_only=True)
+        model = CounterfactualVAE(
+            vocab_size=checkpoint["vocab_size"],
+            latent_dim=checkpoint.get("latent_dim", 64),
+            deck_bottleneck_dim=checkpoint.get("deck_bottleneck_dim", 8),
+            dropout=DROPOUT,
         )
+        model.load_state_dict(checkpoint["model_state_dict"])
+        model.to(device)
+        # Don't freeze encoder on resume — it was already unfrozen
+        print(f"  -> Resuming from epoch {checkpoint['epoch']} "
+              f"(val_loss={checkpoint['val_loss']:.4f})")
     else:
-        logger.info("No WP checkpoint found — training from scratch")
-        print("  -> Training from scratch (no WP checkpoint)")
-        model = CounterfactualVAE(vocab_size=vocab.size, dropout=DROPOUT)
+        # Try transfer from WP model
+        from tracker.ml.wp_training import _resolve_wp_path
+        wp_path = _resolve_wp_path(session, model_dir)
+        if wp_path:
+            logger.info("Loading pretrained weights from %s", wp_path)
+            print(f"  -> Transfer learning from {wp_path.name}")
+            model = CounterfactualVAE.from_pretrained_wp(
+                str(wp_path), vocab.size, device,
+                freeze_encoder=True, dropout=DROPOUT,
+            )
+        else:
+            logger.info("No WP checkpoint found — training from scratch")
+            print("  -> Training from scratch (no WP checkpoint)")
+            model = CounterfactualVAE(vocab_size=vocab.size, dropout=DROPOUT)
 
     n_total = sum(p.numel() for p in model.parameters())
     n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
