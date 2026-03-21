@@ -330,6 +330,7 @@ def replay_swap(
 
 
 
+class CounterfactualGenerator:
     """Generates counterfactual game sequences with modified decks.
 
     Args:
