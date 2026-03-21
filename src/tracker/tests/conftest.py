@@ -11,6 +11,7 @@ from tracker import analytics
 import tracker.ml.wp_storage  # noqa: F401
 import tracker.ml.storage  # noqa: F401
 import tracker.ml.cvae_storage  # noqa: F401
+import tracker.ml.model_registry  # noqa: F401
 
 
 # =============================================================================
