@@ -15,7 +15,7 @@ services:
       - POSTGRES_PASSWORD=${DB_PASSWORD}
     command: >
       -c shared_buffers=2GB
-      -c work_mem=256MB
+      -c work_mem=64MB
       -c maintenance_work_mem=1GB
       -c effective_cache_size=4GB
     networks:

@@ -2,6 +2,9 @@
 
 Results are written to JSON on the data volume so the Flask dashboard
 can serve them without re-running the simulations on every request.
+
+Uses BattlesRepository for single-pass paginated data loading —
+constant ~5MB memory regardless of corpus size (was ~41GB before).
 """
 
 import json
@@ -12,6 +15,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
+from tracker.simulation.battles_repo import compute_simulation_data
 from tracker.simulation.interaction_matrix import (
     build_card_interaction_matrix,
     build_card_cooccurrence,
@@ -43,6 +47,10 @@ def run_full_simulation(
 ) -> dict:
     """Run all simulations and cache results.
 
+    Single-pass data loading via BattlesRepository — all downstream
+    functions share pre-aggregated SimulationData instead of each
+    independently scanning the full battles table.
+
     Args:
         session: SQLAlchemy session.
         player_tag: Personal player tag for personal matchup analysis.
@@ -55,30 +63,34 @@ def run_full_simulation(
         "player_tag": player_tag,
     }
 
-    # 1. Matchup posteriors (corpus-wide)
+    # Single pass: load all battles, aggregate card stats + archetypes
+    logger.info("Loading corpus data (single pass, paginated)...")
+    corpus_data = compute_simulation_data(session)
+
+    # 1. Matchup posteriors (corpus-wide) — uses pre-aggregated data
     logger.info("Computing corpus-wide matchup posteriors...")
     corpus_posteriors = compute_matchup_posteriors(
-        session, corpus=None, min_battles=5, use_sub_archetypes=True,
+        sim_data=corpus_data, min_battles=5, use_sub_archetypes=True,
     )
     results["corpus_matchups"] = corpus_posteriors
     results["corpus_threats"] = compute_threat_ranking(corpus_posteriors, min_battles=10)
 
-    # 2. Personal matchup posteriors (if player_tag provided)
+    # 2. Personal matchup posteriors (separate pass, much smaller dataset)
     if player_tag:
-        logger.info("Computing personal matchup posteriors for %s...", player_tag)
+        logger.info("Loading personal data for %s...", player_tag)
+        personal_data = compute_simulation_data(session, player_tag=player_tag)
         personal_posteriors = compute_matchup_posteriors(
-            session, player_tag=player_tag, min_battles=3,
-            use_sub_archetypes=True,
+            sim_data=personal_data, min_battles=3, use_sub_archetypes=True,
         )
         results["personal_matchups"] = personal_posteriors
         results["personal_threats"] = compute_threat_ranking(
             personal_posteriors, min_battles=5
         )
 
-    # 3. Card interaction matrix (corpus-wide)
+    # 3. Card interaction matrix (corpus-wide) — uses pre-aggregated data
     logger.info("Building card interaction matrix...")
     card_matrix = build_card_interaction_matrix(
-        session, min_appearances=10,
+        sim_data=corpus_data, min_appearances=10,
     )
     results["card_interactions"] = card_matrix
 
@@ -86,25 +98,25 @@ def run_full_simulation(
     if player_tag:
         logger.info("Building personal card interactions...")
         personal_matrix = build_card_interaction_matrix(
-            session, player_tag=player_tag, min_appearances=3,
+            sim_data=personal_data, min_appearances=3,
         )
         results["personal_card_interactions"] = personal_matrix
 
-    # 5. Sub-archetype breakdowns for major win conditions
+    # 5. Sub-archetype breakdowns — uses pre-collected deck lists from corpus_data
     logger.info("Detecting sub-archetypes for major win conditions...")
     sub_archetypes = {}
     for wc in MAJOR_WIN_CONDITIONS:
         subs = detect_sub_archetypes(
-            session, wc, min_cluster_size=10, similarity_threshold=0.55,
+            wc, sim_data=corpus_data,
+            min_cluster_size=10, similarity_threshold=0.55,
         )
         if subs:
             sub_archetypes[wc] = subs
     results["sub_archetypes"] = sub_archetypes
 
-    # 6. Card co-occurrence
+    # 6. Card co-occurrence — uses pre-aggregated pair counts
     logger.info("Building card co-occurrence data...")
-    cooccurrence = build_card_cooccurrence(session, min_battles=20)
-    # Don't serialize the full pair matrix — just top correlations
+    cooccurrence = build_card_cooccurrence(sim_data=corpus_data, min_battles=20)
     top_pairs = sorted(
         cooccurrence["pair_counts"].items(), key=lambda x: -x[1]
     )[:200]
@@ -149,7 +161,6 @@ def _save_results(results: dict) -> None:
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     path = RESULTS_DIR / "latest.json"
 
-    # Custom serializer for numpy types
     def _default(obj):
         if hasattr(obj, "item"):
             return obj.item()

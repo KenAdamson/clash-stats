@@ -4,18 +4,13 @@ Beta-binomial model for win probability per opponent sub-archetype,
 with hierarchical priors for sparse matchups.
 """
 
-import json
 import logging
-from collections import defaultdict
 from typing import Optional
 
 import numpy as np
 from scipy.stats import beta as beta_dist
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from tracker.archetypes import classify_archetype
-from tracker.models import Battle
 from tracker.simulation.interaction_matrix import detect_sub_archetypes
 
 logger = logging.getLogger(__name__)
@@ -28,7 +23,9 @@ HIERARCHICAL_PRIOR = (2, 2)
 
 
 def compute_matchup_posteriors(
-    session: Session,
+    session_or_data=None,
+    *,
+    sim_data=None,
     corpus: Optional[str] = None,
     player_tag: Optional[str] = None,
     min_battles: int = 5,
@@ -37,75 +34,52 @@ def compute_matchup_posteriors(
     """Compute Beta posterior distributions for each opponent archetype.
 
     Args:
-        session: SQLAlchemy session.
+        session_or_data: SQLAlchemy session (legacy) or SimulationData.
+        sim_data: Pre-aggregated SimulationData (keyword, preferred).
         corpus: Filter by corpus type.
         player_tag: Filter to battles involving this player.
         min_battles: Minimum battles to include a matchup.
-        use_sub_archetypes: If True, detect and use sub-archetypes for
-            major win conditions.
+        use_sub_archetypes: If True, detect and use sub-archetypes.
 
     Returns:
-        Dict mapping archetype_name -> {
-            'wins': int, 'losses': int, 'total': int,
-            'posterior_mean': float,
-            'ci_low': float, 'ci_high': float,
-            'prior': (alpha, beta),
-            'sub_archetypes': list (if detected),
-        }
+        Dict mapping archetype_name -> posterior stats.
     """
-    stmt = select(
-        Battle.opponent_deck, Battle.result
-    ).where(
-        Battle.battle_type.in_(["PvP", "pathOfLegend"]),
-        Battle.result.in_(["win", "loss"]),
-    )
-    if corpus:
-        stmt = stmt.where(Battle.corpus == corpus)
-    if player_tag:
-        tag_clean = player_tag.lstrip("#")
-        stmt = stmt.where(Battle.player_tag.like(f"%{tag_clean}%"))
+    from tracker.simulation.battles_repo import SimulationData, compute_simulation_data
 
-    rows = session.execute(stmt).all()
-    logger.info("Computing matchup posteriors from %d battles.", len(rows))
+    if sim_data is not None:
+        pass  # Use provided sim_data
+    elif isinstance(session_or_data, SimulationData):
+        sim_data = session_or_data
+    elif session_or_data is not None:
+        # Legacy: session passed positionally
+        sim_data = compute_simulation_data(session_or_data, corpus=corpus, player_tag=player_tag)
+    else:
+        raise ValueError("Either session or sim_data required")
 
-    # First pass: classify by top-level archetype
-    archetype_stats: dict[str, dict] = defaultdict(
-        lambda: {"wins": 0, "losses": 0, "decks": []}
-    )
+    logger.info("Computing matchup posteriors from %d battles.", sim_data.total_battles)
 
-    for opponent_deck_json, result in rows:
-        if not opponent_deck_json:
-            continue
-        try:
-            deck = json.loads(opponent_deck_json)
-        except (json.JSONDecodeError, TypeError):
-            continue
+    # Build posteriors from pre-aggregated archetype stats
+    all_archetypes = set(sim_data.archetype_wins.keys()) | set(sim_data.archetype_losses.keys())
 
-        archetype = classify_archetype(deck)
-        stats = archetype_stats[archetype]
-        if result == "win":
-            stats["wins"] += 1
-        else:
-            stats["losses"] += 1
-        stats["decks"].append(deck)
-
-    # Compute posteriors
     matchups = {}
-    for archetype, stats in sorted(
-        archetype_stats.items(), key=lambda x: -(x[1]["wins"] + x[1]["losses"])
+    for archetype in sorted(
+        all_archetypes,
+        key=lambda a: -(sim_data.archetype_wins.get(a, 0) + sim_data.archetype_losses.get(a, 0)),
     ):
-        total = stats["wins"] + stats["losses"]
+        wins = sim_data.archetype_wins.get(archetype, 0)
+        losses = sim_data.archetype_losses.get(archetype, 0)
+        total = wins + losses
         if total < min_battles:
             continue
 
         prior = DEFAULT_PRIOR
-        a = stats["wins"] + prior[0]
-        b = stats["losses"] + prior[1]
+        a = wins + prior[0]
+        b = losses + prior[1]
         ci_low, ci_high = beta_dist.ppf([0.025, 0.975], a, b)
 
         matchup = {
-            "wins": stats["wins"],
-            "losses": stats["losses"],
+            "wins": wins,
+            "losses": losses,
             "total": total,
             "posterior_mean": a / (a + b),
             "ci_low": float(ci_low),
@@ -119,9 +93,8 @@ def compute_matchup_posteriors(
             win_condition = _get_win_condition(archetype)
             if win_condition:
                 sub_archetypes = detect_sub_archetypes(
-                    session,
                     win_condition,
-                    corpus=corpus,
+                    sim_data=sim_data,
                     min_cluster_size=max(10, total // 10),
                 )
                 if sub_archetypes:
