@@ -189,6 +189,15 @@ Environment variables:
                         help="Train win probability model (ADR-004)")
     parser.add_argument("--wp-unfreeze", action="store_true",
                         help="Unfreeze TCN encoder during WP training (full fine-tune)")
+    parser.add_argument("--auto-promote", action="store_true",
+                        help="Auto-promote trained model if accuracy improves (with --train-wp)")
+    parser.add_argument("--lazy", action="store_true",
+                        help="Use lazy DB-backed dataset (low memory, slower per epoch)")
+    # Model registry
+    parser.add_argument("--promote-model", nargs=2, metavar=("TYPE", "VERSION"),
+                        help="Promote a candidate model to production (e.g. --promote-model wp 3)")
+    parser.add_argument("--list-models", type=str, nargs="?", const="all", metavar="TYPE",
+                        help="List model versions (optionally filter by type: wp, cvae, tcn)")
     parser.add_argument("--wp-infer", action="store_true",
                         help="Run WP inference using existing checkpoint (no retraining)")
     parser.add_argument("--wp-infer-new", action="store_true",
@@ -205,6 +214,19 @@ Environment variables:
                         help="Mark unfetched battles older than 7 days as permanently missed")
     parser.add_argument("--manifold", action="store_true",
                         help="Profile the 3-leg TCN embedding manifold")
+    # Counterfactual Simulator (ADR-006)
+    parser.add_argument("--train-cvae", action="store_true",
+                        help="Train CVAE counterfactual model (ADR-006)")
+    parser.add_argument("--resume-cvae", action="store_true",
+                        help="Resume CVAE training from existing checkpoint")
+    parser.add_argument("--counterfactual", nargs=3, metavar=("BATTLE_ID", "OLD_CARD", "NEW_CARD"),
+                        help="Generate counterfactual for a game (swap OLD_CARD with NEW_CARD)")
+    parser.add_argument("--deck-gradient", action="store_true",
+                        help="Rank best single-card swaps by expected WR delta")
+    parser.add_argument("--cf-samples", type=int, default=10, metavar="N",
+                        help="Samples per counterfactual (default: 10)")
+    parser.add_argument("--replay-swap", nargs=3, metavar=("BATTLE_ID", "OLD_CARD", "NEW_CARD"),
+                        help="Swap card plays in a real replay and compare P(win) curves")
     # Temporal analysis
     parser.add_argument("--matchup-dive", type=str, metavar="ARCHETYPE",
                         help="Deep temporal analysis against an archetype (e.g. 'Hog Cycle')")
@@ -699,7 +721,8 @@ Environment variables:
 
         if args.train_wp:
             from tracker.ml.wp_training import train_wp
-            train_wp(session, model_dir=_model_dir, unfreeze_encoder=args.wp_unfreeze)
+            train_wp(session, model_dir=_model_dir, unfreeze_encoder=args.wp_unfreeze,
+                     auto_promote=args.auto_promote, lazy=args.lazy)
 
         if args.wp_infer:
             from tracker.ml.wp_training import infer_wp
@@ -751,6 +774,51 @@ Environment variables:
             else:
                 reporting.print_wp_cards(rows)
 
+        if args.train_cvae or args.resume_cvae:
+            from tracker.ml.cvae_training import train_cvae
+            train_cvae(session, model_dir=_model_dir, resume=args.resume_cvae)
+
+        if args.counterfactual:
+            battle_id, old_card, new_card = args.counterfactual
+            from tracker.ml.counterfactual import CounterfactualGenerator
+            gen = CounterfactualGenerator(session, model_dir=_model_dir)
+            if gen.cvae is None:
+                print("  ✗ No trained CVAE model. Run --train-cvae first.")
+            elif gen.wp_model is None:
+                print("  ✗ No trained WP model. Run --train-wp first.")
+            else:
+                result = gen.run_counterfactual(
+                    battle_id, old_card, new_card, n_samples=args.cf_samples,
+                )
+                if result:
+                    reporting.print_counterfactual(result)
+                else:
+                    print(f"  ✗ Could not generate counterfactual for {battle_id}")
+
+        if args.deck_gradient:
+            from tracker.ml.counterfactual import CounterfactualGenerator
+            gen = CounterfactualGenerator(session, model_dir=_model_dir)
+            if gen.cvae is None:
+                print("  ✗ No trained CVAE model. Run --train-cvae first.")
+            elif gen.wp_model is None:
+                print("  ✗ No trained WP model. Run --train-wp first.")
+            else:
+                results = gen.compute_deck_gradient(
+                    n_games=20, n_samples=args.cf_samples,
+                )
+                reporting.print_deck_gradient(results)
+
+        if args.replay_swap:
+            battle_id, old_card, new_card = args.replay_swap
+            from tracker.ml.counterfactual import replay_swap
+            result = replay_swap(
+                session, battle_id, old_card, new_card, model_dir=_model_dir,
+            )
+            if result:
+                reporting.print_replay_swap(result)
+            else:
+                print(f"  ✗ Could not run replay swap for {battle_id}")
+
         if args.train_activity_model:
             from tracker.ml.activity_model import train_activity_model
             metrics = train_activity_model(session, model_dir=_model_dir)
@@ -765,6 +833,40 @@ Environment variables:
             from tracker.corpus_scraper import mark_stale_replays
             count = mark_stale_replays(session)
             print(f"  ✓ Marked {count:,} stale battles as permanently missed")
+
+        if args.promote_model:
+            model_type, version_str = args.promote_model
+            from tracker.ml.model_registry import promote, get_production
+            version = int(version_str)
+            current = get_production(session, model_type)
+            result = promote(session, model_type, version)
+            if result:
+                session.commit()
+                if current:
+                    print(f"  ✓ Promoted {model_type} v{version} (was v{current.version})")
+                else:
+                    print(f"  ✓ Promoted {model_type} v{version} (first production)")
+            else:
+                print(f"  ✗ Could not promote {model_type} v{version}")
+
+        if args.list_models:
+            from tracker.ml.model_registry import list_versions
+            types = [args.list_models] if args.list_models != "all" else ["wp", "cvae", "tcn"]
+            for mt in types:
+                versions = list_versions(session, mt)
+                if not versions:
+                    continue
+                print(f"\n{mt.upper()} Models:")
+                print(f"  {'Ver':>4} {'Status':>12} {'Accuracy':>9} {'Val Loss':>9} "
+                      f"{'Games':>7} {'Epoch':>6} {'Filename':<20}")
+                print(f"  {'─' * 75}")
+                for v in versions:
+                    acc = f"{v.val_accuracy:.3f}" if v.val_accuracy else "   -"
+                    vloss = f"{v.val_loss:.4f}" if v.val_loss else "    -"
+                    games = f"{v.training_games:,}" if v.training_games else "  -"
+                    epoch = f"{v.best_epoch}" if v.best_epoch else " -"
+                    print(f"  {v.version:>4} {v.status:>12} {acc:>9} {vloss:>9} "
+                          f"{games:>7} {epoch:>6} {v.filename:<20}")
 
         if args.manifold:
             from tracker.ml.cluster_profiler import profile_manifold
@@ -822,6 +924,8 @@ Environment variables:
             args.tilt_check, args.train_tcn, args.build_features, args.train_embeddings,
             args.clusters, args.similar, args.embed_new,
             args.train_wp, args.wp_infer, args.wp_infer_new, args.wp, args.wp_critical, args.wp_cards,
+            args.train_cvae, args.resume_cvae, args.counterfactual, args.deck_gradient, args.replay_swap,
+            args.promote_model, args.list_models,
             args.manifold, args.train_activity_model,
             args.matchup_dive, args.broken_cycle, args.mark_stale_replays,
         ])

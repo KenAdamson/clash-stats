@@ -653,3 +653,63 @@ def print_wp_critical(rows: list, battle_id: str) -> None:
         sign = "+" if (r.wpa or 0) >= 0 else ""
         print(f"  {i:>3} {r.game_tick:>6} {r.win_prob:>7.1%} "
               f"{sign}{(r.wpa or 0):>7.1%} {(r.criticality or 0):>11.1%}")
+
+
+def print_replay_swap(result: dict) -> None:
+    """Print replay-swap counterfactual result.
+
+    Args:
+        result: Dict from replay_swap().
+    """
+    sign = "+" if result["delta_final_wp"] >= 0 else ""
+    print(f"\nReplay Swap: {result['old_card']} -> {result['new_card']}")
+    print(f"  Battle: {result['battle_id']}")
+    print(f"  Swaps:  {result['swaps']} plays replaced")
+    print(f"  Original final P(win):  {result['original_final_wp']:>7.1%}")
+    print(f"  Modified final P(win):  {result['modified_final_wp']:>7.1%}")
+    print(f"  Delta:                  {sign}{result['delta_final_wp']:>7.1%}")
+
+    if result["swap_details"]:
+        print(f"\n  {'Tick':>6} {'Original':>9} {'Modified':>9} {'Delta':>8}")
+        print(f"  {'─' * 36}")
+        for s in result["swap_details"]:
+            d_sign = "+" if s["delta"] >= 0 else ""
+            print(f"  {s['tick']:>6} {s['original_wp']:>8.1%} {s['modified_wp']:>8.1%} {d_sign}{s['delta']:>7.1%}")
+
+
+def print_counterfactual(result: dict) -> None:
+    """Print counterfactual simulation result for a single game.
+
+    Args:
+        result: Dict from CounterfactualGenerator.run_counterfactual().
+    """
+    print(f"\nCounterfactual: {result['old_card']} -> {result['new_card']}")
+    print(f"  Battle: {result['battle_id']}")
+    print(f"  Original P(win):       {result['original_wp']:>7.1%}")
+    print(f"  Counterfactual P(win): {result['counterfactual_wp_mean']:>7.1%} "
+          f"(std: {result['counterfactual_wp_std']:.3f})")
+    sign = "+" if result["delta_wp"] >= 0 else ""
+    print(f"  Delta:                 {sign}{result['delta_wp']:>7.1%}")
+    print(f"  Samples: {result['n_samples']}")
+
+
+def print_deck_gradient(results: list[dict]) -> None:
+    """Print ranked deck gradient results.
+
+    Args:
+        results: List of dicts from CounterfactualGenerator.compute_deck_gradient(),
+                 sorted by mean_delta_wp descending.
+    """
+    if not results:
+        print("\n  No deck gradient results.")
+        return
+
+    print(f"\nDeck Gradient — Best Single-Card Swaps")
+    print(f"  {'Swap':<40} {'Delta WR':>9} {'95% CI':>16} {'Games':>6}")
+    print(f"  {'─' * 75}")
+
+    for r in results[:30]:
+        swap = f"{r['old_card']} -> {r['new_card']}"
+        sign = "+" if r["mean_delta_wp"] >= 0 else ""
+        ci = f"[{r['ci_low']:+.1%}, {r['ci_high']:+.1%}]"
+        print(f"  {swap:<40} {sign}{r['mean_delta_wp']:>8.1%} {ci:>16} {r['n_games']:>6}")

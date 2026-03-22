@@ -43,6 +43,11 @@ class _TTLCache:
         with self._lock:
             self._store[key] = (time.monotonic() + ttl, value)
 
+    def clear(self) -> None:
+        """Remove all cached entries."""
+        with self._lock:
+            self._store.clear()
+
 
 _cache = _TTLCache()
 
@@ -92,6 +97,9 @@ def create_app(db_path: str | None = None) -> Flask:
 
     engine = init_db(db_path)
     app.config["ENGINE"] = engine
+
+    # Clear stale cache entries from previous app instances (e.g. in tests)
+    _cache.clear()
 
     @app.route("/")
     def index():

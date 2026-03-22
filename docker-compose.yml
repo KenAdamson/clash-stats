@@ -15,7 +15,7 @@ services:
       - POSTGRES_PASSWORD=${DB_PASSWORD}
     command: >
       -c shared_buffers=2GB
-      -c work_mem=256MB
+      -c work_mem=64MB
       -c maintenance_work_mem=1GB
       -c effective_cache_size=4GB
     networks:
@@ -43,6 +43,7 @@ services:
       - ./data:/app/data
       - ./.git:/app/.git:rw
       - ~/.ssh/id_ed25519:/root/.ssh/id_ed25519:ro
+    shm_size: '2gb'
     devices:
       - /dev/dri:/dev/dri
     group_add:
@@ -75,7 +76,7 @@ services:
   cr-samv2:
     build: docker/samv2
     container_name: cr-samv2
-    restart: unless-stopped
+    restart: "no"
     devices:
       - /dev/dri:/dev/dri
     group_add:

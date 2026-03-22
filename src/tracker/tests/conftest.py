@@ -7,6 +7,12 @@ from sqlalchemy.orm import Session
 from tracker.models import Base
 from tracker import analytics
 
+# Import all ORM models so Base.metadata.create_all creates their tables
+import tracker.ml.wp_storage  # noqa: F401
+import tracker.ml.storage  # noqa: F401
+import tracker.ml.cvae_storage  # noqa: F401
+import tracker.ml.model_registry  # noqa: F401
+
 
 # =============================================================================
 # CARD AND BATTLE BUILDERS

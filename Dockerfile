@@ -23,9 +23,15 @@ ARG PIP_INDEX_URL=http://192.168.7.58:8081/simple/
 ARG PIP_TRUSTED_HOST=192.168.7.58
 ARG PYTORCH_INDEX=http://192.168.7.58:8081/whl/xpu
 
-# Layer 1: torch (rarely changes, ~2GB, cached unless pyproject.toml changes)
+# Layer 1: torch + OpenCL ICD (rarely changes, ~2GB, cached unless pyproject.toml changes)
+# intel-opencl-icd must be installed alongside torch because torch XPU pins
+# libigc1 while opencl-icd wants libigc2 — installing together lets apt resolve.
+# Required for oneDNN's SDPA GPU primitive (Transformer attention on XPU).
 COPY pyproject.toml .
-RUN pip install --no-cache-dir torch --index-url ${PYTORCH_INDEX}
+RUN pip install --no-cache-dir torch --index-url ${PYTORCH_INDEX} && \
+    apt-get update && apt-get install -y --no-install-recommends \
+    intel-opencl-icd=24.39.31294.20-1032~22.04 \
+    && rm -rf /var/lib/apt/lists/*
 
 # Layer 2: remaining Python deps (cached unless pyproject.toml changes)
 # Create minimal package structure so pip install works for deps only
