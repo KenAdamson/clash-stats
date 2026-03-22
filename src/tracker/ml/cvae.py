@@ -186,10 +186,44 @@ class CVAEEncoder(nn.Module):
         return self.fc_mu(h), self.fc_logvar(h)
 
 
-class CVAEDecoder(nn.Module):
-    """Transformer decoder conditioned on z + deck embeddings.
+class FiLMLayer(nn.Module):
+    """Feature-wise Linear Modulation: z conditions hidden state multiplicatively.
 
-    Generates event sequences autoregressively during inference.
+    Applied after each Transformer decoder layer so z cannot be ignored.
+    Initialized as identity (gamma=1, beta=0) to preserve pretrained weights.
+    """
+
+    def __init__(self, condition_dim: int, d_model: int):
+        super().__init__()
+        self.gamma_proj = nn.Linear(condition_dim, d_model)
+        self.beta_proj = nn.Linear(condition_dim, d_model)
+        # Identity init: starts as no-op, z gradually takes over during training
+        nn.init.zeros_(self.gamma_proj.weight)
+        nn.init.ones_(self.gamma_proj.bias)
+        nn.init.zeros_(self.beta_proj.weight)
+        nn.init.zeros_(self.beta_proj.bias)
+
+    def forward(self, h: torch.Tensor, condition: torch.Tensor) -> torch.Tensor:
+        """Modulate hidden state with condition vector.
+
+        Args:
+            h: (batch, seq_len, d_model) hidden states.
+            condition: (batch, condition_dim) conditioning vector (z + decks).
+
+        Returns:
+            (batch, seq_len, d_model) modulated hidden states.
+        """
+        gamma = self.gamma_proj(condition).unsqueeze(1)  # (batch, 1, d_model)
+        beta = self.beta_proj(condition).unsqueeze(1)
+        return gamma * h + beta
+
+
+class CVAEDecoder(nn.Module):
+    """Transformer decoder with FiLM conditioning on z + deck embeddings.
+
+    FiLM (Feature-wise Linear Modulation) injects z after every decoder
+    layer, making it impossible for the decoder to ignore z. Cross-attention
+    memory is retained as a complementary conditioning path.
 
     Args:
         vocab_size: Card vocabulary size.
@@ -230,19 +264,26 @@ class CVAEDecoder(nn.Module):
         # Positional encoding
         self.pos_enc = SinusoidalPositionalEncoding(d_model, max_len=max_events + 1, dropout=dropout)
 
-        # Condition projection: z + player_deck + opponent_deck -> d_model
-        condition_dim = latent_dim + deck_embed_dim * 2  # 128
+        # Condition: z + player_deck + opponent_deck
+        condition_dim = latent_dim + deck_embed_dim * 2
+        self.condition_dim = condition_dim
         self.condition_proj = nn.Linear(condition_dim, d_model)
 
-        # Transformer decoder
-        decoder_layer = nn.TransformerDecoderLayer(
-            d_model=d_model,
-            nhead=nhead,
-            dim_feedforward=d_model * 4,
-            dropout=dropout,
-            batch_first=True,
-        )
-        self.transformer = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
+        # Transformer decoder layers + FiLM modulation
+        self.layers = nn.ModuleList([
+            nn.TransformerDecoderLayer(
+                d_model=d_model,
+                nhead=nhead,
+                dim_feedforward=d_model * 4,
+                dropout=dropout,
+                batch_first=True,
+            )
+            for _ in range(num_layers)
+        ])
+        self.film_layers = nn.ModuleList([
+            FiLMLayer(condition_dim, d_model)
+            for _ in range(num_layers)
+        ])
 
         # Output heads
         self.head_card = nn.Linear(d_model, vocab_size)
@@ -281,9 +322,9 @@ class CVAEDecoder(nn.Module):
         tgt = self.input_proj(combined)  # (batch, seq, d_model)
         tgt = self.pos_enc(tgt)
 
-        # Condition memory: (batch, 1, d_model)
-        condition = torch.cat([z, player_deck_emb, opponent_deck_emb], dim=1)
-        memory = self.condition_proj(condition).unsqueeze(1)
+        # Condition: raw vector for FiLM + projected memory for cross-attention
+        condition_raw = torch.cat([z, player_deck_emb, opponent_deck_emb], dim=1)
+        memory = self.condition_proj(condition_raw).unsqueeze(1)  # (batch, 1, d_model)
 
         # Causal mask for autoregressive decoding
         causal_mask = nn.Transformer.generate_square_subsequent_mask(
@@ -294,12 +335,15 @@ class CVAEDecoder(nn.Module):
         arange = torch.arange(seq_len, device=device).unsqueeze(0)
         tgt_key_padding_mask = arange >= lengths.unsqueeze(1)
 
-        # Decode
-        out = self.transformer(
-            tgt, memory,
-            tgt_mask=causal_mask,
-            tgt_key_padding_mask=tgt_key_padding_mask,
-        )  # (batch, seq_len, d_model)
+        # Decode with FiLM conditioning at every layer
+        out = tgt
+        for layer, film in zip(self.layers, self.film_layers):
+            out = layer(
+                out, memory,
+                tgt_mask=causal_mask,
+                tgt_key_padding_mask=tgt_key_padding_mask,
+            )
+            out = film(out, condition_raw)  # z modulates every position
 
         return {
             "card_logits": self.head_card(out),           # (batch, seq, vocab)
@@ -317,6 +361,7 @@ class CVAEDecoder(nn.Module):
         end_token_id: int,
         player_deck_ids: torch.Tensor | None = None,
         max_events: int | None = None,
+        vocab=None,
     ) -> dict[str, torch.Tensor]:
         """Autoregressive generation from latent code.
 
@@ -327,21 +372,27 @@ class CVAEDecoder(nn.Module):
             end_token_id: Vocabulary index for <END> token.
             player_deck_ids: (batch, 8) card indices for deck masking.
             max_events: Max events to generate.
+            vocab: CardVocabulary for enriching features (elixir, card_type, phase, lane).
 
         Returns:
             Dict with generated card_ids, tick_deltas, arena_xys, sides, lengths.
         """
+        from tracker.ml.sequence_dataset import (
+            _game_phase_onehot, _lane_onehot, _card_type_onehot,
+            ARENA_X_MID, GAME_TICK_MAX, ARENA_X_MAX,
+        )
+        from tracker.ml.card_metadata import CARD_TYPES
+
         if max_events is None:
             max_events = self.max_events
 
         batch_size = z.size(0)
         device = z.device
 
-        # Condition memory
-        condition = torch.cat([z, player_deck_emb, opponent_deck_emb], dim=1)
-        memory = self.condition_proj(condition).unsqueeze(1)  # (batch, 1, d_model)
+        # Condition: raw for FiLM + projected for cross-attention memory
+        condition_raw = torch.cat([z, player_deck_emb, opponent_deck_emb], dim=1)
+        memory = self.condition_proj(condition_raw).unsqueeze(1)
 
-        # Start with a zero embedding (start token)
         gen_card_ids = []
         gen_tick_deltas = []
         gen_arena_xys = []
@@ -349,7 +400,9 @@ class CVAEDecoder(nn.Module):
         active = torch.ones(batch_size, dtype=torch.bool, device=device)
         gen_lengths = torch.full((batch_size,), max_events, dtype=torch.long, device=device)
 
-        # Accumulate hidden sequence
+        # Track cumulative tick for phase computation
+        cum_tick = torch.zeros(batch_size, device=device)
+
         hidden_seq = torch.zeros(batch_size, 0, self.d_model, device=device)
 
         for step in range(max_events):
@@ -357,30 +410,51 @@ class CVAEDecoder(nn.Module):
                 break
 
             if step == 0:
-                # Start token: zero input
                 step_input = torch.zeros(batch_size, 1, self.d_model, device=device)
             else:
-                # Use previous step's generated output
-                prev_card = gen_card_ids[-1]  # (batch,)
-                card_emb = self.card_embedding(prev_card)  # (batch, card_embed_dim)
-                # Construct feature from generated values
-                prev_tick_delta = gen_tick_deltas[-1].unsqueeze(-1)  # (batch, 1)
-                prev_arena = gen_arena_xys[-1]  # (batch, 2)
-                prev_side = gen_sides[-1].unsqueeze(-1)  # (batch, 1)
-                # Fill remaining features with zeros (13 dims for phase/lane/etc)
-                padding_features = torch.zeros(batch_size, 13, device=device)
-                feat_vec = torch.cat([prev_side, prev_tick_delta, padding_features, prev_arena[:, :1]], dim=1)
-                # Ensure feature_dim = 17
+                prev_card = gen_card_ids[-1]
+                card_emb = self.card_embedding(prev_card)
+
+                # Build full 17-dim feature vector
                 feat_vec = torch.zeros(batch_size, 17, device=device)
                 feat_vec[:, 0] = gen_sides[-1]  # side
-                feat_vec[:, 1] = gen_tick_deltas[-1].clamp(max=1.0)  # tick_norm
-                feat_vec[:, 6] = gen_arena_xys[-1][:, 0] * 2 - 1  # arena_x_norm
-                feat_vec[:, 7] = gen_arena_xys[-1][:, 1] * 2 - 1  # arena_y_norm
+                feat_vec[:, 1] = cum_tick.clamp(max=1.0)  # game_tick_norm
 
-                combined = torch.cat([card_emb, feat_vec], dim=1)  # (batch, 33)
-                step_input = self.input_proj(combined).unsqueeze(1)  # (batch, 1, d_model)
+                # Game phase one-hot (indices 2-5)
+                raw_tick = (cum_tick * GAME_TICK_MAX).long()
+                for b in range(batch_size):
+                    phase = _game_phase_onehot(int(raw_tick[b].item()))
+                    feat_vec[b, 2:6] = torch.tensor(phase, device=device)
 
-            # Add positional encoding for this step
+                # Arena position
+                feat_vec[:, 6] = gen_arena_xys[-1][:, 0] * 2 - 1  # x norm
+                feat_vec[:, 7] = gen_arena_xys[-1][:, 1] * 2 - 1  # y norm
+
+                # Lane one-hot (indices 8-10)
+                arena_x_abs = gen_arena_xys[-1][:, 0] * ARENA_X_MAX
+                for b in range(batch_size):
+                    lane = _lane_onehot(int(arena_x_abs[b].item()))
+                    feat_vec[b, 8:11] = torch.tensor(lane, device=device)
+
+                # Play number (index 11)
+                feat_vec[:, 11] = min(step, 20) / 20.0
+
+                # ability_used (index 12) — default 0
+
+                # Elixir cost + card type (indices 13-16) via vocab
+                if vocab is not None:
+                    for b in range(batch_size):
+                        card_name = vocab.decode(int(prev_card[b].item()))
+                        elixir = vocab.elixir(card_name)
+                        feat_vec[b, 13] = (elixir or 4) / 10.0
+                        card_type = CARD_TYPES.get(card_name, "troop")
+                        ct = _card_type_onehot(card_type)
+                        feat_vec[b, 14:17] = torch.tensor(ct, device=device)
+
+                combined = torch.cat([card_emb, feat_vec], dim=1)
+                step_input = self.input_proj(combined).unsqueeze(1)
+
+            # Positional encoding
             step_input = step_input + self.pos_enc.pe[:, step : step + 1]
 
             # Append to sequence
@@ -392,15 +466,15 @@ class CVAEDecoder(nn.Module):
                 seq_len, device=device
             )
 
-            # Decode
-            out = self.transformer(hidden_seq, memory, tgt_mask=causal_mask)
-            last_out = out[:, -1]  # (batch, d_model)
+            # Decode with FiLM at every layer
+            h = hidden_seq
+            for layer, film in zip(self.layers, self.film_layers):
+                h = layer(h, memory, tgt_mask=causal_mask)
+                h = film(h, condition_raw)
+            last_out = h[:, -1]
 
             # Predict
-            card_logits = self.head_card(last_out)  # (batch, vocab_size)
-
-            # Mask non-deck cards for team events (optional)
-            # Sample card
+            card_logits = self.head_card(last_out)
             card_probs = F.softmax(card_logits, dim=-1)
             sampled_card = torch.multinomial(card_probs, 1).squeeze(-1)
 
@@ -408,6 +482,9 @@ class CVAEDecoder(nn.Module):
             arena_xy = torch.sigmoid(self.head_arena_xy(last_out))
             side_logit = self.head_side(last_out).squeeze(-1)
             side = (torch.sigmoid(side_logit) > 0.5).float()
+
+            # Update cumulative tick
+            cum_tick = cum_tick + tick_delta
 
             # Check for END token
             ended = sampled_card == end_token_id
@@ -421,7 +498,6 @@ class CVAEDecoder(nn.Module):
 
             active = active & ~ended
 
-        # Stack
         out_len = len(gen_card_ids)
         if out_len == 0:
             return {
@@ -433,10 +509,10 @@ class CVAEDecoder(nn.Module):
             }
 
         return {
-            "card_ids": torch.stack(gen_card_ids, dim=1),       # (batch, out_len)
-            "tick_deltas": torch.stack(gen_tick_deltas, dim=1),  # (batch, out_len)
-            "arena_xys": torch.stack(gen_arena_xys, dim=1),     # (batch, out_len, 2)
-            "sides": torch.stack(gen_sides, dim=1),              # (batch, out_len)
+            "card_ids": torch.stack(gen_card_ids, dim=1),
+            "tick_deltas": torch.stack(gen_tick_deltas, dim=1),
+            "arena_xys": torch.stack(gen_arena_xys, dim=1),
+            "sides": torch.stack(gen_sides, dim=1),
             "lengths": gen_lengths,
         }
 

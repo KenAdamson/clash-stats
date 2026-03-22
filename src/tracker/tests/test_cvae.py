@@ -18,6 +18,7 @@ from tracker.ml.cvae import (
     CounterfactualVAE,
     CVAEDecoder,
     CVAEEncoder,
+    FiLMLayer,
     SinusoidalPositionalEncoding,
 )
 # Import storage models so Base.metadata knows about the tables
@@ -283,6 +284,44 @@ class TestCounterfactualVAE:
 # =============================================================================
 # POSITIONAL ENCODING
 # =============================================================================
+
+class TestFiLMLayer:
+    """Tests for the FiLM conditioning layer."""
+
+    def test_identity_init(self):
+        """FiLM should start as identity (gamma=1, beta=0)."""
+        film = FiLMLayer(condition_dim=80, d_model=64)
+        h = torch.randn(2, 10, 64)
+        cond = torch.randn(2, 80)
+        out = film(h, cond)
+        # With zero weights and gamma_bias=1, beta_bias=0:
+        # gamma = 1, beta = 0, output = h
+        torch.testing.assert_close(out, h, atol=1e-5, rtol=1e-5)
+
+    def test_modulation_changes_output(self):
+        """After training, FiLM should actually change the output."""
+        film = FiLMLayer(condition_dim=80, d_model=64)
+        # Manually set non-trivial weights
+        film.gamma_proj.weight.data.fill_(0.1)
+        film.beta_proj.weight.data.fill_(0.1)
+
+        h = torch.randn(2, 10, 64)
+        cond = torch.randn(2, 80)
+        out = film(h, cond)
+        assert not torch.allclose(out, h, atol=1e-3)
+
+    def test_different_conditions_different_output(self):
+        """Different z should produce different modulated outputs."""
+        film = FiLMLayer(condition_dim=80, d_model=64)
+        film.gamma_proj.weight.data.fill_(0.1)
+
+        h = torch.randn(1, 10, 64)
+        cond1 = torch.randn(1, 80)
+        cond2 = torch.randn(1, 80)
+        out1 = film(h, cond1)
+        out2 = film(h, cond2)
+        assert not torch.allclose(out1, out2, atol=1e-3)
+
 
 class TestPositionalEncoding:
     def test_shape(self):

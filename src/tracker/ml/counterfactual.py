@@ -54,7 +54,7 @@ def _load_cvae(
 ) -> Optional[CounterfactualVAE]:
     """Load trained CVAE from checkpoint."""
     # Prefer v3 -> v2 -> v1
-    for name in ["cvae_v3.pt", "cvae_v2.pt", "cvae_v1.pt"]:
+    for name in ["cvae_v4.pt", "cvae_v3.pt", "cvae_v2.pt", "cvae_v1.pt"]:
         cvae_path = model_dir / name
         if cvae_path.exists():
             break
@@ -155,35 +155,75 @@ def _evaluate_sequence_wp(
 
 def _build_wp_features_from_generated(
     generated: dict[str, torch.Tensor],
+    vocab=None,
 ) -> torch.Tensor:
-    """Convert generated sequence into WP model features.
+    """Convert generated sequence into full 17-dim WP model features.
 
-    Builds the 17-dim feature vector from generated card_ids, tick_deltas,
-    arena_xys, and sides.
+    Populates all 17 feature dimensions to match what the WP model was
+    trained on, including game phase, lane, elixir cost, and card type
+    derived from the generated card IDs and tick progression.
+
+    Args:
+        generated: Dict from CVAEDecoder.generate().
+        vocab: CardVocabulary for elixir/card_type lookups.
 
     Returns:
         features: (batch, seq_len, 17) float32.
     """
+    from tracker.ml.sequence_dataset import (
+        _game_phase_onehot, _lane_onehot, _card_type_onehot,
+        ARENA_X_MID, GAME_TICK_MAX, ARENA_X_MAX,
+    )
+    from tracker.ml.card_metadata import CARD_TYPES
+
     batch_size, seq_len = generated["card_ids"].shape
     device = generated["card_ids"].device
     features = torch.zeros(batch_size, seq_len, 17, device=device)
 
-    # side (index 0)
+    # [0] side
     features[:, :, 0] = generated["sides"]
 
-    # game_tick_norm (index 1) — cumulative sum of tick_deltas
+    # [1] game_tick_norm — cumulative tick_deltas
     cum_ticks = torch.cumsum(generated["tick_deltas"], dim=1)
     features[:, :, 1] = cum_ticks.clamp(max=1.0)
 
-    # arena_x_norm (index 6): generated is [0,1], convert to [-1,1]
+    # [2:6] game_phase one-hot — derive from raw tick
+    raw_ticks = cum_ticks * GAME_TICK_MAX
+    for b in range(batch_size):
+        for t in range(seq_len):
+            phase = _game_phase_onehot(int(raw_ticks[b, t].item()))
+            features[b, t, 2:6] = torch.tensor(phase, device=device)
+
+    # [6] arena_x_norm: [0,1] -> [-1,1]
     features[:, :, 6] = generated["arena_xys"][:, :, 0] * 2 - 1
 
-    # arena_y_norm (index 7): generated is [0,1], convert to [-1,1]
+    # [7] arena_y_norm: [0,1] -> [-1,1]
     features[:, :, 7] = generated["arena_xys"][:, :, 1] * 2 - 1
 
-    # play_number (index 11) — simple increment
+    # [8:11] lane one-hot — derive from arena_x
+    arena_x_abs = generated["arena_xys"][:, :, 0] * ARENA_X_MAX
+    for b in range(batch_size):
+        for t in range(seq_len):
+            lane = _lane_onehot(int(arena_x_abs[b, t].item()))
+            features[b, t, 8:11] = torch.tensor(lane, device=device)
+
+    # [11] play_number
     play_nums = torch.arange(1, seq_len + 1, device=device).float() / 20.0
     features[:, :, 11] = play_nums.unsqueeze(0).expand(batch_size, -1).clamp(max=1.0)
+
+    # [12] ability_used — default 0.0
+
+    # [13] elixir_cost + [14:17] card_type — from vocab lookup
+    if vocab is not None:
+        for b in range(batch_size):
+            for t in range(seq_len):
+                card_idx = int(generated["card_ids"][b, t].item())
+                card_name = vocab.decode(card_idx)
+                elixir = vocab.elixir(card_name)
+                features[b, t, 13] = (elixir or 4) / 10.0
+                card_type = CARD_TYPES.get(card_name, "troop")
+                ct = _card_type_onehot(card_type)
+                features[b, t, 14:17] = torch.tensor(ct, device=device)
 
     return features
 
@@ -447,6 +487,7 @@ class CounterfactualGenerator:
                 z, modified_deck_emb, opponent_deck_emb_bn,
                 end_token_id=self.end_token_id,
                 player_deck_ids=modified_deck,
+                vocab=self.vocab,
             )
 
             gen_len = generated["lengths"]
@@ -454,7 +495,7 @@ class CounterfactualGenerator:
                 continue
 
             # Build WP features from generated sequence
-            gen_features = _build_wp_features_from_generated(generated)
+            gen_features = _build_wp_features_from_generated(generated, vocab=self.vocab)
             gen_card_ids = generated["card_ids"]
 
             # Evaluate P(win)
