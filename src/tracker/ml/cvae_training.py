@@ -210,12 +210,16 @@ class CVAETrainer:
 
         total = card_loss + WEIGHT_TICK * tick_loss + WEIGHT_POS * pos_loss + WEIGHT_SIDE * side_loss + beta * kl_loss
 
+        # Per-dimension KL for monitoring latent utilization
+        mean_kl_per_dim = kl_per_dim.mean(dim=0)  # (latent_dim,)
+
         return total, {
             "card": card_loss.item(),
             "tick": tick_loss.item(),
             "pos": pos_loss.item(),
             "side": side_loss.item(),
             "kl": kl_total.item(),
+            "kl_per_dim": mean_kl_per_dim.detach().cpu().numpy(),
             "kl_target_loss": kl_loss.item(),
             "beta": beta,
             "total": total.item(),
@@ -282,14 +286,17 @@ class CVAETrainer:
                 self.optimizer.step()
 
                 for k, v in loss_dict.items():
-                    epoch_losses[k] = epoch_losses.get(k, 0) + v
+                    if k == "kl_per_dim":
+                        epoch_losses[k] = epoch_losses.get(k, 0) + v
+                    else:
+                        epoch_losses[k] = epoch_losses.get(k, 0) + v
                 n_batches += 1
 
             self.scheduler.step()
 
             # Average training losses
             for k in epoch_losses:
-                epoch_losses[k] /= max(n_batches, 1)
+                epoch_losses[k] = epoch_losses[k] / max(n_batches, 1)
 
             # Validation
             val_loss, val_losses = self._evaluate(beta)
@@ -304,6 +311,17 @@ class CVAETrainer:
                 epoch_losses.get("kl", 0), KL_TARGET,
                 val_loss, val_losses.get("card", 0), val_losses.get("kl", 0),
             )
+
+            # Log per-dimension KL spectrum every 5 epochs
+            kl_spectrum = epoch_losses.get("kl_per_dim")
+            if kl_spectrum is not None and epoch % 5 == 0:
+                sorted_kl = sorted(enumerate(kl_spectrum), key=lambda x: -x[1])
+                active = sum(1 for _, v in sorted_kl if v > 0.01)
+                top5 = ", ".join(f"d{i}={v:.3f}" for i, v in sorted_kl[:5])
+                logger.info(
+                    "  KL spectrum: %d/%d active dims, top5: [%s]",
+                    active, len(kl_spectrum), top5,
+                )
 
             # Early stopping on val card reconstruction loss only — the KL
             # target penalty inflates val total loss even when reconstruction

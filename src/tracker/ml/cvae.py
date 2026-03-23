@@ -88,7 +88,7 @@ class CVAEEncoder(nn.Module):
         kernel_size: int = 3,
         dropout: float = 0.2,
         deck_embed_dim: int = 32,
-        latent_dim: int = 64,
+        latent_dim: int = 32,
     ):
         super().__init__()
         self.card_embedding = nn.Embedding(vocab_size, card_embed_dim, padding_idx=0)
@@ -189,15 +189,14 @@ class CVAEEncoder(nn.Module):
 class FiLMLayer(nn.Module):
     """Feature-wise Linear Modulation: z conditions hidden state multiplicatively.
 
-    Applied after each Transformer decoder layer so z cannot be ignored.
-    Initialized as identity (gamma=1, beta=0) to preserve pretrained weights.
+    Initialized as identity (gamma=1, beta=0) so it starts as a no-op and
+    z gradually takes over during training.
     """
 
     def __init__(self, condition_dim: int, d_model: int):
         super().__init__()
         self.gamma_proj = nn.Linear(condition_dim, d_model)
         self.beta_proj = nn.Linear(condition_dim, d_model)
-        # Identity init: starts as no-op, z gradually takes over during training
         nn.init.zeros_(self.gamma_proj.weight)
         nn.init.ones_(self.gamma_proj.bias)
         nn.init.zeros_(self.beta_proj.weight)
@@ -216,6 +215,50 @@ class FiLMLayer(nn.Module):
         gamma = self.gamma_proj(condition).unsqueeze(1)  # (batch, 1, d_model)
         beta = self.beta_proj(condition).unsqueeze(1)
         return gamma * h + beta
+
+
+class FiLMDecoderLayer(nn.TransformerDecoderLayer):
+    """TransformerDecoderLayer with pre-activation FiLM conditioning.
+
+    FiLM is applied between the FFN output and the final layer norm
+    (pre-activation placement per Perez et al. 2018). This lets γ rescale
+    before LayerNorm shapes the distribution, giving z more control over
+    the representation.
+
+    Subclasses PyTorch's TransformerDecoderLayer and overrides forward()
+    to inject FiLM at the right point — no ground-up rewrite needed.
+    """
+
+    def __init__(self, condition_dim: int, d_model: int, nhead: int,
+                 dim_feedforward: int, dropout: float, batch_first: bool = True):
+        super().__init__(
+            d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward,
+            dropout=dropout, batch_first=batch_first,
+        )
+        self.film = FiLMLayer(condition_dim, d_model)
+        self._condition = None  # set before forward
+
+    def set_condition(self, condition: torch.Tensor):
+        """Set the FiLM condition vector for the next forward pass."""
+        self._condition = condition
+
+    def forward(self, tgt, memory, tgt_mask=None, memory_mask=None,
+                tgt_key_padding_mask=None, memory_key_padding_mask=None,
+                tgt_is_causal=False, memory_is_causal=False):
+        """Forward with pre-activation FiLM between FFN and final norm."""
+        # Self-attention block
+        x = self.norm1(tgt + self._sa_block(tgt, tgt_mask, tgt_key_padding_mask, tgt_is_causal))
+
+        # Cross-attention block
+        x = self.norm2(x + self._mha_block(x, memory, memory_mask, memory_key_padding_mask, memory_is_causal))
+
+        # FFN block — apply FiLM BEFORE final norm (pre-activation)
+        ffn_out = self._ff_block(x)
+        if self._condition is not None:
+            ffn_out = self.film(ffn_out, self._condition)
+        x = self.norm3(x + ffn_out)
+
+        return x
 
 
 class CVAEDecoder(nn.Module):
@@ -248,7 +291,7 @@ class CVAEDecoder(nn.Module):
         num_layers: int = 2,
         dropout: float = 0.2,
         deck_embed_dim: int = 32,
-        latent_dim: int = 64,
+        latent_dim: int = 32,
         max_events: int = 500,
     ):
         super().__init__()
@@ -269,19 +312,16 @@ class CVAEDecoder(nn.Module):
         self.condition_dim = condition_dim
         self.condition_proj = nn.Linear(condition_dim, d_model)
 
-        # Transformer decoder layers + FiLM modulation
+        # Transformer decoder layers with integrated pre-activation FiLM
         self.layers = nn.ModuleList([
-            nn.TransformerDecoderLayer(
+            FiLMDecoderLayer(
+                condition_dim=condition_dim,
                 d_model=d_model,
                 nhead=nhead,
                 dim_feedforward=d_model * 4,
                 dropout=dropout,
                 batch_first=True,
             )
-            for _ in range(num_layers)
-        ])
-        self.film_layers = nn.ModuleList([
-            FiLMLayer(condition_dim, d_model)
             for _ in range(num_layers)
         ])
 
@@ -335,15 +375,17 @@ class CVAEDecoder(nn.Module):
         arange = torch.arange(seq_len, device=device).unsqueeze(0)
         tgt_key_padding_mask = arange >= lengths.unsqueeze(1)
 
-        # Decode with FiLM conditioning at every layer
+        # Set FiLM condition on each layer, then decode
+        for layer in self.layers:
+            layer.set_condition(condition_raw)
+
         out = tgt
-        for layer, film in zip(self.layers, self.film_layers):
+        for layer in self.layers:
             out = layer(
                 out, memory,
                 tgt_mask=causal_mask,
                 tgt_key_padding_mask=tgt_key_padding_mask,
             )
-            out = film(out, condition_raw)  # z modulates every position
 
         return {
             "card_logits": self.head_card(out),           # (batch, seq, vocab)
@@ -392,6 +434,10 @@ class CVAEDecoder(nn.Module):
         # Condition: raw for FiLM + projected for cross-attention memory
         condition_raw = torch.cat([z, player_deck_emb, opponent_deck_emb], dim=1)
         memory = self.condition_proj(condition_raw).unsqueeze(1)
+
+        # Set FiLM condition on each layer
+        for layer in self.layers:
+            layer.set_condition(condition_raw)
 
         gen_card_ids = []
         gen_tick_deltas = []
@@ -466,11 +512,10 @@ class CVAEDecoder(nn.Module):
                 seq_len, device=device
             )
 
-            # Decode with FiLM at every layer
+            # Decode — FiLM is integrated in each FiLMDecoderLayer
             h = hidden_seq
-            for layer, film in zip(self.layers, self.film_layers):
+            for layer in self.layers:
                 h = layer(h, memory, tgt_mask=causal_mask)
-                h = film(h, condition_raw)
             last_out = h[:, -1]
 
             # Predict
@@ -542,7 +587,7 @@ class CounterfactualVAE(nn.Module):
     def __init__(
         self,
         vocab_size: int,
-        latent_dim: int = 64,
+        latent_dim: int = 32,
         deck_embed_dim: int = 32,
         deck_bottleneck_dim: int = 32,
         deck_dropout: float = 0.3,
