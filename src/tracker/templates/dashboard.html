@@ -184,7 +184,10 @@
                 <span class="timeline-date" id="timeline-date">All games</span>
                 <button class="timeline-btn" id="timeline-reset" title="Reset to all">All</button>
             </div>
-            <input type="range" id="timeline-slider" class="timeline-slider" min="0" max="100" value="100">
+            <div class="dual-range-wrap">
+                <input type="range" id="timeline-slider-lo" class="timeline-slider dual-lo" min="0" max="100" value="0">
+                <input type="range" id="timeline-slider-hi" class="timeline-slider dual-hi" min="0" max="100" value="100">
+            </div>
             <div class="timeline-range">
                 <span id="timeline-min-label"></span>
                 <span id="timeline-max-label"></span>

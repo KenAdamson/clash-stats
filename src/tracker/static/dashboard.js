@@ -694,44 +694,60 @@ function initTimelineSlider(points) {
     const control = document.getElementById("timeline-control");
     control.style.display = "";
 
-    const slider = document.getElementById("timeline-slider");
-    slider.min = 0;
-    slider.max = dates.length - 1;
-    slider.value = dates.length - 1;
+    const sliderLo = document.getElementById("timeline-slider-lo");
+    const sliderHi = document.getElementById("timeline-slider-hi");
+    sliderLo.min = 0;
+    sliderLo.max = dates.length - 1;
+    sliderLo.value = 0;
+    sliderHi.min = 0;
+    sliderHi.max = dates.length - 1;
+    sliderHi.value = dates.length - 1;
 
     document.getElementById("timeline-min-label").textContent = formatSliderDate(dates[0]);
     document.getElementById("timeline-max-label").textContent = formatSliderDate(dates[dates.length - 1]);
     document.getElementById("timeline-date").textContent = `All ${dates.length} personal games`;
 
-    slider.addEventListener("input", onTimelineSlide);
+    sliderLo.addEventListener("input", onTimelineSlide);
+    sliderHi.addEventListener("input", onTimelineSlide);
     document.getElementById("timeline-reset").addEventListener("click", () => {
-        slider.value = dates.length - 1;
+        sliderLo.value = 0;
+        sliderHi.value = dates.length - 1;
         onTimelineSlide();
     });
 }
 
 function onTimelineSlide() {
-    const slider = document.getElementById("timeline-slider");
-    const idx = parseInt(slider.value);
-    const cutoffDate = embeddingDates[idx];
+    const sliderLo = document.getElementById("timeline-slider-lo");
+    const sliderHi = document.getElementById("timeline-slider-hi");
 
-    const showing = idx + 1;
+    // Prevent thumbs from crossing
+    let lo = parseInt(sliderLo.value);
+    let hi = parseInt(sliderHi.value);
+    if (lo > hi) {
+        lo = hi;
+        sliderLo.value = lo;
+    }
+
+    const loDate = embeddingDates[lo];
+    const hiDate = embeddingDates[hi];
+    const showing = hi - lo + 1;
     const total = embeddingDates.length;
-    const label = showing === total
+
+    const label = (lo === 0 && hi === total - 1)
         ? `All ${total} personal games`
-        : `${showing} of ${total} games \u2014 through ${formatSliderDate(cutoffDate)}`;
+        : `${showing} of ${total} games \u2014 ${formatSliderDate(loDate)} to ${formatSliderDate(hiDate)}`;
     document.getElementById("timeline-date").textContent = label;
 
-    updateEmbeddingVisibility(cutoffDate);
+    updateEmbeddingVisibility(loDate, hiDate);
 }
 
-function updateEmbeddingVisibility(cutoffDate) {
+function updateEmbeddingVisibility(loDate, hiDate) {
     if (!embeddingData) return;
 
     const personal = embeddingData.filter(p => p.corpus === "personal");
     const visible = personal.filter(p => {
         const d = parseBattleTime(p.battle_time);
-        return d && d <= cutoffDate;
+        return d && d >= loDate && d <= hiDate;
     });
 
     const personalWins = visible.filter(p => p.result === "win");
