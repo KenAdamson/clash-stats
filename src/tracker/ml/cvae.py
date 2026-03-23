@@ -520,23 +520,22 @@ class CVAEDecoder(nn.Module):
 class CounterfactualVAE(nn.Module):
     """Full CVAE model combining encoder, decoder, and deck embedders.
 
-    v3 changes to prevent posterior collapse:
-      - Deck bottleneck: 32-dim deck embeddings compressed to 8-dim before
-        decoder, forcing z to carry game information the deck can't.
-      - Deck dropout: 30% dropout on bottlenecked deck embeddings during
-        training, ensuring decoder learns to rely on z.
-      - KL targeting: loss uses |KL - target| instead of beta*KL, explicitly
-        controlling information content of z (configured in training loop).
-
-    The encoder sees full 32-dim deck embeddings (no bottleneck) so it can
-    produce informative z. Only the decoder's view of the deck is restricted.
+    v5 architecture:
+      - FiLM conditioning: z modulates every decoder layer multiplicatively.
+        This replaces the deck bottleneck as the mechanism ensuring z is used.
+      - Deck dropout: 30% dropout on deck embeddings during training for
+        regularization (decoder can't rely solely on deck).
+      - Full 32-dim deck embeddings to both encoder and decoder — no bottleneck.
+        FiLM handles the "decoder must use z" constraint; the bottleneck was
+        starving the decoder of useful deck identity information.
+      - KL targeting: |KL - target| in training loss.
 
     Args:
         vocab_size: Card vocabulary size.
         latent_dim: Variational latent dimension.
-        deck_embed_dim: Deck embedding dimension (before bottleneck).
-        deck_bottleneck_dim: Deck dimension seen by decoder (after bottleneck).
-        deck_dropout: Dropout rate on bottlenecked deck embeddings.
+        deck_embed_dim: Deck embedding dimension.
+        deck_bottleneck_dim: Deprecated, kept for checkpoint loading compat.
+        deck_dropout: Dropout rate on deck embeddings.
         dropout: General dropout rate.
     """
 
@@ -545,7 +544,7 @@ class CounterfactualVAE(nn.Module):
         vocab_size: int,
         latent_dim: int = 64,
         deck_embed_dim: int = 32,
-        deck_bottleneck_dim: int = 8,
+        deck_bottleneck_dim: int = 32,
         deck_dropout: float = 0.3,
         dropout: float = 0.2,
     ):
@@ -561,11 +560,15 @@ class CounterfactualVAE(nn.Module):
             vocab_size, output_dim=deck_embed_dim,
         )
 
-        # Bottleneck: compress deck embeddings before decoder sees them
-        self.deck_bottleneck = nn.Linear(deck_embed_dim, deck_bottleneck_dim)
         self.deck_dropout = nn.Dropout(deck_dropout)
 
-        # Encoder sees full deck embeddings (no bottleneck)
+        # Bottleneck kept as identity for backward compat with v3/v4 checkpoints
+        if deck_bottleneck_dim != deck_embed_dim:
+            self.deck_bottleneck = nn.Linear(deck_embed_dim, deck_bottleneck_dim)
+        else:
+            self.deck_bottleneck = nn.Identity()
+
+        # Encoder and decoder both see full deck embeddings
         self.encoder = CVAEEncoder(
             vocab_size=vocab_size,
             dropout=dropout,
@@ -573,7 +576,6 @@ class CounterfactualVAE(nn.Module):
             latent_dim=latent_dim,
         )
 
-        # Decoder sees bottlenecked deck embeddings
         self.decoder = CVAEDecoder(
             vocab_size=vocab_size,
             dropout=dropout,
@@ -582,13 +584,13 @@ class CounterfactualVAE(nn.Module):
         )
 
     def bottleneck_deck(self, deck_emb: torch.Tensor) -> torch.Tensor:
-        """Apply deck bottleneck (+ dropout if training) for decoder input.
+        """Apply deck dropout (+ bottleneck if configured) for decoder input.
 
         Args:
             deck_emb: (batch, deck_embed_dim) full deck embedding.
 
         Returns:
-            (batch, deck_bottleneck_dim) compressed deck embedding.
+            (batch, deck_embed_dim or deck_bottleneck_dim) deck embedding.
         """
         return self.deck_dropout(self.deck_bottleneck(deck_emb))
 
@@ -629,13 +631,13 @@ class CounterfactualVAE(nn.Module):
         )
         z = self.reparameterize(mu, logvar)
 
-        # Decoder sees bottlenecked + dropped-out deck embeddings
-        p_deck_bn = self.deck_dropout(self.deck_bottleneck(player_deck_emb))
-        o_deck_bn = self.deck_dropout(self.deck_bottleneck(opponent_deck_emb))
+        # Decoder sees dropped-out deck embeddings (no bottleneck in v5)
+        p_deck_dec = self.bottleneck_deck(player_deck_emb)
+        o_deck_dec = self.bottleneck_deck(opponent_deck_emb)
 
         decoder_out = self.decoder(
             card_ids, features, lengths,
-            z, p_deck_bn, o_deck_bn,
+            z, p_deck_dec, o_deck_dec,
         )
 
         decoder_out["mu"] = mu

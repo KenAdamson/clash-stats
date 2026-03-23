@@ -228,7 +228,7 @@ class CVAETrainer:
             Path to saved best model checkpoint.
         """
         self.model_dir.mkdir(parents=True, exist_ok=True)
-        best_path = self.model_dir / "cvae_v4.pt"
+        best_path = self.model_dir / "cvae_v5.pt"
 
         best_val_loss = float("inf")
         patience_counter = 0
@@ -398,7 +398,7 @@ def train_cvae(
         return
 
     # 3. Initialize model
-    cvae_path = model_dir / "cvae_v4.pt"
+    cvae_path = model_dir / "cvae_v5.pt"
     if resume and cvae_path.exists():
         logger.info("Resuming from %s", cvae_path)
         checkpoint = torch.load(cvae_path, map_location=device, weights_only=True)
