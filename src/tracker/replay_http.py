@@ -50,7 +50,7 @@ from tracker.replays import (
 logger = logging.getLogger(__name__)
 
 # Tuning knobs
-MAX_CONCURRENT = 8           # concurrent HTTP requests for replay fetches
+MAX_CONCURRENT = 16          # concurrent HTTP requests for replay fetches
 REPLAY_DELAY = 0.5           # seconds between replay fetches (rate limiting)
 BATCH_PAGE_DELAY = 0.5       # seconds between battle page fetches
 REQUEST_TIMEOUT = 15         # seconds per HTTP request
