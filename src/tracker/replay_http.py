@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 
 # Tuning knobs
 MAX_CONCURRENT = 8           # concurrent HTTP requests — Cloudflare limit is between 8-10
-REPLAY_DELAY = 0.25          # seconds between replay fetches (rate limiting)
+REPLAY_DELAY = 0.5           # seconds between replay fetches (rate limiting)
 BATCH_PAGE_DELAY = 0.2       # seconds between battle page fetches
 STARTUP_JITTER = 1.0         # max seconds of random jitter per thread at startup
 REQUEST_TIMEOUT = 15         # seconds per HTTP request
