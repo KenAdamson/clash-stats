@@ -222,7 +222,10 @@ def _fetch_replay_with_retry(
 
         if status in (429, 403):
             is_cloudflare = "just a moment" in body.lower() if body else False
-            wait = min(2 ** attempt, 32) + random.uniform(0, 1)
+            # Start backoff at 8s — empirically 69% of retries succeed after
+            # ~8s. Skips 3 wasted requests that just add traffic without
+            # results. Subsequent retries double from there.
+            wait = min(8 * max(1, 2 ** (attempt - 1)), 64) + random.uniform(0, 1)
             total_backoff += wait
             logger.warning(
                 "%d on %s — attempt %d/%d, backoff %.1fs%s",
