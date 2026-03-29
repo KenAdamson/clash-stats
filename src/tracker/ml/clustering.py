@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from tracker.models import Battle
-from tracker.ml.storage import GameEmbedding, from_blob
+from tracker.ml.storage import GameEmbedding
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +54,7 @@ def profile_clusters(
         select(
             GameEmbedding.battle_id,
             GameEmbedding.cluster_id,
-            GameEmbedding.embedding_3d,
+            GameEmbedding.embedding_vec_3d,
         )
     ).all()
 
@@ -72,11 +72,13 @@ def profile_clusters(
 
     # Group by cluster
     clusters: dict[int, list] = {}
-    for battle_id, cluster_id, emb_3d in rows:
+    for battle_id, cluster_id, vec_3d in rows:
         cid = cluster_id if cluster_id is not None else -1
         if cid not in clusters:
             clusters[cid] = []
-        xyz = from_blob(emb_3d, 3)
+        if vec_3d is None or len(vec_3d) != 3:
+            continue
+        xyz = vec_3d
         clusters[cid].append({
             "battle_id": battle_id,
             "result": result_map.get(battle_id, "unknown"),

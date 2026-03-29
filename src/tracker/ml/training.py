@@ -330,8 +330,10 @@ def train_tcn(session: Session, model_dir: Optional[Path] = None) -> None:
     for i, battle_id in enumerate(battle_ids):
         session.merge(GameEmbedding(
             battle_id=battle_id,
-            embedding_15d=to_blob(embeddings_128d[i]),  # reuses 15d column for 128d
-            embedding_3d=to_blob(embeddings_3d[i]),
+            embedding_15d=to_blob(embeddings_128d[i]),  # legacy BLOB
+            embedding_3d=to_blob(embeddings_3d[i]),      # legacy BLOB
+            embedding_tcn_128d=embeddings_128d[i].tolist(),  # native vector
+            embedding_vec_3d=embeddings_3d[i].tolist(),      # native vector
             cluster_id=int(cluster_ids[i]) if cluster_ids[i] >= 0 else None,
             model_version=TCN_MODEL_VERSION,
         ))
@@ -495,9 +497,11 @@ def embed_new(session: Session, model_dir: Optional[Path] = None) -> int:
     for i, battle_id in enumerate(new_battle_ids):
         session.merge(GameEmbedding(
             battle_id=battle_id,
-            embedding_15d=to_blob(embeddings_128d[i]),
-            embedding_3d=to_blob(embeddings_3d[i]),
-            cluster_id=None,  # skip clustering for incremental
+            embedding_15d=to_blob(embeddings_128d[i]),  # legacy BLOB
+            embedding_3d=to_blob(embeddings_3d[i]),      # legacy BLOB
+            embedding_tcn_128d=embeddings_128d[i].tolist(),  # native vector
+            embedding_vec_3d=embeddings_3d[i].tolist(),      # native vector
+            cluster_id=None,
             model_version=TCN_MODEL_VERSION,
         ))
 

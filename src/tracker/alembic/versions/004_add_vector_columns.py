@@ -23,10 +23,16 @@ def upgrade() -> None:
         c["name"] for c in inspect(conn).get_columns("game_features")
     }
 
-    # Ensure extensions exist (idempotent)
+    # Ensure extensions exist (PostgreSQL only — skip for SQLite tests)
+    conn = op.get_bind()
+
+    # Skip entirely on SQLite (tests) — vector type doesn't exist.
+    # Tests use Base.metadata.create_all which creates tables from ORM.
+    if conn.dialect.name == "sqlite":
+        return
+
     op.execute("CREATE EXTENSION IF NOT EXISTS vchord CASCADE")
 
-    # game_embeddings: properly-typed vector columns
     if "embedding_tcn_128d" not in existing_cols:
         op.execute(
             "ALTER TABLE game_embeddings ADD COLUMN embedding_tcn_128d vector(128)"
@@ -36,8 +42,6 @@ def upgrade() -> None:
             "ALTER TABLE game_embeddings ADD COLUMN embedding_vec_3d vector(3)"
         )
 
-    # game_features: native vector column (table is currently empty but
-    # will be populated when features are next extracted)
     if "feature_vec" not in feature_cols:
         op.execute(
             "ALTER TABLE game_features ADD COLUMN feature_vec vector(50)"

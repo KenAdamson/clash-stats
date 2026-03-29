@@ -278,7 +278,8 @@ def build_feature_matrix(
                 vectors.append(vec)
                 session.merge(GameFeature(
                     battle_id=battle_id,
-                    feature_vector=to_blob(vec),
+                    feature_vector=to_blob(vec),    # legacy BLOB
+                    feature_vec=vec.tolist(),         # native vector
                     feature_version=FEATURE_VERSION,
                 ))
             else:

@@ -539,14 +539,14 @@ def create_app(db_path: str | None = None) -> Flask:
         import random as _random
         session = get_session(engine)
         try:
-            from tracker.ml.storage import GameEmbedding, from_blob
+            from tracker.ml.storage import GameEmbedding
             from tracker.models import Battle
             from sqlalchemy import select
 
             rows = session.execute(
                 select(
                     GameEmbedding.battle_id,
-                    GameEmbedding.embedding_3d,
+                    GameEmbedding.embedding_vec_3d,
                     GameEmbedding.cluster_id,
                 )
             ).all()
@@ -563,11 +563,10 @@ def create_app(db_path: str | None = None) -> Flask:
 
             personal_points = []
             corpus_points = []
-            for bid, emb_3d, cluster_id in rows:
-                try:
-                    xyz = from_blob(emb_3d, 3)
-                except ValueError:
-                    continue  # Skip stale 2D embeddings pre-retraining
+            for bid, vec_3d, cluster_id in rows:
+                if vec_3d is None or len(vec_3d) != 3:
+                    continue
+                xyz = vec_3d
                 b = meta.get(bid)
                 point = {
                     "battle_id": bid,

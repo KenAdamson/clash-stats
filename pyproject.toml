@@ -15,6 +15,7 @@ dependencies = [
     "prometheus-client>=0.20",
     "numpy>=1.26",
     "scipy>=1.12",
+    "pgvector>=0.3",
 ]
 
 [project.scripts]
