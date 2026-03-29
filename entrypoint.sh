@@ -190,6 +190,17 @@ clash-stats --wp-infer-new ${DB_FLAG}
 EOF
 chmod +x /app/wp_infer_new.sh
 
+# Incremental TCN embedding (new games only, no retraining)
+cat > /app/embed_new.sh << EOF
+#!/bin/sh
+exec flock -n ${LOCKDIR}/embed_new.lock sh -c '
+[ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
+export PYTHONUNBUFFERED=1
+clash-stats --embed-new ${DB_FLAG}
+' || echo "embed_new: previous run still active, skipping"
+EOF
+chmod +x /app/embed_new.sh
+
 # TCN retraining
 cat > /app/tcn_train.sh << EOF
 #!/bin/sh
