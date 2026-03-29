@@ -52,10 +52,10 @@ def _enrich_results(session: Session, results: list[dict]) -> None:
 
     # Add 3D embedding coordinates for visualization lines
     emb_rows = session.execute(
-        select(GameEmbedding.battle_id, GameEmbedding.embedding_3d)
+        select(GameEmbedding.battle_id, GameEmbedding.embedding_vec_3d)
         .where(GameEmbedding.battle_id.in_(result_ids))
     ).all()
-    emb_map = {r[0]: from_blob(r[1], 3) for r in emb_rows if r[1]}
+    emb_map = {r[0]: r[1] for r in emb_rows if r[1] is not None}
     for r in results:
         coords = emb_map.get(r["battle_id"])
         if coords is not None:
@@ -197,14 +197,13 @@ def find_similar(
     _enrich_results(session, personal_results)
 
     # Reference point 3D coordinates for visualization lines
-    ref_emb = session.execute(
-        select(GameEmbedding.embedding_3d)
+    ref_vec = session.execute(
+        select(GameEmbedding.embedding_vec_3d)
         .where(GameEmbedding.battle_id == battle_id)
     ).scalar_one_or_none()
     ref_coords = None
-    if ref_emb is not None:
-        c = from_blob(ref_emb, 3)
-        ref_coords = {"x": float(c[0]), "y": float(c[1]), "z": float(c[2])}
+    if ref_vec is not None and len(ref_vec) == 3:
+        ref_coords = {"x": float(ref_vec[0]), "y": float(ref_vec[1]), "z": float(ref_vec[2])}
 
     return {
         "corpus": corpus_results,

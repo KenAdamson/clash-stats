@@ -50,9 +50,10 @@ from tracker.replays import (
 logger = logging.getLogger(__name__)
 
 # Tuning knobs
-MAX_CONCURRENT = 8           # concurrent HTTP requests for replay fetches
+MAX_CONCURRENT = 8           # concurrent HTTP requests — Cloudflare limit is between 8-10
 REPLAY_DELAY = 0.5           # seconds between replay fetches (rate limiting)
-BATCH_PAGE_DELAY = 0.5       # seconds between battle page fetches
+BATCH_PAGE_DELAY = 0.2       # seconds between battle page fetches
+STARTUP_JITTER = 1.0         # max seconds of random jitter per thread at startup
 REQUEST_TIMEOUT = 15         # seconds per HTTP request
 USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -221,7 +222,10 @@ def _fetch_replay_with_retry(
 
         if status in (429, 403):
             is_cloudflare = "just a moment" in body.lower() if body else False
-            wait = min(2 ** attempt, 32) + random.uniform(0, 1)
+            # Start backoff at 8s — empirically 69% of retries succeed after
+            # ~8s. Skips 3 wasted requests that just add traffic without
+            # results. Subsequent retries double from there.
+            wait = min(8 * max(1, 2 ** (attempt - 1)), 64) + random.uniform(0, 1)
             total_backoff += wait
             logger.warning(
                 "%d on %s — attempt %d/%d, backoff %.1fs%s",
@@ -375,8 +379,19 @@ def fetch_replays_http(
     # Results are (battle_id, parsed_data | "empty" | None)
     parsed_results: list[tuple[str, Optional[dict]]] = []
 
+    _thread_started = set()  # track which threads have done their startup jitter
+
     def _process_one(battle: Battle) -> tuple[str, Optional[dict]]:
         """Fetch and parse one replay. Returns (battle_id, parsed_data)."""
+        # Startup jitter: first request per thread gets a random delay
+        # to spread threads across different Cloudflare rate limit buckets
+        tid = id(battle)  # unique per call
+        import threading
+        thread_id = threading.current_thread().ident
+        if thread_id not in _thread_started:
+            _thread_started.add(thread_id)
+            time.sleep(random.uniform(0, STARTUP_JITTER))
+
         link = _match_battle_to_link(battle, all_links)
         if not link:
             stats["no_link"] += 1

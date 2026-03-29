@@ -409,6 +409,30 @@ summary {
     color: var(--text);
 }
 
+.dual-range-wrap {
+    position: relative;
+    height: 24px;
+}
+
+.dual-range-wrap .timeline-slider {
+    position: absolute;
+    width: 100%;
+    top: 0;
+    pointer-events: none;         /* let clicks pass through to the other thumb */
+}
+
+.dual-range-wrap .timeline-slider::-webkit-slider-thumb {
+    pointer-events: auto;         /* but thumbs ARE clickable */
+}
+
+.dual-range-wrap .timeline-slider::-moz-range-thumb {
+    pointer-events: auto;
+}
+
+.dual-range-wrap .dual-hi {
+    background: transparent;      /* only lo draws the track */
+}
+
 .timeline-slider {
     -webkit-appearance: none;
     appearance: none;

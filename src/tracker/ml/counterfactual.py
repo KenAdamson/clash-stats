@@ -54,7 +54,7 @@ def _load_cvae(
 ) -> Optional[CounterfactualVAE]:
     """Load trained CVAE from checkpoint."""
     # Prefer v3 -> v2 -> v1
-    for name in ["cvae_v4.pt", "cvae_v3.pt", "cvae_v2.pt", "cvae_v1.pt"]:
+    for name in ["cvae_v5.pt", "cvae_v4.pt", "cvae_v3.pt", "cvae_v2.pt", "cvae_v1.pt"]:
         cvae_path = model_dir / name
         if cvae_path.exists():
             break

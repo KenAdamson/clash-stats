@@ -1,13 +1,15 @@
 """Storage helpers for ML feature vectors and embeddings.
 
-Provides numpy array ↔ SQLite BLOB serialization and ORM models
-for the game_features and game_embeddings tables.
+Provides ORM models for game_features and game_embeddings tables.
+Supports both legacy BLOB columns and native pgvector columns
+during the VectorChord migration.
 """
 
 import numpy as np
 from datetime import datetime
 from typing import Optional
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import ForeignKey, String, LargeBinary, func
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -23,27 +25,34 @@ class GameFeature(Base):
         ForeignKey("battles.battle_id"), primary_key=True
     )
     feature_vector: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    feature_vec: Mapped[Optional[list]] = mapped_column(Vector(50), nullable=True)
     feature_version: Mapped[str] = mapped_column(String, default="v1")
     created_at: Mapped[Optional[datetime]] = mapped_column(default=func.now())
 
 
 class GameEmbedding(Base):
-    """UMAP embedding for a game, stored at two resolutions (15-dim analytical, 3-dim visualization)."""
+    """Game embedding at multiple resolutions."""
 
     __tablename__ = "game_embeddings"
 
     battle_id: Mapped[str] = mapped_column(
         ForeignKey("battles.battle_id"), primary_key=True
     )
+    # Legacy BLOB columns (kept during migration)
     embedding_15d: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     embedding_3d: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+
+    # Native vector columns (VectorChord/pgvector)
+    embedding_tcn_128d: Mapped[Optional[list]] = mapped_column(Vector(128), nullable=True)
+    embedding_vec_3d: Mapped[Optional[list]] = mapped_column(Vector(3), nullable=True)
+
     cluster_id: Mapped[Optional[int]]
     model_version: Mapped[str] = mapped_column(String, default="umap-v1")
     created_at: Mapped[Optional[datetime]] = mapped_column(default=func.now())
 
 
 def to_blob(arr: np.ndarray) -> bytes:
-    """Serialize a numpy float32 array to bytes for SQLite BLOB storage."""
+    """Serialize a numpy float32 array to bytes for BLOB storage."""
     return arr.astype(np.float32).tobytes()
 
 

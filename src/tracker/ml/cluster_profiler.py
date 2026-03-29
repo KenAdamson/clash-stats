@@ -24,7 +24,7 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from tracker.ml.card_metadata import CARD_TYPES, kebab_to_title
-from tracker.ml.storage import GameEmbedding, from_blob
+from tracker.ml.storage import GameEmbedding
 from tracker.models import Battle, ReplayEvent
 from tracker.temporal_analysis import (
     ARENA_X_MID, ARENA_Y_MID, PHASE_REGULAR_END, PHASE_DOUBLE_END,
@@ -47,16 +47,15 @@ def _load_embedding_map(session: Session) -> dict[str, dict]:
         select(
             GameEmbedding.battle_id,
             GameEmbedding.cluster_id,
-            GameEmbedding.embedding_3d,
+            GameEmbedding.embedding_vec_3d,
         ).where(GameEmbedding.model_version == "tcn-v1")
     ).all()
 
     result = {}
-    for bid, cid, emb_3d in rows:
-        try:
-            xyz = from_blob(emb_3d, 3)
-        except (ValueError, TypeError):
+    for bid, cid, vec_3d in rows:
+        if vec_3d is None or len(vec_3d) != 3:
             continue
+        xyz = vec_3d
         result[bid] = {
             "cluster_id": cid if cid is not None else -1,
             "x": float(xyz[0]),

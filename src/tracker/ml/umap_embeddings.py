@@ -210,8 +210,9 @@ def train_embeddings(
     for i, battle_id in enumerate(battle_ids):
         session.merge(GameEmbedding(
             battle_id=battle_id,
-            embedding_15d=to_blob(embeddings_15d[i]),
-            embedding_3d=to_blob(embeddings_3d[i]),
+            embedding_15d=to_blob(embeddings_15d[i]),  # legacy BLOB
+            embedding_3d=to_blob(embeddings_3d[i]),     # legacy BLOB
+            embedding_vec_3d=embeddings_3d[i].tolist(),  # native vector
             cluster_id=int(cluster_ids[i]) if cluster_ids[i] >= 0 else None,
             model_version=MODEL_VERSION,
         ))

@@ -173,7 +173,7 @@ export ROYALEAPI_SESSION_PATH="${ROYALEAPI_SESSION_PATH:-/app/data/royaleapi_ses
 export REPLAYS_PER_PLAYER="${REPLAYS_PER_PLAYER:-25}"
 [ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
-clash-stats --corpus-combined --corpus-limit 50 --concurrency 12 --max-pages 2 ${DB_FLAG}
+clash-stats --corpus-combined --corpus-limit 50 --concurrency 12 --max-pages 3 ${DB_FLAG}
 ' || echo "corpus_combined: previous run still active, skipping"
 EOF
 chmod +x /app/corpus_combined.sh
@@ -189,6 +189,17 @@ clash-stats --wp-infer-new ${DB_FLAG}
 ' || echo "wp_infer_new: previous run still active, skipping"
 EOF
 chmod +x /app/wp_infer_new.sh
+
+# Incremental TCN embedding (new games only, no retraining)
+cat > /app/embed_new.sh << EOF
+#!/bin/sh
+exec flock -n ${LOCKDIR}/embed_new.lock sh -c '
+[ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
+export PYTHONUNBUFFERED=1
+clash-stats --embed-new ${DB_FLAG}
+' || echo "embed_new: previous run still active, skipping"
+EOF
+chmod +x /app/embed_new.sh
 
 # TCN retraining
 cat > /app/tcn_train.sh << EOF
