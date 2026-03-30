@@ -126,64 +126,78 @@ def find_similar(
     # Format as pgvector string: '[f1,f2,...,fn]'
     ref_str = '[' + ','.join(str(float(v)) for v in ref_vec) + ']'
 
-    # kNN query: corpus games (server-side distance via VectorChord index)
-    corpus_rows = session.execute(
+    # Phase 1: Pure kNN — uses VectorChord index, ~11ms for 544K vectors.
+    # Fetch more than k to have enough after corpus/personal split.
+    fetch_limit = k * 10
+    knn_rows = session.execute(
         sa_text("""
-            SELECT gf.battle_id,
-                   gf.feature_vec <-> CAST(:ref AS vector) AS distance,
-                   ge.cluster_id
-            FROM game_features gf
-            JOIN battles b ON b.battle_id = gf.battle_id
-            LEFT JOIN game_embeddings ge ON ge.battle_id = gf.battle_id
-            WHERE b.corpus != 'personal'
-              AND gf.battle_id != :bid
-              AND gf.feature_vec IS NOT NULL
-            ORDER BY gf.feature_vec <-> CAST(:ref AS vector)
-            LIMIT :k
+            SELECT battle_id,
+                   feature_vec <-> CAST(:ref AS vector) AS distance
+            FROM game_features
+            WHERE battle_id != :bid
+              AND feature_vec IS NOT NULL
+            ORDER BY feature_vec <-> CAST(:ref AS vector)
+            LIMIT :lim
         """),
-        {"ref": ref_str, "bid": battle_id, "k": k},
+        {"ref": ref_str, "bid": battle_id, "lim": fetch_limit},
     ).all()
 
-    # kNN query: personal games
-    personal_rows = session.execute(
-        sa_text("""
-            SELECT gf.battle_id,
-                   gf.feature_vec <-> CAST(:ref AS vector) AS distance,
-                   ge.cluster_id
-            FROM game_features gf
-            JOIN battles b ON b.battle_id = gf.battle_id
-            LEFT JOIN game_embeddings ge ON ge.battle_id = gf.battle_id
-            WHERE b.corpus = 'personal'
-              AND gf.battle_id != :bid
-              AND gf.feature_vec IS NOT NULL
-            ORDER BY gf.feature_vec <-> CAST(:ref AS vector)
-            LIMIT :k
-        """),
-        {"ref": ref_str, "bid": battle_id, "k": k},
+    if not knn_rows:
+        return {"corpus": [], "personal": []}
+
+    # Phase 2: Enrich only the top-k*10 results with corpus/cluster metadata
+    neighbor_ids = [r[0] for r in knn_rows]
+    dist_map = {r[0]: r[1] for r in knn_rows}
+
+    corpus_rows = session.execute(
+        select(Battle.battle_id, Battle.corpus)
+        .where(Battle.battle_id.in_(neighbor_ids))
     ).all()
+    corpus_map = {r[0]: r[1] for r in corpus_rows}
+
+    cluster_rows = session.execute(
+        select(GameEmbedding.battle_id, GameEmbedding.cluster_id)
+        .where(GameEmbedding.battle_id.in_(neighbor_ids))
+    ).all()
+    cluster_map = {r[0]: r[1] for r in cluster_rows}
+
+    # Phase 3: Split into corpus/personal, take top-k of each
+    corpus_results_raw = []
+    personal_results_raw = []
+    for bid in neighbor_ids:
+        corpus = corpus_map.get(bid, "unknown")
+        entry = (bid, dist_map[bid], cluster_map.get(bid))
+        if corpus == "personal":
+            if len(personal_results_raw) < k:
+                personal_results_raw.append(entry)
+        else:
+            if len(corpus_results_raw) < k:
+                corpus_results_raw.append(entry)
+        if len(corpus_results_raw) >= k and len(personal_results_raw) >= k:
+            break
 
     # Compute Gaussian kernel similarity from distances
-    all_distances = [r[1] for r in corpus_rows] + [r[1] for r in personal_rows]
+    all_distances = [e[1] for e in corpus_results_raw] + [e[1] for e in personal_results_raw]
     if all_distances:
         sigma = float(np.median(all_distances)) or 1.0
     else:
         sigma = 1.0
 
-    def _build_results(rows):
+    def _build_results(raw):
         results = []
-        for bid, distance, cluster_id in rows:
+        for bid, distance, cluster_id in raw:
             similarity = float(np.exp(-distance**2 / (2 * sigma**2)))
             results.append({
                 "battle_id": bid,
                 "distance": float(distance),
                 "similarity": similarity,
-                "percentile": None,  # would need full table scan; distance is sufficient
+                "percentile": None,
                 "cluster_id": cluster_id,
             })
         return results
 
-    corpus_results = _build_results(corpus_rows)
-    personal_results = _build_results(personal_rows)
+    corpus_results = _build_results(corpus_results_raw)
+    personal_results = _build_results(personal_results_raw)
 
     _enrich_results(session, corpus_results)
     _enrich_results(session, personal_results)
