@@ -25,7 +25,7 @@ class GameFeature(Base):
         ForeignKey("battles.battle_id"), primary_key=True
     )
     feature_vector: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
-    feature_vec: Mapped[Optional[list]] = mapped_column(Vector(50), nullable=True)
+    feature_vec: Mapped[Optional[list]] = mapped_column(Vector(51), nullable=True)
     feature_version: Mapped[str] = mapped_column(String, default="v1")
     created_at: Mapped[Optional[datetime]] = mapped_column(default=func.now())
 

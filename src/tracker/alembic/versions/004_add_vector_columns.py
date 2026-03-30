@@ -44,7 +44,7 @@ def upgrade() -> None:
 
     if "feature_vec" not in feature_cols:
         op.execute(
-            "ALTER TABLE game_features ADD COLUMN feature_vec vector(50)"
+            "ALTER TABLE game_features ADD COLUMN feature_vec vector(51)"
         )
 
 
