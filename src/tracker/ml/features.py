@@ -201,8 +201,10 @@ def build_feature_matrix(
     # Find battles with replay events
     replay_battles = session.execute(
         text("""
-            SELECT DISTINCT re.battle_id
-            FROM replay_events re
+            SELECT re.battle_id
+            FROM (
+                SELECT DISTINCT battle_id FROM replay_events
+            ) re
             JOIN battles b ON b.battle_id = re.battle_id
             WHERE b.battle_type IN ('PvP', 'pathOfLegend')
             ORDER BY b.battle_time
