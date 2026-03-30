@@ -838,8 +838,8 @@ function renderEmbeddingChart(points) {
     const data = [
         makeEmbeddingTrace(corpusWins,     "Corpus Wins",    "rgb(52, 211, 153)",  2.5, 0.25, false),
         makeEmbeddingTrace(corpusLosses,   "Corpus Losses",  "rgb(248, 113, 113)", 2.5, 0.25, false),
-        makeEmbeddingTrace(personalWins,   "My Wins",        "rgb(52, 211, 153)",  5,   0.9,  true),
-        makeEmbeddingTrace(personalLosses, "My Losses",      "rgb(248, 113, 113)", 5,   0.9,  true),
+        makeEmbeddingTrace(personalWins,   "My Wins",        "rgb(52, 211, 153)",  2.5, 0.9,  true),
+        makeEmbeddingTrace(personalLosses, "My Losses",      "rgb(248, 113, 113)", 2.5, 0.9,  true),
     ];
 
     Plotly.newPlot("embeddingPlot", data, EMBEDDING_LAYOUT, EMBEDDING_CONFIG);
