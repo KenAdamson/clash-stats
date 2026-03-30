@@ -101,6 +101,13 @@ def create_app(db_path: str | None = None) -> Flask:
     # Clear stale cache entries from previous app instances (e.g. in tests)
     _cache.clear()
 
+    @app.after_request
+    def _add_cache_headers(response):
+        """Allow browsers to cache API responses for 5 minutes."""
+        if request.path.startswith("/api/"):
+            response.headers["Cache-Control"] = "public, max-age=300"
+        return response
+
     @app.route("/")
     def index():
         return render_template("dashboard.html")
