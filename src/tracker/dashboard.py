@@ -541,53 +541,65 @@ def create_app(db_path: str | None = None) -> Flask:
         try:
             from tracker.ml.storage import GameEmbedding
             from tracker.models import Battle
-            from sqlalchemy import select
+            from sqlalchemy import select, text as sa_text
 
-            rows = session.execute(
+            # All personal games (full resolution)
+            personal_rows = session.execute(
                 select(
                     GameEmbedding.battle_id,
                     GameEmbedding.embedding_vec_3d,
                     GameEmbedding.cluster_id,
+                    Battle.result,
+                    Battle.corpus,
+                    Battle.opponent_name,
+                    Battle.battle_time,
+                )
+                .join(Battle, GameEmbedding.battle_id == Battle.battle_id)
+                .where(
+                    Battle.corpus == "personal",
+                    GameEmbedding.embedding_vec_3d.isnot(None),
                 )
             ).all()
 
-            if not rows:
+            # Corpus games: random sample in SQL (avoids loading 160K rows)
+            corpus_rows = session.execute(
+                sa_text("""
+                    SELECT ge.battle_id, ge.embedding_vec_3d, ge.cluster_id,
+                           b.result, b.corpus, b.opponent_name, b.battle_time
+                    FROM game_embeddings ge
+                    JOIN battles b ON ge.battle_id = b.battle_id
+                    WHERE b.corpus != 'personal'
+                      AND ge.embedding_vec_3d IS NOT NULL
+                    ORDER BY random()
+                    LIMIT :sample_size
+                """),
+                {"sample_size": CORPUS_SAMPLE_SIZE},
+            ).all()
+
+            if not personal_rows and not corpus_rows:
                 return jsonify({"error": "No embeddings. Run --train-embeddings first."}), 404
 
-            battle_ids = [r[0] for r in rows]
-            battles = session.execute(
-                select(Battle.battle_id, Battle.result, Battle.corpus, Battle.opponent_name, Battle.battle_time)
-                .where(Battle.battle_id.in_(battle_ids))
-            ).all()
-            meta = {b[0]: b for b in battles}
-
-            personal_points = []
-            corpus_points = []
-            for bid, vec_3d, cluster_id in rows:
+            def _make_point(row):
+                bid, vec_3d, cluster_id, result, corpus, opponent, battle_time = row
                 if vec_3d is None or len(vec_3d) != 3:
-                    continue
-                xyz = vec_3d
-                b = meta.get(bid)
-                point = {
+                    return None
+                return {
                     "battle_id": bid,
-                    "x": float(xyz[0]),
-                    "y": float(xyz[1]),
-                    "z": float(xyz[2]),
+                    "x": float(vec_3d[0]),
+                    "y": float(vec_3d[1]),
+                    "z": float(vec_3d[2]),
                     "cluster_id": cluster_id,
-                    "result": b[1] if b else None,
-                    "corpus": b[2] if b else None,
-                    "opponent": b[3] if b else None,
-                    "battle_time": b[4] if b else None,
+                    "result": result,
+                    "corpus": corpus,
+                    "opponent": opponent,
+                    "battle_time": battle_time,
                 }
-                if b and b[2] == "personal":
-                    personal_points.append(point)
-                else:
-                    corpus_points.append(point)
 
-            # Downsample corpus for browser performance
-            total_corpus = len(corpus_points)
-            if total_corpus > CORPUS_SAMPLE_SIZE:
-                corpus_points = _random.sample(corpus_points, CORPUS_SAMPLE_SIZE)
+            personal_points = [p for p in (_make_point(r) for r in personal_rows) if p]
+            corpus_points = [p for p in (_make_point(r) for r in corpus_rows) if p]
+            total_corpus = session.execute(
+                sa_text("SELECT COUNT(*) FROM game_embeddings ge JOIN battles b ON ge.battle_id = b.battle_id WHERE b.corpus != 'personal' AND ge.embedding_vec_3d IS NOT NULL")
+            ).scalar() or 0
 
             points = corpus_points + personal_points
 
