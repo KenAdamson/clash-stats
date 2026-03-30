@@ -123,6 +123,8 @@ def find_similar(
         return {"corpus": [], "personal": []}
 
     ref_vec = ref_row[0]
+    # Format as pgvector string: '[f1,f2,...,fn]'
+    ref_str = '[' + ','.join(str(float(v)) for v in ref_vec) + ']'
 
     # kNN query: corpus games (server-side distance via VectorChord index)
     corpus_rows = session.execute(
@@ -139,7 +141,7 @@ def find_similar(
             ORDER BY gf.feature_vec <-> CAST(:ref AS vector)
             LIMIT :k
         """),
-        {"ref": str(ref_vec), "bid": battle_id, "k": k},
+        {"ref": ref_str, "bid": battle_id, "k": k},
     ).all()
 
     # kNN query: personal games
@@ -157,7 +159,7 @@ def find_similar(
             ORDER BY gf.feature_vec <-> CAST(:ref AS vector)
             LIMIT :k
         """),
-        {"ref": str(ref_vec), "bid": battle_id, "k": k},
+        {"ref": ref_str, "bid": battle_id, "k": k},
     ).all()
 
     # Compute Gaussian kernel similarity from distances
