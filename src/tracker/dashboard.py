@@ -579,9 +579,25 @@ def create_app(db_path: str | None = None) -> Flask:
             if not personal_rows and not corpus_rows:
                 return jsonify({"error": "No embeddings. Run --train-embeddings first."}), 404
 
+            def _parse_vec3(v):
+                """Parse vector(3) — handles both list (ORM) and string (raw SQL)."""
+                if v is None:
+                    return None
+                if isinstance(v, str):
+                    # Raw SQL returns '[1.0,2.0,3.0]'
+                    try:
+                        parts = v.strip('[]').split(',')
+                        return [float(x) for x in parts]
+                    except (ValueError, AttributeError):
+                        return None
+                if hasattr(v, '__len__') and len(v) == 3:
+                    return v
+                return None
+
             def _make_point(row):
-                bid, vec_3d, cluster_id, result, corpus, opponent, battle_time = row
-                if vec_3d is None or len(vec_3d) != 3:
+                bid, vec_3d_raw, cluster_id, result, corpus, opponent, battle_time = row
+                vec_3d = _parse_vec3(vec_3d_raw)
+                if vec_3d is None:
                     return None
                 return {
                     "battle_id": bid,
