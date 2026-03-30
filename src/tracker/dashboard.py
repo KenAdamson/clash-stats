@@ -552,21 +552,65 @@ def create_app(db_path: str | None = None) -> Flask:
                 Battle.opponent_name,
                 Battle.battle_time,
             )
-            _emb_join = select(*_emb_cols).join(
+            _emb_base = select(*_emb_cols).join(
                 Battle, GameEmbedding.battle_id == Battle.battle_id
             ).where(GameEmbedding.embedding_vec_3d.isnot(None))
 
-            # All personal games (full resolution)
-            personal_rows = session.execute(
-                _emb_join.where(Battle.corpus == "personal")
-            ).all()
+            page = request.args.get("page", type=int)
+            per_page = request.args.get("per_page", 1000, type=int)
+            per_page = min(per_page, 5000)
 
-            # Corpus games: random sample in SQL
-            corpus_rows = session.execute(
-                _emb_join.where(Battle.corpus != "personal")
-                .order_by(func.random())
+            # Personal games: all, ordered by time (for pagination)
+            personal_query = (
+                _emb_base.where(Battle.corpus == "personal")
+                .order_by(Battle.battle_time.desc())
+            )
+
+            # Corpus games: most recent N, ordered by time (for pagination)
+            corpus_query = (
+                _emb_base.where(Battle.corpus != "personal")
+                .order_by(Battle.battle_time.desc())
                 .limit(CORPUS_SAMPLE_SIZE)
-            ).all()
+            )
+
+            if page is not None:
+                # Paginated: fetch personal + corpus in one pass, paginate
+                # Personal always included; corpus paginated from most recent
+                from sqlalchemy import union_all
+                combined = union_all(personal_query, corpus_query).subquery()
+                total = session.execute(
+                    select(func.count()).select_from(combined)
+                ).scalar() or 0
+
+                rows = session.execute(
+                    select(combined)
+                    .order_by(combined.c.battle_time.desc())
+                    .offset(page * per_page)
+                    .limit(per_page)
+                ).all()
+
+                points = []
+                for row in rows:
+                    bid, vec_3d, cluster_id, result, corpus, opponent, battle_time = row
+                    if vec_3d is None or len(vec_3d) != 3:
+                        continue
+                    points.append({
+                        "battle_id": bid,
+                        "x": float(vec_3d[0]), "y": float(vec_3d[1]), "z": float(vec_3d[2]),
+                        "cluster_id": cluster_id, "result": result,
+                        "corpus": corpus, "opponent": opponent, "battle_time": battle_time,
+                    })
+
+                return jsonify({
+                    "points": points,
+                    "page": page,
+                    "total": total,
+                    "has_more": (page + 1) * per_page < total,
+                })
+
+            # Non-paginated fallback
+            personal_rows = session.execute(personal_query).all()
+            corpus_rows = session.execute(corpus_query).all()
 
             if not personal_rows and not corpus_rows:
                 return jsonify({"error": "No embeddings. Run --train-embeddings first."}), 404
@@ -577,39 +621,15 @@ def create_app(db_path: str | None = None) -> Flask:
                     return None
                 return {
                     "battle_id": bid,
-                    "x": float(vec_3d[0]),
-                    "y": float(vec_3d[1]),
-                    "z": float(vec_3d[2]),
-                    "cluster_id": cluster_id,
-                    "result": result,
-                    "corpus": corpus,
-                    "opponent": opponent,
-                    "battle_time": battle_time,
+                    "x": float(vec_3d[0]), "y": float(vec_3d[1]), "z": float(vec_3d[2]),
+                    "cluster_id": cluster_id, "result": result,
+                    "corpus": corpus, "opponent": opponent, "battle_time": battle_time,
                 }
 
             personal_points = [p for p in (_make_point(r) for r in personal_rows) if p]
             corpus_points = [p for p in (_make_point(r) for r in corpus_rows) if p]
-            total_corpus = session.execute(
-                select(func.count()).select_from(GameEmbedding)
-                .join(Battle, GameEmbedding.battle_id == Battle.battle_id)
-                .where(Battle.corpus != "personal", GameEmbedding.embedding_vec_3d.isnot(None))
-            ).scalar() or 0
 
             points = corpus_points + personal_points
-
-            page = request.args.get("page", type=int)
-            per_page = request.args.get("per_page", 1000, type=int)
-            per_page = min(per_page, 5000)
-            if page is not None:
-                start = page * per_page
-                chunk = points[start:start + per_page]
-                return jsonify({
-                    "points": chunk,
-                    "page": page,
-                    "total": len(points),
-                    "total_corpus_full": total_corpus,
-                    "has_more": start + per_page < len(points),
-                })
             result = {
                 "points": points,
                 "count": len(points),
