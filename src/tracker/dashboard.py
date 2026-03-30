@@ -521,7 +521,7 @@ def create_app(db_path: str | None = None) -> Flask:
         finally:
             session.close()
 
-    CORPUS_SAMPLE_SIZE = 10000
+    CORPUS_SAMPLE_SIZE = 20000
 
     @app.route("/api/embeddings")
     def api_embeddings():
