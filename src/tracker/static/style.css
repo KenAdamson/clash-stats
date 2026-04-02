@@ -362,6 +362,32 @@ summary {
     overflow-y: auto;
 }
 
+.accordion {
+    margin-top: 0.5rem;
+}
+
+.accordion summary {
+    cursor: pointer;
+    list-style: none;
+}
+
+.accordion summary::-webkit-details-marker {
+    display: none;
+}
+
+.accordion summary h3 {
+    display: inline;
+}
+
+.accordion summary h3::before {
+    content: "▸ ";
+    color: var(--text-dim);
+}
+
+.accordion[open] summary h3::before {
+    content: "▾ ";
+}
+
 /* Timeline slider control — reusable filter component */
 .timeline-control {
     margin-bottom: 0.75rem;
