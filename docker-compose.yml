@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: tensorchord/vchord-postgres:pg16-v0.2.2
+    image: tensorchord/vchord-postgres:pg17-v0.5.3
     container_name: clash-postgres
     restart: always
     profiles: [local]
