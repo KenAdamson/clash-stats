@@ -39,7 +39,8 @@ services:
       - FETCH_INTERVAL=14400  # 4 hours in seconds
       - BROWSER_WS_URL=http://cr-browser:9223
       - ROYALEAPI_SESSION_PATH=/app/data/royaleapi_session.json
-      - DATABASE_URL=postgresql://clash_stats:${DB_PASSWORD}@clash-postgres/clash_stats
+      - DATABASE_URL=postgresql://clash_stats:${DB_PASSWORD}@clash-postgres,192.168.7.62/clash_stats?target_session_attrs=read-write
+      - DASHBOARD_DATABASE_URL=postgresql://clash_stats:${DB_PASSWORD}@192.168.7.62/clash_stats
     volumes:
       - ./data:/app/data
       - ./.git:/app/.git:rw

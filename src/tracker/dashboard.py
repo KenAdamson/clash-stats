@@ -80,8 +80,10 @@ def create_app(db_path: str | None = None) -> Flask:
     )
 
     if db_path is None:
+        # Dashboard is read-only — prefer replica if configured
         db_path = os.environ.get(
-            "CR_DB_PATH", "data/clash_royale_history.db"
+            "DASHBOARD_DATABASE_URL",
+            os.environ.get("CR_DB_PATH", "data/clash_royale_history.db"),
         )
 
     # Serialize datetime as ISO 8601 (not Flask's default RFC 2822)
