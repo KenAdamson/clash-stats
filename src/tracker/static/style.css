@@ -602,6 +602,18 @@ summary {
     font-size: 0.8rem;
 }
 
+/* Nemesis detail placeholder */
+.detail-placeholder {
+    color: var(--text-dim);
+    text-align: center;
+    padding: 3rem 1rem;
+    font-style: italic;
+}
+
+.nemesis-active {
+    background: rgba(79, 140, 255, 0.12);
+}
+
 /* Section loading spinners (BigPipe) */
 .section-spinner {
     color: var(--text-dim);

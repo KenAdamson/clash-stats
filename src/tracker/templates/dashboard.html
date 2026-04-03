@@ -155,6 +155,37 @@
         </div>
     </section>
 
+    <!-- Nemesis Dashboard -->
+    <section class="card full-width" id="nemesis-section" style="display:none">
+        <h2>Nemesis Dashboard <span class="sub-header" id="nemesis-count"></span></h2>
+        <div class="split-layout">
+            <div class="split-left">
+                <h3>Top Opponents</h3>
+                <table id="nemesis-table" class="matchup-table">
+                    <thead><tr><th>Player</th><th>Faced</th><th>W</th><th>L</th><th>WR</th><th>Archetype</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+            <div class="split-right" id="nemesis-detail">
+                <div class="detail-placeholder" id="nemesis-placeholder">Click a nemesis to see their weaknesses</div>
+                <div id="nemesis-detail-content" style="display:none">
+                    <h3 id="nemesis-detail-name"></h3>
+                    <h3>Their Weaknesses <span class="sub-header" id="nemesis-corpus-size"></span></h3>
+                    <div id="nemesis-no-corpus" style="display:none; color: var(--text-dim); font-style: italic; padding: 0.5rem 0;">No corpus data available for this player</div>
+                    <table id="nemesis-weakness-table" class="matchup-table">
+                        <thead><tr><th>Archetype</th><th>Their WR</th><th>W</th><th>L</th><th>95% CI</th></tr></thead>
+                        <tbody></tbody>
+                    </table>
+                    <h3 style="margin-top:1rem">My Record vs Them</h3>
+                    <table id="nemesis-h2h-table" class="matchup-table">
+                        <thead><tr><th>Their Deck</th><th>My W</th><th>My L</th><th>My WR</th></tr></thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </section>
+
     <!-- Monte Carlo Analysis (ADR-002) -->
     <section class="card full-width" id="sim-section" style="display:none">
         <h2>Monte Carlo Analysis <span class="badge" id="sim-timestamp"></span></h2>

@@ -655,6 +655,143 @@ def get_archetype_stats(session: Session, min_battles: int = 3, ladder_only: boo
     return sorted(results, key=lambda x: x["total"], reverse=True)
 
 
+def get_top_opponents(
+    session: Session, limit: int = 10, ladder_only: bool = False
+) -> list[dict]:
+    """Get most-faced opponents with head-to-head records.
+
+    Args:
+        session: SQLAlchemy session.
+        limit: Maximum opponents to return.
+        ladder_only: If True, only include ladder (PvP) battles.
+
+    Returns:
+        List of dicts with opponent info, sorted by times faced descending.
+    """
+    # Subquery: aggregate personal battles by opponent
+    wins_case = func.sum(case((Battle.result == "win", 1), else_=0))
+    losses_case = func.sum(case((Battle.result == "loss", 1), else_=0))
+    stmt = (
+        select(
+            Battle.opponent_tag,
+            func.max(Battle.opponent_name).label("opponent_name"),
+            func.count().label("times_faced"),
+            wins_case.label("wins"),
+            losses_case.label("losses"),
+            func.max(Battle.opponent_starting_trophies).label("last_trophies"),
+            func.max(Battle.battle_time).label("last_seen"),
+        )
+        .where(Battle.opponent_tag.isnot(None))
+        .group_by(Battle.opponent_tag)
+        .having(func.count() >= 2)
+        .order_by(func.count().desc())
+        .limit(limit)
+    )
+    stmt = _apply_ladder_filter(stmt, ladder_only)
+    rows = [row._asdict() for row in session.execute(stmt).all()]
+
+    # Enrich with most recent deck + archetype
+    for row in rows:
+        tag = row["opponent_tag"]
+        deck_stmt = (
+            select(Battle.opponent_deck)
+            .where(Battle.opponent_tag == tag)
+            .where(Battle.corpus == "personal")
+            .where(Battle.opponent_deck.isnot(None))
+            .order_by(Battle.battle_time.desc())
+            .limit(1)
+        )
+        deck_row = session.execute(deck_stmt).first()
+        if deck_row and deck_row[0]:
+            try:
+                deck = json.loads(deck_row[0])
+                row["archetype"] = classify_archetype(deck)
+            except (json.JSONDecodeError, TypeError):
+                row["archetype"] = "Unknown"
+        else:
+            row["archetype"] = "Unknown"
+
+        total = row["wins"] + row["losses"]
+        row["win_rate"] = round(row["wins"] / total * 100, 1) if total > 0 else 0.0
+
+    return rows
+
+
+def get_nemesis_detail(session: Session, opponent_tag: str) -> dict:
+    """Get competitive intelligence on a specific opponent.
+
+    Panel 1 — Their weaknesses: what archetypes they lose to (from corpus).
+    Panel 2 — My head-to-head record vs their deck archetypes.
+
+    Args:
+        session: SQLAlchemy session.
+        opponent_tag: Opponent's player tag.
+
+    Returns:
+        Dict with 'weaknesses', 'weakness_corpus_size', 'my_matchups'.
+    """
+    from tracker.simulation.battles_repo import compute_simulation_data
+    from tracker.simulation.matchup_model import (
+        compute_matchup_posteriors,
+        compute_threat_ranking,
+    )
+
+    # Panel 1: Their weaknesses from corpus data
+    # Scope simulation to battles where this opponent is the player
+    weaknesses = []
+    corpus_size = 0
+    try:
+        sim_data = compute_simulation_data(session, player_tag=opponent_tag)
+        corpus_size = sim_data.total_battles
+        if corpus_size >= 5:
+            posteriors = compute_matchup_posteriors(
+                sim_data=sim_data, min_battles=3, use_sub_archetypes=False
+            )
+            threats = compute_threat_ranking(posteriors, min_battles=3)
+            # Sort ascending = their worst matchups = our opportunities
+            weaknesses = sorted(threats, key=lambda t: t["posterior_mean"])
+    except Exception:
+        pass  # No corpus data for this opponent
+
+    # Panel 2: My head-to-head record vs this opponent's archetypes
+    h2h_stmt = (
+        select(Battle.opponent_deck, Battle.result)
+        .where(Battle.opponent_tag == opponent_tag)
+        .where(Battle.corpus == "personal")
+    )
+    archetype_data: dict[str, dict] = {}
+    for row in session.execute(h2h_stmt).all():
+        try:
+            deck = json.loads(row[0]) if row[0] else []
+        except (json.JSONDecodeError, TypeError):
+            continue
+        archetype = classify_archetype(deck)
+        if archetype not in archetype_data:
+            archetype_data[archetype] = {"wins": 0, "losses": 0}
+        if row[1] == "win":
+            archetype_data[archetype]["wins"] += 1
+        elif row[1] == "loss":
+            archetype_data[archetype]["losses"] += 1
+
+    my_matchups = []
+    for arch, data in archetype_data.items():
+        total = data["wins"] + data["losses"]
+        my_matchups.append({
+            "archetype": arch,
+            "wins": data["wins"],
+            "losses": data["losses"],
+            "total": total,
+            "win_rate": round(data["wins"] / total * 100, 1) if total > 0 else 0.0,
+        })
+    my_matchups.sort(key=lambda m: m["total"], reverse=True)
+
+    return {
+        "weaknesses": weaknesses,
+        "weakness_corpus_size": corpus_size,
+        "my_matchups": my_matchups,
+    }
+
+
 def get_snapshot_diff(session: Session) -> Optional[dict]:
     """Compare the two most recent player snapshots.
 

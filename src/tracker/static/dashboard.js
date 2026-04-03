@@ -1216,13 +1216,124 @@ async function showCardArchetypes(cardName) {
     }
 }
 
+// ─── Nemesis Dashboard ──────────────────────────────────────────
+
+async function fetchNemeses() {
+    try {
+        sectionLoading("nemesis-section");
+        const resp = await fetch("/api/nemeses");
+        if (!resp.ok) { sectionReady("nemesis-section"); return; }
+        const data = await resp.json();
+        renderNemeses(data);
+        sectionReady("nemesis-section");
+    } catch (e) {
+        sectionReady("nemesis-section");
+    }
+}
+
+function renderNemeses(data) {
+    if (!data || data.length === 0) return;
+
+    const section = document.getElementById("nemesis-section");
+    section.style.display = "";
+
+    document.getElementById("nemesis-count").textContent =
+        `${data.length} recurring opponents`;
+
+    const tbody = document.querySelector("#nemesis-table tbody");
+    tbody.innerHTML = data.map(n => {
+        const tag = encodeURIComponent(n.opponent_tag);
+        const wrCls = wrClass(n.win_rate);
+        return `<tr class="clickable" onclick="showNemesisDetail('${tag}', '${(n.opponent_name || "Unknown").replace(/'/g, "\\'")}', this)" title="Click for weaknesses">
+            <td>${n.opponent_name || "Unknown"}</td>
+            <td>${n.times_faced}</td>
+            <td>${n.wins}</td>
+            <td>${n.losses}</td>
+            <td class="${wrCls}">${n.win_rate}%</td>
+            <td class="archetype-col">${n.archetype}</td>
+        </tr>`;
+    }).join("");
+}
+
+async function showNemesisDetail(encodedTag, name, rowEl) {
+    // Highlight active row
+    document.querySelectorAll("#nemesis-table tbody tr").forEach(tr =>
+        tr.classList.remove("nemesis-active")
+    );
+    if (rowEl) rowEl.classList.add("nemesis-active");
+
+    const placeholder = document.getElementById("nemesis-placeholder");
+    const content = document.getElementById("nemesis-detail-content");
+    placeholder.textContent = `Loading ${name}...`;
+    placeholder.style.display = "";
+    content.style.display = "none";
+
+    try {
+        const resp = await fetch(`/api/nemesis/${encodedTag}`);
+        if (!resp.ok) {
+            placeholder.textContent = "Failed to load nemesis data";
+            return;
+        }
+        const data = await resp.json();
+
+        placeholder.style.display = "none";
+        content.style.display = "";
+
+        document.getElementById("nemesis-detail-name").textContent = name;
+
+        // Weaknesses panel
+        const noCorp = document.getElementById("nemesis-no-corpus");
+        const weakTbody = document.querySelector("#nemesis-weakness-table tbody");
+        const weakTable = document.getElementById("nemesis-weakness-table");
+
+        if (data.weakness_corpus_size < 5 || data.weaknesses.length === 0) {
+            noCorp.style.display = "";
+            weakTable.style.display = "none";
+            document.getElementById("nemesis-corpus-size").textContent = "";
+        } else {
+            noCorp.style.display = "none";
+            weakTable.style.display = "";
+            document.getElementById("nemesis-corpus-size").textContent =
+                `(${data.weakness_corpus_size} corpus games)`;
+            weakTbody.innerHTML = data.weaknesses.slice(0, 15).map(w => {
+                const pct = (w.posterior_mean * 100).toFixed(1);
+                const ci = `[${(w.ci_low * 100).toFixed(0)}, ${(w.ci_high * 100).toFixed(0)}]`;
+                return `<tr>
+                    <td>${w.archetype}</td>
+                    <td class="${wrClass(w.posterior_mean * 100)}">${pct}%</td>
+                    <td>${w.wins}</td>
+                    <td>${w.losses}</td>
+                    <td class="ci-col">${ci}</td>
+                </tr>`;
+            }).join("");
+        }
+
+        // H2H panel
+        const h2hTbody = document.querySelector("#nemesis-h2h-table tbody");
+        h2hTbody.innerHTML = data.my_matchups.map(m => {
+            return `<tr>
+                <td>${m.archetype}</td>
+                <td>${m.wins}</td>
+                <td>${m.losses}</td>
+                <td class="${wrClass(m.win_rate)}">${m.win_rate}%</td>
+            </tr>`;
+        }).join("");
+
+    } catch (e) {
+        placeholder.textContent = "Error loading nemesis data";
+        console.error("Nemesis detail fetch failed:", e);
+    }
+}
+
 // ─── Init & poll ────────────────────────────────────────────────
 
 fetchAll();
 fetchTilt();
 fetchSimulation();
 fetchWPCards();
+fetchNemeses();
 fetchEmbeddings();
 setInterval(fetchAll, POLL_INTERVAL);
 setInterval(fetchTilt, POLL_INTERVAL);
 setInterval(fetchSimulation, POLL_INTERVAL);
+setInterval(fetchNemeses, POLL_INTERVAL);

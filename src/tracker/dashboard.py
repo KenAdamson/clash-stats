@@ -191,6 +191,31 @@ def create_app(db_path: str | None = None) -> Flask:
         finally:
             session.close()
 
+    @app.route("/api/nemeses")
+    def api_nemeses():
+        cache_key = f"nemeses:{_ladder_only()}"
+        cached = _cache.get(cache_key)
+        if cached is not None:
+            return jsonify(cached)
+        session = get_session(engine)
+        try:
+            result = analytics.get_top_opponents(
+                session, limit=10, ladder_only=_ladder_only()
+            )
+            _cache.set(cache_key, result, CACHE_TTL)
+            return jsonify(result)
+        finally:
+            session.close()
+
+    @app.route("/api/nemesis/<path:tag>")
+    def api_nemesis_detail(tag: str):
+        session = get_session(engine)
+        try:
+            result = analytics.get_nemesis_detail(session, tag)
+            return jsonify(result)
+        finally:
+            session.close()
+
     @app.route("/api/simulation")
     def api_simulation():
         from tracker.simulation.runner import get_cached_results
