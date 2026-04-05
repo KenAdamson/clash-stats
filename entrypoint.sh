@@ -239,9 +239,15 @@ echo "  noVNC:      http://0.0.0.0:6080 (browser sidecar)"
 # Initial fetch on startup
 /app/fetch.sh
 
-# Start Flask dashboard in background
+# Start dashboard via gunicorn (threaded for concurrent requests)
 export CR_DB_PATH="${DATABASE_URL}"
-python -m tracker.dashboard &
+gunicorn "tracker.dashboard:create_app()" \
+    --bind 0.0.0.0:8078 \
+    --workers 2 \
+    --threads 4 \
+    --timeout 120 \
+    --access-logfile - \
+    --error-logfile - &
 FLASK_PID=$!
 trap "kill ${FLASK_PID} 2>/dev/null; exit 0" TERM INT
 

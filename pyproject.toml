@@ -17,6 +17,7 @@ dependencies = [
     "scipy>=1.12",
     "pgvector>=0.3",
     "zstandard>=0.22",
+    "gunicorn>=22.0",
 ]
 
 [project.scripts]
