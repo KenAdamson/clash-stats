@@ -966,6 +966,45 @@ function renderStereo() {
     startStereoSync();
 }
 
+function getGlCamera(plotEl) {
+    // Reach into Plotly's internal GL scene to get the live camera
+    // (updates during drag, not just on mouse-up like layout.scene.camera)
+    try {
+        const sceneKey = Object.keys(plotEl._fullLayout).find(k => k.startsWith("scene"));
+        const scene = plotEl._fullLayout[sceneKey] && plotEl._fullLayout[sceneKey]._scene;
+        if (scene && scene.glplot) {
+            const gl = scene.glplot;
+            return {
+                eye: { x: gl.camera.eye[0], y: gl.camera.eye[1], z: gl.camera.eye[2] },
+                center: { x: gl.camera.center[0], y: gl.camera.center[1], z: gl.camera.center[2] },
+                up: { x: gl.camera.up[0], y: gl.camera.up[1], z: gl.camera.up[2] },
+            };
+        }
+    } catch (e) { /* fall through */ }
+    // Fallback to layout camera (only updates on mouse-up)
+    return plotEl.layout && plotEl.layout.scene && plotEl.layout.scene.camera;
+}
+
+function setGlCamera(plotEl, cam) {
+    // Directly set the GL camera for immediate visual update (no relayout needed)
+    try {
+        const sceneKey = Object.keys(plotEl._fullLayout).find(k => k.startsWith("scene"));
+        const scene = plotEl._fullLayout[sceneKey] && plotEl._fullLayout[sceneKey]._scene;
+        if (scene && scene.glplot) {
+            const gl = scene.glplot;
+            gl.camera.eye = [cam.eye.x, cam.eye.y, cam.eye.z];
+            gl.camera.center = [cam.center.x, cam.center.y, cam.center.z];
+            gl.camera.up = [cam.up.x, cam.up.y, cam.up.z];
+            // Also update layout so it stays in sync when drag ends
+            if (plotEl.layout && plotEl.layout.scene) {
+                plotEl.layout.scene.camera = cam;
+            }
+            return true;
+        }
+    } catch (e) { /* fall through */ }
+    return false;
+}
+
 function startStereoSync() {
     if (stereoPollId) cancelAnimationFrame(stereoPollId);
 
@@ -977,13 +1016,13 @@ function startStereoSync() {
 
         const plotL = document.getElementById("stereoPlotL");
         const plotR = document.getElementById("stereoPlotR");
-        if (!plotL || !plotR || !plotL.layout || !plotR.layout) {
+        if (!plotL || !plotR || !plotL._fullLayout) {
             stereoPollId = requestAnimationFrame(pollSync);
             return;
         }
 
-        const camL = plotL.layout.scene && plotL.layout.scene.camera;
-        const camR = plotR.layout.scene && plotR.layout.scene.camera;
+        const camL = getGlCamera(plotL);
+        const camR = getGlCamera(plotR);
         if (!camL || !camR) {
             stereoPollId = requestAnimationFrame(pollSync);
             return;
@@ -1001,22 +1040,19 @@ function startStereoSync() {
             // User is dragging left plot — derive base camera, update right
             const baseCam = offsetCamera(camL, -(sign * sep));
             const newCamR = offsetCamera(baseCam, -(sign * sep));
-            Plotly.relayout(plotR, { "scene.camera": newCamR }).then(() => {
-                lastCamR = newCamR;
-            });
+            setGlCamera(plotR, newCamR);
             lastMonoCamera = baseCam;
             lastCamL = camL;
+            lastCamR = newCamR;
         } else if (rChanged && !lChanged) {
             // User is dragging right plot — derive base camera, update left
             const baseCam = offsetCamera(camR, sign * sep);
             const newCamL = offsetCamera(baseCam, sign * sep);
-            Plotly.relayout(plotL, { "scene.camera": newCamL }).then(() => {
-                lastCamL = newCamL;
-            });
+            setGlCamera(plotL, newCamL);
             lastMonoCamera = baseCam;
+            lastCamL = newCamL;
             lastCamR = camR;
         } else {
-            // No change or both changed (initial state) — just record
             lastCamL = camL;
             lastCamR = camR;
         }
