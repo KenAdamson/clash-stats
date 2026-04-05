@@ -869,6 +869,7 @@ function extendEmbeddingChart(newPoints) {
 let stereoActive = false;
 let stereoTraces = null;  // cached traces for stereo rendering
 let lastMonoCamera = null;
+let stereoPollId = null;  // requestAnimationFrame ID for camera sync
 
 function getStereoSeparation() {
     return parseFloat(document.getElementById("stereo-separation").value) || 0.07;
@@ -888,8 +889,9 @@ function offsetCamera(camera, eyeOffset) {
     // Vector from center to eye
     const dx = eye.x - center.x;
     const dy = eye.y - center.y;
+    const dz = eye.z - center.z;
 
-    // Rotate in XY plane
+    // Rotate around the up vector (Z axis in scene space)
     const cosA = Math.cos(eyeOffset);
     const sinA = Math.sin(eyeOffset);
     const rx = dx * cosA - dy * sinA;
@@ -897,9 +899,23 @@ function offsetCamera(camera, eyeOffset) {
 
     return {
         eye: { x: center.x + rx, y: center.y + ry, z: eye.z },
-        center: center,
-        up: up,
+        center: { ...center },
+        up: { ...up },
     };
+}
+
+function camerasEqual(a, b) {
+    if (!a || !b) return false;
+    const eps = 1e-6;
+    return Math.abs(a.eye.x - b.eye.x) < eps &&
+           Math.abs(a.eye.y - b.eye.y) < eps &&
+           Math.abs(a.eye.z - b.eye.z) < eps &&
+           Math.abs(a.center.x - b.center.x) < eps &&
+           Math.abs(a.center.y - b.center.y) < eps &&
+           Math.abs(a.center.z - b.center.z) < eps &&
+           Math.abs(a.up.x - b.up.x) < eps &&
+           Math.abs(a.up.y - b.up.y) < eps &&
+           Math.abs(a.up.z - b.up.z) < eps;
 }
 
 function renderStereo() {
@@ -911,13 +927,13 @@ function renderStereo() {
     // Get current camera from mono plot if it exists
     const monoPlot = document.getElementById("embeddingPlot");
     let baseCamera = { eye: { x: 1.25, y: 1.25, z: 1.25 }, center: { x: 0, y: 0, z: 0 }, up: { x: 0, y: 0, z: 1 } };
-    if (monoPlot && monoPlot.layout && monoPlot.layout.scene && monoPlot.layout.scene.camera) {
+    if (lastMonoCamera) baseCamera = lastMonoCamera;
+    else if (monoPlot && monoPlot.layout && monoPlot.layout.scene && monoPlot.layout.scene.camera) {
         baseCamera = monoPlot.layout.scene.camera;
     }
-    if (lastMonoCamera) baseCamera = lastMonoCamera;
 
-    // Cross-eye: left eye sees right view, right eye sees left view
-    // Parallel: left eye sees left view, right eye sees right view
+    // Cross-eye: left panel shows RIGHT eye view, right panel shows LEFT eye view
+    // Parallel: left panel shows LEFT eye view, right panel shows RIGHT eye view
     const sign = method === "cross" ? 1 : -1;
     const camL = offsetCamera(baseCamera, sign * sep);
     const camR = offsetCamera(baseCamera, -sign * sep);
@@ -936,34 +952,8 @@ function renderStereo() {
     Plotly.newPlot("stereoPlotL", stereoTraces, layoutL, stereoConfig);
     Plotly.newPlot("stereoPlotR", stereoTraces, layoutR, stereoConfig);
 
-    // Sync camera rotation between the two plots
-    const plotL = document.getElementById("stereoPlotL");
-    const plotR = document.getElementById("stereoPlotR");
-    let syncing = false;
-
-    function syncCamera(source, target, sourceOffset, targetOffset) {
-        source.on("plotly_relayout", function(update) {
-            if (syncing) return;
-            syncing = true;
-            const cam = source.layout.scene.camera;
-            if (cam) {
-                // Compute base camera by reversing the offset, then apply target offset
-                const baseCam = offsetCamera(cam, -sourceOffset);
-                const targetCam = offsetCamera(baseCam, targetOffset);
-                Plotly.relayout(target, { "scene.camera": targetCam });
-                lastMonoCamera = baseCam;
-            }
-            syncing = false;
-        });
-    }
-
-    const signL = sign * sep;
-    const signR = -sign * sep;
-    syncCamera(plotL, plotR, signL, signR);
-    syncCamera(plotR, plotL, signR, signL);
-
     // Click handler for similar games
-    [plotL, plotR].forEach(el => {
+    [document.getElementById("stereoPlotL"), document.getElementById("stereoPlotR")].forEach(el => {
         el.on("plotly_click", function(eventData) {
             if (eventData.points.length > 0) {
                 const battleId = eventData.points[0].customdata;
@@ -971,6 +961,77 @@ function renderStereo() {
             }
         });
     });
+
+    // Start polling-based camera sync
+    startStereoSync();
+}
+
+function startStereoSync() {
+    if (stereoPollId) cancelAnimationFrame(stereoPollId);
+
+    let lastCamL = null;
+    let lastCamR = null;
+
+    function pollSync() {
+        if (!stereoActive) return;
+
+        const plotL = document.getElementById("stereoPlotL");
+        const plotR = document.getElementById("stereoPlotR");
+        if (!plotL || !plotR || !plotL.layout || !plotR.layout) {
+            stereoPollId = requestAnimationFrame(pollSync);
+            return;
+        }
+
+        const camL = plotL.layout.scene && plotL.layout.scene.camera;
+        const camR = plotR.layout.scene && plotR.layout.scene.camera;
+        if (!camL || !camR) {
+            stereoPollId = requestAnimationFrame(pollSync);
+            return;
+        }
+
+        const sep = getStereoSeparation();
+        const method = getStereoMethod();
+        const sign = method === "cross" ? 1 : -1;
+
+        // Detect which plot the user is dragging by comparing to last known state
+        const lChanged = lastCamL && !camerasEqual(camL, lastCamL);
+        const rChanged = lastCamR && !camerasEqual(camR, lastCamR);
+
+        if (lChanged && !rChanged) {
+            // User is dragging left plot — derive base camera, update right
+            const baseCam = offsetCamera(camL, -(sign * sep));
+            const newCamR = offsetCamera(baseCam, -(sign * sep));
+            Plotly.relayout(plotR, { "scene.camera": newCamR }).then(() => {
+                lastCamR = newCamR;
+            });
+            lastMonoCamera = baseCam;
+            lastCamL = camL;
+        } else if (rChanged && !lChanged) {
+            // User is dragging right plot — derive base camera, update left
+            const baseCam = offsetCamera(camR, sign * sep);
+            const newCamL = offsetCamera(baseCam, sign * sep);
+            Plotly.relayout(plotL, { "scene.camera": newCamL }).then(() => {
+                lastCamL = newCamL;
+            });
+            lastMonoCamera = baseCam;
+            lastCamR = camR;
+        } else {
+            // No change or both changed (initial state) — just record
+            lastCamL = camL;
+            lastCamR = camR;
+        }
+
+        stereoPollId = requestAnimationFrame(pollSync);
+    }
+
+    stereoPollId = requestAnimationFrame(pollSync);
+}
+
+function stopStereoSync() {
+    if (stereoPollId) {
+        cancelAnimationFrame(stereoPollId);
+        stereoPollId = null;
+    }
 }
 
 function toggleStereo(enabled) {
@@ -1006,6 +1067,7 @@ function toggleStereo(enabled) {
         stereoWrap.style.display = "";
         renderStereo();
     } else {
+        stopStereoSync();
         stereoWrap.style.display = "none";
         monoPlot.style.display = "";
         // Restore camera to mono plot
