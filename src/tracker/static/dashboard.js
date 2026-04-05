@@ -636,30 +636,12 @@ async function fetchEmbeddings() {
         const section = document.getElementById("embeddings-section");
         section.style.display = "";
 
-        embeddingData = [];
-        let page = 0;
-        let hasMore = true;
-        let total = 0;
+        const resp = await fetch("/api/embeddings");
+        if (!resp.ok) { sectionReady("embeddings-section"); return; }
+        const data = await resp.json();
+        embeddingData = data.points || [];
 
-        while (hasMore) {
-            const resp = await fetch(`/api/embeddings?page=${page}&per_page=${PAGE_SIZE}`);
-            if (!resp.ok) { sectionReady("embeddings-section"); return; }
-            const data = await resp.json();
-            embeddingData.push(...data.points);
-            total = data.total;
-            hasMore = data.has_more;
-            page++;
-
-            if (page === 1) {
-                renderEmbeddingChart(embeddingData);
-            } else {
-                extendEmbeddingChart(data.points);
-            }
-            if (hasMore) {
-                sectionProgress("embeddings-section", embeddingData.length, total);
-            }
-        }
-
+        renderEmbeddingChart(embeddingData);
         initTimelineSlider(embeddingData);
         sectionReady("embeddings-section");
     } catch (e) {

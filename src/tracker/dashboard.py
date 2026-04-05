@@ -1,5 +1,7 @@
 """Flask dashboard for Clash Royale battle analytics."""
 
+import gzip
+import io
 import os
 import threading
 import time
@@ -14,9 +16,77 @@ from flask import Flask, Response, jsonify, render_template, request
 from flask.json.provider import DefaultJSONProvider
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
+try:
+    import zstandard as zstd
+except ImportError:
+    zstd = None
+
 from tracker import analytics
 from tracker.database import get_engine, get_session, init_db
 from tracker.metrics import filter_in_process_metrics, render_accumulated_metrics
+
+# Minimum response size worth compressing (bytes)
+_COMPRESS_MIN_SIZE = 512
+
+# zstd compression level (3 = fast default, good for JSON)
+_ZSTD_LEVEL = 3
+
+
+def _should_compress(response: Response) -> bool:
+    """Check if a response is eligible for compression."""
+    if response.status_code < 200 or response.status_code >= 300:
+        return False
+    if response.direct_passthrough:
+        return False
+    if "Content-Encoding" in response.headers:
+        return False
+    content_type = response.content_type or ""
+    if not (
+        content_type.startswith("application/json")
+        or content_type.startswith("text/")
+    ):
+        return False
+    if response.content_length is not None and response.content_length < _COMPRESS_MIN_SIZE:
+        return False
+    return True
+
+
+def _negotiate_encoding() -> str | None:
+    """Pick the best encoding the client supports: zstd > gzip."""
+    accept = request.headers.get("Accept-Encoding", "")
+    if zstd and "zstd" in accept:
+        return "zstd"
+    if "gzip" in accept:
+        return "gzip"
+    return None
+
+
+def _compress_response(response: Response) -> Response:
+    """Compress response body using negotiated encoding."""
+    if not _should_compress(response):
+        return response
+    encoding = _negotiate_encoding()
+    if encoding is None:
+        return response
+
+    data = response.get_data()
+    if len(data) < _COMPRESS_MIN_SIZE:
+        return response
+
+    if encoding == "zstd":
+        cctx = zstd.ZstdCompressor(level=_ZSTD_LEVEL)
+        compressed = cctx.compress(data)
+    else:
+        buf = io.BytesIO()
+        with gzip.GzipFile(fileobj=buf, mode="wb", compresslevel=6) as f:
+            f.write(data)
+        compressed = buf.getvalue()
+
+    response.set_data(compressed)
+    response.headers["Content-Encoding"] = encoding
+    response.headers["Content-Length"] = len(compressed)
+    response.headers["Vary"] = "Accept-Encoding"
+    return response
 
 
 class _TTLCache:
@@ -104,11 +174,11 @@ def create_app(db_path: str | None = None) -> Flask:
     _cache.clear()
 
     @app.after_request
-    def _add_cache_headers(response):
-        """Allow browsers to cache API responses for 5 minutes."""
+    def _post_process(response):
+        """Add cache headers and compress API responses."""
         if request.path.startswith("/api/"):
             response.headers["Cache-Control"] = "public, max-age=300"
-        return response
+        return _compress_response(response)
 
     @app.route("/")
     def index():
@@ -363,23 +433,19 @@ def create_app(db_path: str | None = None) -> Flask:
             if not personal_bids:
                 return jsonify({"error": "No WP data. Run --wp-infer first."}), 404
 
-            # Per-game card WPA by side — join WP with replay_events
-            # Using numbered events to match event_index
+            # Per-game card WPA by side — join directly on (battle_id, game_tick).
+            # game_tick values match between replay_events and win_probability,
+            # so no need for the expensive ROW_NUMBER() window function.
             rows = session.execute(sa_text("""
-                SELECT numbered.battle_id, numbered.card_name, numbered.side,
+                SELECT re.battle_id, re.card_name, re.side,
                        wp.wpa, wp.criticality
-                FROM (
-                    SELECT battle_id, card_name, side, game_tick,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY battle_id ORDER BY game_tick, id
-                           ) - 1 AS event_index
-                    FROM replay_events
-                    WHERE card_name != '_invalid'
-                      AND battle_id IN :bids
-                ) numbered
+                FROM replay_events re
                 JOIN win_probability wp
-                  ON wp.battle_id = numbered.battle_id
-                 AND wp.event_index = numbered.event_index
+                  ON wp.battle_id = re.battle_id
+                 AND wp.game_tick = re.game_tick
+                WHERE re.card_name != '_invalid'
+                  AND re.battle_id IN :bids
+                  AND wp.battle_id IN :bids
             """), {"bids": tuple(personal_bids)}).all()
 
             # Aggregate: per-game per-card-side cumulative WPA
@@ -487,20 +553,15 @@ def create_app(db_path: str | None = None) -> Flask:
 
             # Get WPA for this card across all personal games
             rows = session.execute(sa_text("""
-                SELECT numbered.battle_id, numbered.side, wp.wpa
-                FROM (
-                    SELECT battle_id, card_name, side, game_tick,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY battle_id ORDER BY game_tick, id
-                           ) - 1 AS event_index
-                    FROM replay_events
-                    WHERE card_name != '_invalid'
-                      AND battle_id IN :bids
-                ) numbered
+                SELECT re.battle_id, re.side, wp.wpa
+                FROM replay_events re
                 JOIN win_probability wp
-                  ON wp.battle_id = numbered.battle_id
-                 AND wp.event_index = numbered.event_index
-                WHERE numbered.card_name = :card
+                  ON wp.battle_id = re.battle_id
+                 AND wp.game_tick = re.game_tick
+                WHERE re.card_name = :card
+                  AND re.card_name != '_invalid'
+                  AND re.battle_id IN :bids
+                  AND wp.battle_id IN :bids
             """), {"bids": tuple(bids), "card": card_name}).all()
 
             if not rows:
@@ -561,115 +622,64 @@ def create_app(db_path: str | None = None) -> Flask:
     def api_embeddings():
         """Return 3D embeddings for scatter plot visualization.
 
-        Downsamples corpus points to ~3K for browser performance while
-        keeping all personal games at full resolution.
+        Returns all personal games + most recent CORPUS_SAMPLE_SIZE corpus
+        games in a single response. Gzip compresses ~4MB JSON to ~50KB,
+        making pagination unnecessary.
         """
-        # Longer TTL — embeddings change only on retrain
         cached = _cache.get("embeddings")
         if cached is not None:
-            page = request.args.get("page", type=int)
-            if page is None:
-                return jsonify(cached)
-        import random as _random
+            return jsonify(cached)
         session = get_session(engine)
         try:
             from tracker.ml.storage import GameEmbedding
             from tracker.models import Battle
-            from sqlalchemy import select, func
+            from sqlalchemy import select, text as sa_text
 
-            _emb_cols = (
-                GameEmbedding.battle_id,
-                GameEmbedding.embedding_vec_3d,
-                GameEmbedding.cluster_id,
-                Battle.result,
-                Battle.corpus,
-                Battle.opponent_name,
-                Battle.battle_time,
-            )
-            _emb_base = select(*_emb_cols).join(
-                Battle, GameEmbedding.battle_id == Battle.battle_id
-            ).where(GameEmbedding.embedding_vec_3d.isnot(None))
+            rows = session.execute(sa_text("""
+                SELECT ge.battle_id, ge.embedding_vec_3d, ge.cluster_id,
+                       b.result, b.corpus, b.opponent_name, b.battle_time
+                FROM game_embeddings ge
+                JOIN battles b ON ge.battle_id = b.battle_id
+                WHERE ge.embedding_vec_3d IS NOT NULL
+                  AND b.corpus = 'personal'
+                UNION ALL
+                (SELECT ge.battle_id, ge.embedding_vec_3d, ge.cluster_id,
+                        b.result, b.corpus, b.opponent_name, b.battle_time
+                 FROM game_embeddings ge
+                 JOIN battles b ON ge.battle_id = b.battle_id
+                 WHERE ge.embedding_vec_3d IS NOT NULL
+                   AND b.corpus != 'personal'
+                 ORDER BY b.battle_time DESC
+                 LIMIT :limit)
+            """), {"limit": CORPUS_SAMPLE_SIZE}).all()
 
-            page = request.args.get("page", type=int)
-            per_page = request.args.get("per_page", 1000, type=int)
-            per_page = min(per_page, 5000)
-
-            # Personal games: all, ordered by time (for pagination)
-            personal_query = (
-                _emb_base.where(Battle.corpus == "personal")
-                .order_by(Battle.battle_time.desc())
-            )
-
-            # Corpus games: most recent N, ordered by time (for pagination)
-            corpus_query = (
-                _emb_base.where(Battle.corpus != "personal")
-                .order_by(Battle.battle_time.desc())
-                .limit(CORPUS_SAMPLE_SIZE)
-            )
-
-            if page is not None:
-                # Paginated: fetch personal + corpus in one pass, paginate
-                # Personal always included; corpus paginated from most recent
-                from sqlalchemy import union_all
-                combined = union_all(personal_query, corpus_query).subquery()
-                total = session.execute(
-                    select(func.count()).select_from(combined)
-                ).scalar() or 0
-
-                rows = session.execute(
-                    select(combined)
-                    .order_by(combined.c.battle_time.desc())
-                    .offset(page * per_page)
-                    .limit(per_page)
-                ).all()
-
-                points = []
-                for row in rows:
-                    bid, vec_3d, cluster_id, result, corpus, opponent, battle_time = row
-                    if vec_3d is None or len(vec_3d) != 3:
-                        continue
-                    points.append({
-                        "battle_id": bid,
-                        "x": float(vec_3d[0]), "y": float(vec_3d[1]), "z": float(vec_3d[2]),
-                        "cluster_id": cluster_id, "result": result,
-                        "corpus": corpus, "opponent": opponent, "battle_time": battle_time,
-                    })
-
-                return jsonify({
-                    "points": points,
-                    "page": page,
-                    "total": total,
-                    "has_more": (page + 1) * per_page < total,
-                })
-
-            # Non-paginated fallback
-            personal_rows = session.execute(personal_query).all()
-            corpus_rows = session.execute(corpus_query).all()
-
-            if not personal_rows and not corpus_rows:
+            if not rows:
                 return jsonify({"error": "No embeddings. Run --train-embeddings first."}), 404
 
-            def _make_point(row):
-                bid, vec_3d, cluster_id, result, corpus, opponent, battle_time = row
-                if vec_3d is None or len(vec_3d) != 3:
+            def _parse_vec3(v):
+                """Parse pgvector string '[x,y,z]' or list into 3 floats."""
+                if v is None:
                     return None
-                return {
+                if isinstance(v, str):
+                    v = [float(x) for x in v.strip("[]").split(",")]
+                if len(v) != 3:
+                    return None
+                return v
+
+            points = []
+            for bid, vec_3d_raw, cluster_id, result, corpus, opponent, battle_time in rows:
+                vec_3d = _parse_vec3(vec_3d_raw)
+                if vec_3d is None:
+                    continue
+                points.append({
                     "battle_id": bid,
-                    "x": float(vec_3d[0]), "y": float(vec_3d[1]), "z": float(vec_3d[2]),
+                    "x": vec_3d[0], "y": vec_3d[1], "z": vec_3d[2],
                     "cluster_id": cluster_id, "result": result,
                     "corpus": corpus, "opponent": opponent, "battle_time": battle_time,
-                }
+                })
 
-            personal_points = [p for p in (_make_point(r) for r in personal_rows) if p]
-            corpus_points = [p for p in (_make_point(r) for r in corpus_rows) if p]
-
-            points = corpus_points + personal_points
-            result = {
-                "points": points,
-                "count": len(points),
-                "total_corpus_full": total_corpus,
-            }
-            _cache.set("embeddings", result, CACHE_TTL * 4)  # 6 min — changes rarely
+            result = {"points": points, "count": len(points)}
+            _cache.set("embeddings", result, CACHE_TTL * 4)  # 6 min
             return jsonify(result)
         finally:
             session.close()

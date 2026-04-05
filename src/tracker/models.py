@@ -150,6 +150,15 @@ class PlayerCorpus(Base):
     active: Mapped[int] = mapped_column(default=1)
 
 
+class CorpusHourlyStat(Base):
+    """Pre-aggregated corpus battle count by hour of day (UTC)."""
+
+    __tablename__ = "corpus_hourly_stats"
+
+    hour: Mapped[int] = mapped_column(primary_key=True)
+    battle_count: Mapped[int] = mapped_column(default=0)
+
+
 class ReplayEvent(Base):
     """Individual card placement event from a battle replay."""
 

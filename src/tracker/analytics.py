@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from tracker.archetypes import classify_archetype
 from tracker.metrics import BATTLES_SCRAPED, BATTLES_DEDUPED
-from tracker.models import Battle, DeckCard, PlayerSnapshot
+from tracker.models import Battle, CorpusHourlyStat, DeckCard, PlayerSnapshot
 
 # Battle types considered "ladder" (competitive, with trophy stakes)
 LADDER_TYPES = ("PvP",)
@@ -233,6 +233,10 @@ def store_battle(
             card_variant=_card_variant(card),
         ))
 
+    # Increment hourly aggregate for corpus battles
+    if corpus != "personal" and bt_parsed is not None:
+        increment_corpus_hourly_stats(session, bt_parsed.hour)
+
     session.commit()
     BATTLES_SCRAPED.labels(corpus=corpus).inc()
     return bid, True
@@ -422,18 +426,17 @@ def get_time_of_day_stats(session: Session, ladder_only: bool = False) -> list[d
 def get_corpus_traffic_by_hour(session: Session) -> list[dict]:
     """Get corpus battle volume by hour of day (UTC).
 
+    Reads from the pre-aggregated corpus_hourly_stats table (24 rows)
+    instead of scanning millions of corpus battles.
+
     Returns normalized 0-100 traffic index for overlay on WR chart.
     """
-    hour_expr = extract("hour", Battle.battle_time)
     stmt = (
         select(
-            hour_expr.label("hour"),
-            func.count().label("total"),
+            CorpusHourlyStat.hour.label("hour"),
+            CorpusHourlyStat.battle_count.label("total"),
         )
-        .where(Battle.battle_time.isnot(None))
-        .where(Battle.corpus != "personal")
-        .group_by(hour_expr)
-        .order_by(hour_expr)
+        .order_by(CorpusHourlyStat.hour)
     )
     rows = [row._asdict() for row in session.execute(stmt).all()]
     if not rows:
@@ -444,6 +447,22 @@ def get_corpus_traffic_by_hour(session: Session) -> list[dict]:
     for r in rows:
         r["traffic_index"] = round((r["total"] - lo) / spread * 100, 1)
     return rows
+
+
+def increment_corpus_hourly_stats(session: Session, hour: int) -> None:
+    """Increment the corpus hourly counter for a given hour.
+
+    Called when a new corpus battle is stored.
+    """
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    stmt = pg_insert(CorpusHourlyStat).values(
+        hour=hour, battle_count=1,
+    ).on_conflict_do_update(
+        index_elements=[CorpusHourlyStat.hour],
+        set_={"battle_count": CorpusHourlyStat.battle_count + 1},
+    )
+    session.execute(stmt)
 
 
 def get_streaks(session: Session, ladder_only: bool = False) -> dict:
