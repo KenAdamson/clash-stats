@@ -511,6 +511,46 @@ summary {
     width: 100%;
 }
 
+/* Stereogram */
+.stereo-controls {
+    display: flex;
+    align-items: center;
+    gap: 1.2rem;
+    padding: 0.5rem 0;
+    font-size: 0.85rem;
+    color: var(--text-dim);
+}
+
+.stereo-controls label {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    cursor: pointer;
+}
+
+.stereo-controls select {
+    background: var(--card-bg);
+    color: var(--text-main);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.15rem 0.3rem;
+    font-size: 0.8rem;
+}
+
+.stereo-controls input[type="range"] {
+    width: 80px;
+}
+
+.stereo-wrap {
+    display: flex;
+    gap: 0;
+}
+
+.stereo-plot {
+    flex: 1;
+    height: 1000px;
+}
+
 .similar-panel {
     margin-top: 1rem;
     padding: 1rem;

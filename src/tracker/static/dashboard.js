@@ -864,6 +864,169 @@ function extendEmbeddingChart(newPoints) {
     }
 }
 
+// ─── Stereogram rendering ───────────────────────────────────────
+
+let stereoActive = false;
+let stereoTraces = null;  // cached traces for stereo rendering
+let lastMonoCamera = null;
+
+function getStereoSeparation() {
+    return parseFloat(document.getElementById("stereo-separation").value) || 0.07;
+}
+
+function getStereoMethod() {
+    return document.getElementById("stereo-method").value;  // "cross" or "parallel"
+}
+
+function offsetCamera(camera, eyeOffset) {
+    // Rotate the camera eye position around the center by eyeOffset radians
+    // in the horizontal plane (around the up vector)
+    const eye = camera.eye || { x: 1.25, y: 1.25, z: 1.25 };
+    const center = camera.center || { x: 0, y: 0, z: 0 };
+    const up = camera.up || { x: 0, y: 0, z: 1 };
+
+    // Vector from center to eye
+    const dx = eye.x - center.x;
+    const dy = eye.y - center.y;
+
+    // Rotate in XY plane
+    const cosA = Math.cos(eyeOffset);
+    const sinA = Math.sin(eyeOffset);
+    const rx = dx * cosA - dy * sinA;
+    const ry = dx * sinA + dy * cosA;
+
+    return {
+        eye: { x: center.x + rx, y: center.y + ry, z: eye.z },
+        center: center,
+        up: up,
+    };
+}
+
+function renderStereo() {
+    if (!stereoTraces || stereoTraces.length === 0) return;
+
+    const sep = getStereoSeparation();
+    const method = getStereoMethod();
+
+    // Get current camera from mono plot if it exists
+    const monoPlot = document.getElementById("embeddingPlot");
+    let baseCamera = { eye: { x: 1.25, y: 1.25, z: 1.25 }, center: { x: 0, y: 0, z: 0 }, up: { x: 0, y: 0, z: 1 } };
+    if (monoPlot && monoPlot.layout && monoPlot.layout.scene && monoPlot.layout.scene.camera) {
+        baseCamera = monoPlot.layout.scene.camera;
+    }
+    if (lastMonoCamera) baseCamera = lastMonoCamera;
+
+    // Cross-eye: left eye sees right view, right eye sees left view
+    // Parallel: left eye sees left view, right eye sees right view
+    const sign = method === "cross" ? 1 : -1;
+    const camL = offsetCamera(baseCamera, sign * sep);
+    const camR = offsetCamera(baseCamera, -sign * sep);
+
+    const layoutL = JSON.parse(JSON.stringify(EMBEDDING_LAYOUT));
+    const layoutR = JSON.parse(JSON.stringify(EMBEDDING_LAYOUT));
+    layoutL.scene.camera = camL;
+    layoutR.scene.camera = camR;
+    layoutL.showlegend = false;
+    layoutR.showlegend = false;
+    layoutL.margin = { l: 0, r: 0, t: 0, b: 0 };
+    layoutR.margin = { l: 0, r: 0, t: 0, b: 0 };
+
+    const stereoConfig = { ...EMBEDDING_CONFIG, displayModeBar: false };
+
+    Plotly.newPlot("stereoPlotL", stereoTraces, layoutL, stereoConfig);
+    Plotly.newPlot("stereoPlotR", stereoTraces, layoutR, stereoConfig);
+
+    // Sync camera rotation between the two plots
+    const plotL = document.getElementById("stereoPlotL");
+    const plotR = document.getElementById("stereoPlotR");
+    let syncing = false;
+
+    function syncCamera(source, target, sourceOffset, targetOffset) {
+        source.on("plotly_relayout", function(update) {
+            if (syncing) return;
+            syncing = true;
+            const cam = source.layout.scene.camera;
+            if (cam) {
+                // Compute base camera by reversing the offset, then apply target offset
+                const baseCam = offsetCamera(cam, -sourceOffset);
+                const targetCam = offsetCamera(baseCam, targetOffset);
+                Plotly.relayout(target, { "scene.camera": targetCam });
+                lastMonoCamera = baseCam;
+            }
+            syncing = false;
+        });
+    }
+
+    const signL = sign * sep;
+    const signR = -sign * sep;
+    syncCamera(plotL, plotR, signL, signR);
+    syncCamera(plotR, plotL, signR, signL);
+
+    // Click handler for similar games
+    [plotL, plotR].forEach(el => {
+        el.on("plotly_click", function(eventData) {
+            if (eventData.points.length > 0) {
+                const battleId = eventData.points[0].customdata;
+                if (battleId) fetchSimilar(battleId);
+            }
+        });
+    });
+}
+
+function toggleStereo(enabled) {
+    stereoActive = enabled;
+    const monoPlot = document.getElementById("embeddingPlot");
+    const stereoWrap = document.getElementById("stereoWrap");
+
+    document.getElementById("stereo-method-label").style.display = enabled ? "" : "none";
+    document.getElementById("stereo-sep-label").style.display = enabled ? "" : "none";
+
+    if (enabled) {
+        // Capture current camera before hiding
+        if (monoPlot.layout && monoPlot.layout.scene && monoPlot.layout.scene.camera) {
+            lastMonoCamera = monoPlot.layout.scene.camera;
+        }
+
+        // Build traces from current embedding data
+        if (embeddingData && embeddingData.length > 0) {
+            const corpusWins = embeddingData.filter(p => p.result === "win" && p.corpus !== "personal");
+            const corpusLosses = embeddingData.filter(p => p.result === "loss" && p.corpus !== "personal");
+            const personalWins = embeddingData.filter(p => p.result === "win" && p.corpus === "personal");
+            const personalLosses = embeddingData.filter(p => p.result === "loss" && p.corpus === "personal");
+
+            stereoTraces = [
+                makeEmbeddingTrace(corpusWins,     "Corpus Wins",    "rgb(52, 211, 153)",  2.5, 0.25, false),
+                makeEmbeddingTrace(corpusLosses,   "Corpus Losses",  "rgb(248, 113, 113)", 2.5, 0.25, false),
+                makeEmbeddingTrace(personalWins,   "My Wins",        "rgb(52, 211, 153)",  2.5, 0.9,  true),
+                makeEmbeddingTrace(personalLosses, "My Losses",      "rgb(248, 113, 113)", 2.5, 0.9,  true),
+            ];
+        }
+
+        monoPlot.style.display = "none";
+        stereoWrap.style.display = "";
+        renderStereo();
+    } else {
+        stereoWrap.style.display = "none";
+        monoPlot.style.display = "";
+        // Restore camera to mono plot
+        if (lastMonoCamera) {
+            Plotly.relayout("embeddingPlot", { "scene.camera": lastMonoCamera });
+        }
+    }
+}
+
+// Wire up controls
+document.getElementById("stereo-toggle").addEventListener("change", function() {
+    toggleStereo(this.checked);
+});
+document.getElementById("stereo-method").addEventListener("change", function() {
+    if (stereoActive) renderStereo();
+});
+document.getElementById("stereo-separation").addEventListener("input", function() {
+    document.getElementById("stereo-sep-value").textContent = this.value;
+    if (stereoActive) renderStereo();
+});
+
 async function fetchSimilar(battleId) {
     try {
         const resp = await fetch(`/api/similar/${battleId}`);

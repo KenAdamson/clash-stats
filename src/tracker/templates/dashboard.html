@@ -228,7 +228,24 @@
                 <span id="timeline-max-label"></span>
             </div>
         </div>
+        <div class="stereo-controls" id="stereo-controls">
+            <label><input type="checkbox" id="stereo-toggle"> Stereogram</label>
+            <label class="stereo-option" id="stereo-method-label" style="display:none">
+                <select id="stereo-method">
+                    <option value="cross">Cross-eye</option>
+                    <option value="parallel">Parallel</option>
+                </select>
+            </label>
+            <label class="stereo-option" id="stereo-sep-label" style="display:none">
+                Sep: <input type="range" id="stereo-separation" min="0.02" max="0.20" step="0.01" value="0.07">
+                <span id="stereo-sep-value">0.07</span>
+            </label>
+        </div>
         <div id="embeddingPlot" class="embedding-chart"></div>
+        <div id="stereoWrap" class="stereo-wrap" style="display:none">
+            <div id="stereoPlotL" class="stereo-plot"></div>
+            <div id="stereoPlotR" class="stereo-plot"></div>
+        </div>
         <div id="similar-panel" class="similar-panel" style="display:none">
             <h3>Similar Games to <span id="similar-ref"></span></h3>
             <div id="similar-tables"></div>
