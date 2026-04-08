@@ -68,6 +68,7 @@ def _get_recent_battles(
             Battle.crown_differential,
         )
         .where(
+            Battle.corpus == "personal",
             Battle.battle_type == "PvP",
             Battle.result.in_(["win", "loss"]),
         )
