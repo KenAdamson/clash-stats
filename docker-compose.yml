@@ -51,7 +51,6 @@ services:
     group_add:
       - "109"  # render group GID for Intel GPU access
     depends_on:
-      - cr-browser
       - postgres
     networks:
       - media-network
@@ -64,9 +63,11 @@ services:
       retries: 3
 
   cr-browser:
+    # Dormant — only needed to refresh the RoyaleAPI cf_clearance cookie when
+    # it expires. Start manually with: docker compose up -d cr-browser
     build: docker/browser
     container_name: cr-browser
-    restart: unless-stopped
+    restart: "no"
     networks:
       - media-network
     ports:
