@@ -864,6 +864,267 @@ function extendEmbeddingChart(newPoints) {
     }
 }
 
+// ─── Stereogram rendering ───────────────────────────────────────
+
+let stereoActive = false;
+let stereoTraces = null;  // cached traces for stereo rendering
+let lastMonoCamera = null;
+let stereoPollId = null;  // requestAnimationFrame ID for camera sync
+
+function getStereoSeparation() {
+    return parseFloat(document.getElementById("stereo-separation").value) || 0.07;
+}
+
+function getStereoMethod() {
+    return document.getElementById("stereo-method").value;  // "cross" or "parallel"
+}
+
+function offsetCamera(camera, eyeOffset) {
+    // Rotate the camera eye position around the center by eyeOffset radians
+    // in the horizontal plane (around the up vector)
+    const eye = camera.eye || { x: 1.25, y: 1.25, z: 1.25 };
+    const center = camera.center || { x: 0, y: 0, z: 0 };
+    const up = camera.up || { x: 0, y: 0, z: 1 };
+
+    // Vector from center to eye
+    const dx = eye.x - center.x;
+    const dy = eye.y - center.y;
+    const dz = eye.z - center.z;
+
+    // Rotate around the up vector (Z axis in scene space)
+    const cosA = Math.cos(eyeOffset);
+    const sinA = Math.sin(eyeOffset);
+    const rx = dx * cosA - dy * sinA;
+    const ry = dx * sinA + dy * cosA;
+
+    return {
+        eye: { x: center.x + rx, y: center.y + ry, z: eye.z },
+        center: { ...center },
+        up: { ...up },
+    };
+}
+
+function camerasEqual(a, b) {
+    if (!a || !b) return false;
+    const eps = 1e-6;
+    return Math.abs(a.eye.x - b.eye.x) < eps &&
+           Math.abs(a.eye.y - b.eye.y) < eps &&
+           Math.abs(a.eye.z - b.eye.z) < eps &&
+           Math.abs(a.center.x - b.center.x) < eps &&
+           Math.abs(a.center.y - b.center.y) < eps &&
+           Math.abs(a.center.z - b.center.z) < eps &&
+           Math.abs(a.up.x - b.up.x) < eps &&
+           Math.abs(a.up.y - b.up.y) < eps &&
+           Math.abs(a.up.z - b.up.z) < eps;
+}
+
+function renderStereo() {
+    if (!stereoTraces || stereoTraces.length === 0) return;
+
+    const sep = getStereoSeparation();
+    const method = getStereoMethod();
+
+    // Get current camera from mono plot if it exists
+    const monoPlot = document.getElementById("embeddingPlot");
+    let baseCamera = { eye: { x: 1.25, y: 1.25, z: 1.25 }, center: { x: 0, y: 0, z: 0 }, up: { x: 0, y: 0, z: 1 } };
+    if (lastMonoCamera) baseCamera = lastMonoCamera;
+    else if (monoPlot && monoPlot.layout && monoPlot.layout.scene && monoPlot.layout.scene.camera) {
+        baseCamera = monoPlot.layout.scene.camera;
+    }
+
+    // Cross-eye: left panel shows RIGHT eye view, right panel shows LEFT eye view
+    // Parallel: left panel shows LEFT eye view, right panel shows RIGHT eye view
+    const sign = method === "cross" ? 1 : -1;
+    const camL = offsetCamera(baseCamera, sign * sep);
+    const camR = offsetCamera(baseCamera, -sign * sep);
+
+    const layoutL = JSON.parse(JSON.stringify(EMBEDDING_LAYOUT));
+    const layoutR = JSON.parse(JSON.stringify(EMBEDDING_LAYOUT));
+    layoutL.scene.camera = camL;
+    layoutR.scene.camera = camR;
+    layoutL.showlegend = false;
+    layoutR.showlegend = false;
+    layoutL.margin = { l: 0, r: 0, t: 0, b: 0 };
+    layoutR.margin = { l: 0, r: 0, t: 0, b: 0 };
+
+    const stereoConfig = { ...EMBEDDING_CONFIG, displayModeBar: false };
+
+    Plotly.newPlot("stereoPlotL", stereoTraces, layoutL, stereoConfig);
+    Plotly.newPlot("stereoPlotR", stereoTraces, layoutR, stereoConfig);
+
+    // Click handler for similar games
+    [document.getElementById("stereoPlotL"), document.getElementById("stereoPlotR")].forEach(el => {
+        el.on("plotly_click", function(eventData) {
+            if (eventData.points.length > 0) {
+                const battleId = eventData.points[0].customdata;
+                if (battleId) fetchSimilar(battleId);
+            }
+        });
+    });
+
+    // Start polling-based camera sync
+    startStereoSync();
+}
+
+function getGlCamera(plotEl) {
+    // Reach into Plotly's internal GL scene to get the live camera
+    // (updates during drag, not just on mouse-up like layout.scene.camera)
+    try {
+        const sceneKey = Object.keys(plotEl._fullLayout).find(k => k.startsWith("scene"));
+        const scene = plotEl._fullLayout[sceneKey] && plotEl._fullLayout[sceneKey]._scene;
+        if (scene && scene.glplot) {
+            const gl = scene.glplot;
+            return {
+                eye: { x: gl.camera.eye[0], y: gl.camera.eye[1], z: gl.camera.eye[2] },
+                center: { x: gl.camera.center[0], y: gl.camera.center[1], z: gl.camera.center[2] },
+                up: { x: gl.camera.up[0], y: gl.camera.up[1], z: gl.camera.up[2] },
+            };
+        }
+    } catch (e) { /* fall through */ }
+    // Fallback to layout camera (only updates on mouse-up)
+    return plotEl.layout && plotEl.layout.scene && plotEl.layout.scene.camera;
+}
+
+function setGlCamera(plotEl, cam) {
+    // Directly set the GL camera for immediate visual update (no relayout needed)
+    try {
+        const sceneKey = Object.keys(plotEl._fullLayout).find(k => k.startsWith("scene"));
+        const scene = plotEl._fullLayout[sceneKey] && plotEl._fullLayout[sceneKey]._scene;
+        if (scene && scene.glplot) {
+            const gl = scene.glplot;
+            gl.camera.eye = [cam.eye.x, cam.eye.y, cam.eye.z];
+            gl.camera.center = [cam.center.x, cam.center.y, cam.center.z];
+            gl.camera.up = [cam.up.x, cam.up.y, cam.up.z];
+            // Also update layout so it stays in sync when drag ends
+            if (plotEl.layout && plotEl.layout.scene) {
+                plotEl.layout.scene.camera = cam;
+            }
+            return true;
+        }
+    } catch (e) { /* fall through */ }
+    return false;
+}
+
+function startStereoSync() {
+    if (stereoPollId) cancelAnimationFrame(stereoPollId);
+
+    let lastCamL = null;
+    let lastCamR = null;
+
+    function pollSync() {
+        if (!stereoActive) return;
+
+        const plotL = document.getElementById("stereoPlotL");
+        const plotR = document.getElementById("stereoPlotR");
+        if (!plotL || !plotR || !plotL._fullLayout) {
+            stereoPollId = requestAnimationFrame(pollSync);
+            return;
+        }
+
+        const camL = getGlCamera(plotL);
+        const camR = getGlCamera(plotR);
+        if (!camL || !camR) {
+            stereoPollId = requestAnimationFrame(pollSync);
+            return;
+        }
+
+        const sep = getStereoSeparation();
+        const method = getStereoMethod();
+        const sign = method === "cross" ? 1 : -1;
+
+        // Detect which plot the user is dragging by comparing to last known state
+        const lChanged = lastCamL && !camerasEqual(camL, lastCamL);
+        const rChanged = lastCamR && !camerasEqual(camR, lastCamR);
+
+        if (lChanged && !rChanged) {
+            // User is dragging left plot — derive base camera, update right
+            const baseCam = offsetCamera(camL, -(sign * sep));
+            const newCamR = offsetCamera(baseCam, -(sign * sep));
+            setGlCamera(plotR, newCamR);
+            lastMonoCamera = baseCam;
+            lastCamL = camL;
+            lastCamR = newCamR;
+        } else if (rChanged && !lChanged) {
+            // User is dragging right plot — derive base camera, update left
+            const baseCam = offsetCamera(camR, sign * sep);
+            const newCamL = offsetCamera(baseCam, sign * sep);
+            setGlCamera(plotL, newCamL);
+            lastMonoCamera = baseCam;
+            lastCamL = newCamL;
+            lastCamR = camR;
+        } else {
+            lastCamL = camL;
+            lastCamR = camR;
+        }
+
+        stereoPollId = requestAnimationFrame(pollSync);
+    }
+
+    stereoPollId = requestAnimationFrame(pollSync);
+}
+
+function stopStereoSync() {
+    if (stereoPollId) {
+        cancelAnimationFrame(stereoPollId);
+        stereoPollId = null;
+    }
+}
+
+function toggleStereo(enabled) {
+    stereoActive = enabled;
+    const monoPlot = document.getElementById("embeddingPlot");
+    const stereoWrap = document.getElementById("stereoWrap");
+
+    document.getElementById("stereo-method-label").style.display = enabled ? "" : "none";
+    document.getElementById("stereo-sep-label").style.display = enabled ? "" : "none";
+
+    if (enabled) {
+        // Capture current camera before hiding
+        if (monoPlot.layout && monoPlot.layout.scene && monoPlot.layout.scene.camera) {
+            lastMonoCamera = monoPlot.layout.scene.camera;
+        }
+
+        // Build traces from current embedding data
+        if (embeddingData && embeddingData.length > 0) {
+            const corpusWins = embeddingData.filter(p => p.result === "win" && p.corpus !== "personal");
+            const corpusLosses = embeddingData.filter(p => p.result === "loss" && p.corpus !== "personal");
+            const personalWins = embeddingData.filter(p => p.result === "win" && p.corpus === "personal");
+            const personalLosses = embeddingData.filter(p => p.result === "loss" && p.corpus === "personal");
+
+            stereoTraces = [
+                makeEmbeddingTrace(corpusWins,     "Corpus Wins",    "rgb(52, 211, 153)",  2.5, 0.25, false),
+                makeEmbeddingTrace(corpusLosses,   "Corpus Losses",  "rgb(248, 113, 113)", 2.5, 0.25, false),
+                makeEmbeddingTrace(personalWins,   "My Wins",        "rgb(52, 211, 153)",  2.5, 0.9,  true),
+                makeEmbeddingTrace(personalLosses, "My Losses",      "rgb(248, 113, 113)", 2.5, 0.9,  true),
+            ];
+        }
+
+        monoPlot.style.display = "none";
+        stereoWrap.style.display = "";
+        renderStereo();
+    } else {
+        stopStereoSync();
+        stereoWrap.style.display = "none";
+        monoPlot.style.display = "";
+        // Restore camera to mono plot
+        if (lastMonoCamera) {
+            Plotly.relayout("embeddingPlot", { "scene.camera": lastMonoCamera });
+        }
+    }
+}
+
+// Wire up controls
+document.getElementById("stereo-toggle").addEventListener("change", function() {
+    toggleStereo(this.checked);
+});
+document.getElementById("stereo-method").addEventListener("change", function() {
+    if (stereoActive) renderStereo();
+});
+document.getElementById("stereo-separation").addEventListener("input", function() {
+    document.getElementById("stereo-sep-value").textContent = this.value;
+    if (stereoActive) renderStereo();
+});
+
 async function fetchSimilar(battleId) {
     try {
         const resp = await fetch(`/api/similar/${battleId}`);
