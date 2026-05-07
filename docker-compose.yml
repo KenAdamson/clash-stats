@@ -3,10 +3,10 @@ services:
     image: tensorchord/vchord-postgres:pg17-v0.5.3
     container_name: clash-postgres
     restart: always
-    profiles: [local]
     env_file: .env
     volumes:
-      - ./data/postgres-local:/var/lib/postgresql/data
+      - /data-hot/pg-data/data:/var/lib/postgresql/data
+      - /data-cold/backups:/backups
     ports:
       - "192.168.7.58:5432:5432"
     environment:
