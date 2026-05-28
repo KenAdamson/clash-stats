@@ -4,6 +4,9 @@ services:
     container_name: clash-postgres
     restart: always
     env_file: .env
+    # Default Docker shm_size is 64MB — too small for parallel hash joins.
+    # 2GB matches cr-tracker and is well within RAM budget on this host.
+    shm_size: '2gb'
     volumes:
       - /data-hot/pg-data/data:/var/lib/postgresql/data
       - /data-cold/backups:/backups
@@ -14,10 +17,10 @@ services:
       - POSTGRES_USER=clash_stats
       - POSTGRES_PASSWORD=${DB_PASSWORD}
     command: >
-      -c shared_buffers=2GB
-      -c work_mem=64MB
-      -c maintenance_work_mem=1GB
-      -c effective_cache_size=4GB
+      -c shared_buffers=4GB
+      -c work_mem=128MB
+      -c maintenance_work_mem=2GB
+      -c effective_cache_size=32GB
       -c shared_preload_libraries=vchord.so
     networks:
       - media-network
@@ -33,6 +36,8 @@ services:
       network: host
     container_name: cr-tracker
     restart: unless-stopped
+    # Yield CPU to higher-priority containers when contended (default is 1024).
+    cpu_shares: 256
     env_file: .env
     environment:
       - PYTHONUNBUFFERED=1
@@ -45,6 +50,9 @@ services:
       - ./data:/app/data
       - ./.git:/app/.git:rw
       - ~/.ssh/id_ed25519:/root/.ssh/id_ed25519:ro
+      # ml_models lives on the ml-data ZFS dataset; data/ml_models is a symlink
+      # pointing here, so the container needs the same absolute path visible.
+      - /mnt/mirror/ml_models:/mnt/mirror/ml_models:rw
     shm_size: '2gb'
     devices:
       - /dev/dri:/dev/dri

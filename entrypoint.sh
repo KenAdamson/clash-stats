@@ -1,6 +1,10 @@
 #!/bin/sh
 set -e
 
+# Yield CPU to higher-priority host workloads (e.g. Plex). All children
+# (gunicorn, cron, cron-spawned jobs) inherit this nice level.
+renice -n 15 $$ >/dev/null 2>&1 || true
+
 # DATABASE_URL is the canonical DB connection string (PostgreSQL).
 # --db flag is only used as a fallback label; DATABASE_URL always takes precedence in cli.py.
 # If DATABASE_URL is not set, fail fast rather than silently writing to SQLite.
