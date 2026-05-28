@@ -222,7 +222,19 @@ class WPTrainer:
                     logits = self.model(card_ids, features, lengths)
                     loss_per_tick = self.criterion(logits, labels)
                     loss = (loss_per_tick * mask).sum() / mask.sum().clamp(min=1)
+
+                # Abort on NaN/Inf loss — gradients would NaN-poison the weights
+                # permanently (see commit 8c160e0). Better to die loudly here.
+                if not torch.isfinite(loss):
+                    raise RuntimeError(
+                        f"Non-finite loss at epoch {epoch}: {loss.item()}. "
+                        "Aborting before backward to keep model state clean."
+                    )
+
                 loss.backward()
+                # Clip gradients to prevent the runaway-update path that
+                # introduced NaN weights in v1/v2/v3 checkpoints.
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 self.optimizer.step()
 
                 train_loss += (loss_per_tick * mask).sum().item()
@@ -244,8 +256,20 @@ class WPTrainer:
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 patience_counter = 0
+                state_dict = self.model.state_dict()
+                # Refuse to persist a checkpoint with NaN/Inf weights — that's
+                # the bug that bit us across v1/v2/v3 (see commit 8c160e0).
+                bad = [k for k, v in state_dict.items()
+                       if torch.is_tensor(v) and v.dtype.is_floating_point
+                       and not torch.isfinite(v).all()]
+                if bad:
+                    raise RuntimeError(
+                        f"Refusing to save checkpoint with non-finite weights in "
+                        f"{len(bad)} tensors (first few: {bad[:5]}). "
+                        "Loss converged to a corrupt state."
+                    )
                 torch.save({
-                    "model_state_dict": self.model.state_dict(),
+                    "model_state_dict": state_dict,
                     "vocab_size": self.model.card_embedding.num_embeddings,
                     "epoch": epoch,
                     "val_loss": val_loss,
