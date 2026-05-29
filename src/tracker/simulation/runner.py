@@ -151,7 +151,10 @@ def get_cached_results() -> dict | None:
         return None
     try:
         return json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError) as e:
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
+        # UnicodeDecodeError caught a fiasco-era partial-write cache file
+        # with null bytes in the middle of the JSON — surfaced to /api/simulation
+        # as 500s until 2026-05-29.
         logger.warning("Failed to read cached simulation results: %s", e)
         return None
 
