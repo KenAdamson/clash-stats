@@ -169,30 +169,69 @@ def detect_sub_archetypes(
     _t_dedup = time.perf_counter() - _t1
     _n_unique = len(sorted_groups)
 
-    # Greedy Jaccard clustering
+    # Greedy Jaccard clustering with an inverted-index candidate filter.
+    #
+    # The naive form compares each deck against every existing cluster — O(unique
+    # x clusters), which is ~99.7% of total sim runtime (profiled 2026-05-31:
+    # 9872s for Hog Rider alone). But Jaccard >= similarity_threshold has a hard
+    # lower bound on shared cards: a deck's support is always 7 cards (8-card deck
+    # minus the win condition), so for J = |A∩B| / |A∪B| >= 0.55 the intersection
+    # must be at least ceil(0.55*(7+7) / 1.55) = 5 cards (larger cluster unions
+    # require even more). So any cluster sharing < MIN_SHARED cards with the deck
+    # cannot possibly merge and need not be scored.
+    #
+    # card_to_clusters maps each card -> indices of clusters whose support_union
+    # contains it. For each deck we tally candidate clusters by shared-card count
+    # via the index, score only those with >= MIN_SHARED shared cards, and pick
+    # the best exactly as the naive loop would. This is output-identical, just
+    # without the dead comparisons. (Verified against the un-pruned cache.)
     _t2 = time.perf_counter()
+    # Smallest possible support is 7 cards (8-card deck minus the single win
+    # condition). For J = |A∩B|/|A∪B| >= t with |A| = 7 and any union |B| >= 7,
+    # the intersection must be at least ceil(14t / (1+t)) cards (t=0.55 -> 5).
+    # Larger unions require more, so this is a safe lower bound for all clusters.
+    import math
+    min_shared = max(1, math.ceil(14 * similarity_threshold / (1 + similarity_threshold)))
     clusters: list[dict] = []
+    card_to_clusters: dict[str, set] = defaultdict(set)
     for deck_tuple, group in sorted_groups:
         support = frozenset(c for c in deck_tuple if c != win_condition)
-        best_cluster = None
-        best_sim = 0.0
 
-        for cluster in clusters:
-            sim = _jaccard(support, cluster["support_union"])
+        # Tally shared-card counts against candidate clusters via the index.
+        cand_counts: dict[int, int] = defaultdict(int)
+        for c in support:
+            for ci in card_to_clusters.get(c, ()):
+                cand_counts[ci] += 1
+
+        best_idx = -1
+        best_sim = 0.0
+        # Iterate in ascending cluster index to match the naive loop's
+        # first-max tie-breaking (strict >).
+        for ci in sorted(cand_counts):
+            if cand_counts[ci] < min_shared:
+                continue
+            sim = _jaccard(support, clusters[ci]["support_union"])
             if sim > best_sim:
                 best_sim = sim
-                best_cluster = cluster
+                best_idx = ci
 
-        if best_cluster and best_sim >= similarity_threshold:
-            best_cluster["decks"].extend(group)
-            best_cluster["support_union"] |= support
-            best_cluster["deck_variants"][deck_tuple] += len(group)
+        if best_idx >= 0 and best_sim >= similarity_threshold:
+            cluster = clusters[best_idx]
+            cluster["decks"].extend(group)
+            new_cards = support - cluster["support_union"]
+            cluster["support_union"] |= support
+            cluster["deck_variants"][deck_tuple] += len(group)
+            for c in new_cards:
+                card_to_clusters[c].add(best_idx)
         else:
+            new_idx = len(clusters)
             clusters.append({
                 "decks": list(group),
                 "support_union": set(support),
                 "deck_variants": Counter({deck_tuple: len(group)}),
             })
+            for c in support:
+                card_to_clusters[c].add(new_idx)
     _t_cluster = time.perf_counter() - _t2
     _n_clusters = len(clusters)
 
