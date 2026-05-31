@@ -134,6 +134,9 @@ def detect_sub_archetypes(
         from tracker.simulation.battles_repo import compute_simulation_data
         sim_data = compute_simulation_data(session, corpus=corpus)
 
+    import time
+    _t0 = time.perf_counter()
+
     # Collect decks containing the win condition from all archetypes
     decks_with_wc = []
     for archetype, deck_list in sim_data.archetype_decks.items():
@@ -146,6 +149,7 @@ def detect_sub_archetypes(
                     "result": d["result"],
                     "elixir": d["elixir"],
                 })
+    _t_collect = time.perf_counter() - _t0
 
     if len(decks_with_wc) < min_cluster_size:
         return []
@@ -156,13 +160,17 @@ def detect_sub_archetypes(
     )
 
     # Group by exact deck composition
+    _t1 = time.perf_counter()
     deck_groups: dict[tuple, list[dict]] = defaultdict(list)
     for d in decks_with_wc:
         deck_groups[d["full_deck"]].append(d)
 
     sorted_groups = sorted(deck_groups.items(), key=lambda x: -len(x[1]))
+    _t_dedup = time.perf_counter() - _t1
+    _n_unique = len(sorted_groups)
 
     # Greedy Jaccard clustering
+    _t2 = time.perf_counter()
     clusters: list[dict] = []
     for deck_tuple, group in sorted_groups:
         support = frozenset(c for c in deck_tuple if c != win_condition)
@@ -185,7 +193,10 @@ def detect_sub_archetypes(
                 "support_union": set(support),
                 "deck_variants": Counter({deck_tuple: len(group)}),
             })
+    _t_cluster = time.perf_counter() - _t2
+    _n_clusters = len(clusters)
 
+    _t3 = time.perf_counter()
     results = []
     for cluster in clusters:
         if len(cluster["decks"]) < min_cluster_size:
@@ -217,6 +228,13 @@ def detect_sub_archetypes(
         })
 
     results.sort(key=lambda x: -x["count"])
+    _t_agg = time.perf_counter() - _t3
+    logger.info(
+        "%s profile: collect=%.1fs dedup=%.1fs cluster=%.1fs agg=%.1fs "
+        "| %d matched, %d unique compositions, %d clusters",
+        win_condition, _t_collect, _t_dedup, _t_cluster, _t_agg,
+        len(decks_with_wc), _n_unique, _n_clusters,
+    )
     return results
 
 
