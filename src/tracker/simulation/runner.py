@@ -40,6 +40,72 @@ MAJOR_WIN_CONDITIONS = [
     "Archer Queen", "Skeleton King",
 ]
 
+# Set before forking the sub-archetype pool so workers inherit the (large)
+# SimulationData via copy-on-write rather than pickling it per task.
+_SUBARCH_SIM_DATA = None
+
+
+def _subarch_worker(args):
+    """Detect sub-archetypes for one win condition in a forked worker."""
+    win_condition, min_cluster_size, similarity_threshold = args
+    subs = detect_sub_archetypes(
+        win_condition,
+        sim_data=_SUBARCH_SIM_DATA,
+        min_cluster_size=min_cluster_size,
+        similarity_threshold=similarity_threshold,
+    )
+    return win_condition, subs
+
+
+def _detect_sub_archetypes_parallel(
+    corpus_data, win_conditions, *, min_cluster_size, similarity_threshold,
+):
+    """Run detect_sub_archetypes across win conditions in parallel processes.
+
+    Each win condition is independent, so we fan them across a fork-based
+    process pool. Workers inherit corpus_data via copy-on-write (no pickling).
+    Capped at 6 workers: the wall time is bounded by the single longest
+    archetype (clustering within one archetype is sequential), so more workers
+    add little speed but multiply copy-on-write memory pressure. Falls back to
+    sequential on any pool failure.
+    """
+    import multiprocessing as mp
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+
+    global _SUBARCH_SIM_DATA
+    max_workers = min(len(win_conditions), 6, max(2, (os.cpu_count() or 4) - 2))
+    sub_archetypes: dict = {}
+    try:
+        ctx = mp.get_context("fork")
+        _SUBARCH_SIM_DATA = corpus_data
+        with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as ex:
+            futures = {
+                ex.submit(
+                    _subarch_worker, (wc, min_cluster_size, similarity_threshold)
+                ): wc
+                for wc in win_conditions
+            }
+            for fut in as_completed(futures):
+                wc, subs = fut.result()
+                if subs:
+                    sub_archetypes[wc] = subs
+    except Exception as e:
+        logger.warning(
+            "Parallel sub-archetype detection failed (%s); running sequentially.", e
+        )
+        sub_archetypes = {}
+        for wc in win_conditions:
+            subs = detect_sub_archetypes(
+                wc, sim_data=corpus_data,
+                min_cluster_size=min_cluster_size,
+                similarity_threshold=similarity_threshold,
+            )
+            if subs:
+                sub_archetypes[wc] = subs
+    finally:
+        _SUBARCH_SIM_DATA = None
+    return sub_archetypes
+
 
 def run_full_simulation(
     session: Session,
@@ -104,14 +170,10 @@ def run_full_simulation(
 
     # 5. Sub-archetype breakdowns — uses pre-collected deck lists from corpus_data
     logger.info("Detecting sub-archetypes for major win conditions...")
-    sub_archetypes = {}
-    for wc in MAJOR_WIN_CONDITIONS:
-        subs = detect_sub_archetypes(
-            wc, sim_data=corpus_data,
-            min_cluster_size=10, similarity_threshold=0.55,
-        )
-        if subs:
-            sub_archetypes[wc] = subs
+    sub_archetypes = _detect_sub_archetypes_parallel(
+        corpus_data, MAJOR_WIN_CONDITIONS,
+        min_cluster_size=10, similarity_threshold=0.55,
+    )
     results["sub_archetypes"] = sub_archetypes
 
     # 6. Card co-occurrence — uses pre-aggregated pair counts
