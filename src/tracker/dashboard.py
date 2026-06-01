@@ -133,6 +133,16 @@ def _ladder_only() -> bool:
     return request.args.get("mode", "ladder") != "all"
 
 
+def _trophy_floor() -> int | None:
+    """Optional trophy floor for personal analytics.
+
+    Pass ?min_trophies=N to restrict stats to games played at or above N
+    trophies — focuses views on current-tier playstyle and excludes
+    lower-arena history. Default None = include all personal games.
+    """
+    return request.args.get("min_trophies", type=int)
+
+
 def create_app(db_path: str | None = None) -> Flask:
     """Application factory for the dashboard.
 
@@ -191,14 +201,15 @@ def create_app(db_path: str | None = None) -> Flask:
 
     @app.route("/api/overview")
     def api_overview():
-        cache_key = f"overview:{_ladder_only()}"
+        tf = _trophy_floor()
+        cache_key = f"overview:{_ladder_only()}:{tf}"
         cached = _cache.get(cache_key)
         if cached is not None:
             return jsonify(cached)
         session = get_session(engine)
         try:
             lo = _ladder_only()
-            stats = analytics.get_overall_stats(session, ladder_only=lo)
+            stats = analytics.get_overall_stats(session, ladder_only=lo, min_trophies=tf)
             api_stats = analytics.get_all_time_api_stats(session)
             diff = analytics.get_snapshot_diff(session)
             result = {
@@ -234,15 +245,16 @@ def create_app(db_path: str | None = None) -> Flask:
 
     @app.route("/api/matchups")
     def api_matchups():
-        cache_key = f"matchups:{_ladder_only()}"
+        tf = _trophy_floor()
+        cache_key = f"matchups:{_ladder_only()}:{tf}"
         cached = _cache.get(cache_key)
         if cached is not None:
             return jsonify(cached)
         session = get_session(engine)
         try:
             lo = _ladder_only()
-            card_matchups = analytics.get_card_matchup_stats(session, min_battles=3, ladder_only=lo)
-            archetypes = analytics.get_archetype_stats(session, min_battles=3, ladder_only=lo)
+            card_matchups = analytics.get_card_matchup_stats(session, min_battles=3, ladder_only=lo, min_trophies=tf)
+            archetypes = analytics.get_archetype_stats(session, min_battles=3, ladder_only=lo, min_trophies=tf)
             result = {
                 "card_matchups": card_matchups,
                 "archetypes": archetypes,
@@ -256,7 +268,7 @@ def create_app(db_path: str | None = None) -> Flask:
     def api_recent():
         session = get_session(engine)
         try:
-            battles = analytics.get_recent_battles(session, limit=25, ladder_only=_ladder_only())
+            battles = analytics.get_recent_battles(session, limit=25, ladder_only=_ladder_only(), min_trophies=_trophy_floor())
             return jsonify(battles)
         finally:
             session.close()
@@ -314,18 +326,19 @@ def create_app(db_path: str | None = None) -> Flask:
 
     @app.route("/api/streaks")
     def api_streaks():
-        cache_key = f"streaks:{_ladder_only()}"
+        tf = _trophy_floor()
+        cache_key = f"streaks:{_ladder_only()}:{tf}"
         cached = _cache.get(cache_key)
         if cached is not None:
             return jsonify(cached)
         session = get_session(engine)
         try:
             lo = _ladder_only()
-            streaks = analytics.get_streaks(session, ladder_only=lo)
-            rolling_35 = analytics.get_rolling_stats(session, 35, ladder_only=lo)
-            rolling_10 = analytics.get_rolling_stats(session, 10, ladder_only=lo)
-            crowns = analytics.get_crown_distribution(session, ladder_only=lo)
-            time_of_day = analytics.get_time_of_day_stats(session, ladder_only=lo)
+            streaks = analytics.get_streaks(session, ladder_only=lo, min_trophies=tf)
+            rolling_35 = analytics.get_rolling_stats(session, 35, ladder_only=lo, min_trophies=tf)
+            rolling_10 = analytics.get_rolling_stats(session, 10, ladder_only=lo, min_trophies=tf)
+            crowns = analytics.get_crown_distribution(session, ladder_only=lo, min_trophies=tf)
+            time_of_day = analytics.get_time_of_day_stats(session, ladder_only=lo, min_trophies=tf)
             corpus_traffic = analytics.get_corpus_traffic_by_hour(session)
             result = {
                 "streaks": streaks,

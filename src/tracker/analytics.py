@@ -25,14 +25,19 @@ def _card_variant(card: dict) -> str:
     return "base"
 
 
-def _apply_ladder_filter(stmt, ladder_only: bool):
+def _apply_ladder_filter(stmt, ladder_only: bool, min_trophies: int | None = None):
     """Add a WHERE clause to restrict to ladder battles if requested.
 
-    Always filters to personal corpus (excludes training data).
+    Always filters to personal corpus (excludes training data). When
+    ``min_trophies`` is set, also restricts to games played at or above that
+    trophy level (by ``player_starting_trophies``) — used to focus analytics on
+    current-tier playstyle and exclude lower-arena history.
     """
     stmt = stmt.where(Battle.corpus == "personal")
     if ladder_only:
-        return stmt.where(Battle.battle_type.in_(LADDER_TYPES))
+        stmt = stmt.where(Battle.battle_type.in_(LADDER_TYPES))
+    if min_trophies is not None:
+        stmt = stmt.where(Battle.player_starting_trophies >= min_trophies)
     return stmt
 
 
@@ -249,7 +254,7 @@ def get_total_battles(session: Session) -> int:
     ) or 0
 
 
-def get_overall_stats(session: Session, ladder_only: bool = False) -> dict:
+def get_overall_stats(session: Session, ladder_only: bool = False, min_trophies: int | None = None) -> dict:
     """Get aggregated stats across all battles."""
     stmt = select(
         func.count().label("total"),
@@ -264,7 +269,7 @@ def get_overall_stats(session: Session, ladder_only: bool = False) -> dict:
         func.min(Battle.battle_time).label("first_battle"),
         func.max(Battle.battle_time).label("last_battle"),
     )
-    stmt = _apply_ladder_filter(stmt, ladder_only)
+    stmt = _apply_ladder_filter(stmt, ladder_only, min_trophies)
     row = session.execute(stmt).first()
     if not row:
         return {}
@@ -324,7 +329,7 @@ def get_deck_stats(session: Session, min_battles: int = 3) -> list[dict]:
     return results
 
 
-def get_crown_distribution(session: Session, ladder_only: bool = False) -> dict:
+def get_crown_distribution(session: Session, ladder_only: bool = False, min_trophies: int | None = None) -> dict:
     """Get crown distribution by result type."""
     stmt = (
         select(
@@ -336,14 +341,14 @@ def get_crown_distribution(session: Session, ladder_only: bool = False) -> dict:
         .group_by(Battle.result, Battle.player_crowns)
         .order_by(Battle.result, Battle.player_crowns)
     )
-    stmt = _apply_ladder_filter(stmt, ladder_only)
+    stmt = _apply_ladder_filter(stmt, ladder_only, min_trophies)
     distribution: dict = {"win": {}, "loss": {}}
     for row in session.execute(stmt).all():
         distribution[row.result][row.player_crowns] = row.count
     return distribution
 
 
-def get_card_matchup_stats(session: Session, min_battles: int = 3, ladder_only: bool = False) -> list[dict]:
+def get_card_matchup_stats(session: Session, min_battles: int = 3, ladder_only: bool = False, min_trophies: int | None = None) -> list[dict]:
     """Get win rate vs opponent cards."""
     wins_case = func.sum(case((Battle.result == "win", 1), else_=0))
     distinct_battles = func.count(func.distinct(Battle.battle_id))
@@ -361,11 +366,11 @@ def get_card_matchup_stats(session: Session, min_battles: int = 3, ladder_only: 
         .having(distinct_battles >= min_battles)
         .order_by(distinct_battles.desc())
     )
-    stmt = _apply_ladder_filter(stmt, ladder_only)
+    stmt = _apply_ladder_filter(stmt, ladder_only, min_trophies)
     return [row._asdict() for row in session.execute(stmt).all()]
 
 
-def get_recent_battles(session: Session, limit: int = 10, ladder_only: bool = False) -> list[dict]:
+def get_recent_battles(session: Session, limit: int = 10, ladder_only: bool = False, min_trophies: int | None = None) -> list[dict]:
     """Get last N battles with details."""
     stmt = (
         select(
@@ -384,7 +389,7 @@ def get_recent_battles(session: Session, limit: int = 10, ladder_only: bool = Fa
         )
         .order_by(Battle.battle_time.desc())
     )
-    stmt = _apply_ladder_filter(stmt, ladder_only)
+    stmt = _apply_ladder_filter(stmt, ladder_only, min_trophies)
     stmt = stmt.limit(limit)
     results = []
     for row in session.execute(stmt).all():
@@ -404,7 +409,7 @@ def get_recent_battles(session: Session, limit: int = 10, ladder_only: bool = Fa
     return results
 
 
-def get_time_of_day_stats(session: Session, ladder_only: bool = False) -> list[dict]:
+def get_time_of_day_stats(session: Session, ladder_only: bool = False, min_trophies: int | None = None) -> list[dict]:
     """Get win rate by hour of day."""
     hour_expr = extract("hour", Battle.battle_time)
     wins_case = func.sum(case((Battle.result == "win", 1), else_=0))
@@ -419,7 +424,7 @@ def get_time_of_day_stats(session: Session, ladder_only: bool = False) -> list[d
         .group_by(hour_expr)
         .order_by(hour_expr)
     )
-    stmt = _apply_ladder_filter(stmt, ladder_only)
+    stmt = _apply_ladder_filter(stmt, ladder_only, min_trophies)
     return [row._asdict() for row in session.execute(stmt).all()]
 
 
@@ -465,7 +470,7 @@ def increment_corpus_hourly_stats(session: Session, hour: int) -> None:
     session.execute(stmt)
 
 
-def get_streaks(session: Session, ladder_only: bool = False) -> dict:
+def get_streaks(session: Session, ladder_only: bool = False, min_trophies: int | None = None) -> dict:
     """Detect win/loss streaks from battle history.
 
     Returns:
@@ -482,7 +487,7 @@ def get_streaks(session: Session, ladder_only: bool = False) -> dict:
         .where(Battle.result.in_(["win", "loss"]))
         .order_by(Battle.battle_time.asc())
     )
-    stmt = _apply_ladder_filter(stmt, ladder_only)
+    stmt = _apply_ladder_filter(stmt, ladder_only, min_trophies)
     rows = [row._asdict() for row in session.execute(stmt).all()]
 
     if not rows:
@@ -545,7 +550,7 @@ def get_streaks(session: Session, ladder_only: bool = False) -> dict:
     }
 
 
-def get_rolling_stats(session: Session, window: int = 35, ladder_only: bool = False) -> dict:
+def get_rolling_stats(session: Session, window: int = 35, ladder_only: bool = False, min_trophies: int | None = None) -> dict:
     """Get win rate over the last N games.
 
     Args:
@@ -569,7 +574,7 @@ def get_rolling_stats(session: Session, window: int = 35, ladder_only: bool = Fa
         )
         .order_by(Battle.battle_time.desc())
     )
-    stmt = _apply_ladder_filter(stmt, ladder_only)
+    stmt = _apply_ladder_filter(stmt, ladder_only, min_trophies)
     stmt = stmt.limit(window)
     rows = [row._asdict() for row in session.execute(stmt).all()]
 
@@ -627,7 +632,7 @@ def get_trophy_history(session: Session, ladder_only: bool = False) -> list[dict
     return results
 
 
-def get_archetype_stats(session: Session, min_battles: int = 3, ladder_only: bool = False) -> list[dict]:
+def get_archetype_stats(session: Session, min_battles: int = 3, ladder_only: bool = False, min_trophies: int | None = None) -> list[dict]:
     """Cluster opponent decks into archetypes and show win rates.
 
     Args:
@@ -641,7 +646,7 @@ def get_archetype_stats(session: Session, min_battles: int = 3, ladder_only: boo
     stmt = select(Battle.opponent_deck, Battle.result).where(
         Battle.opponent_deck.isnot(None)
     )
-    stmt = _apply_ladder_filter(stmt, ladder_only)
+    stmt = _apply_ladder_filter(stmt, ladder_only, min_trophies)
 
     archetype_data: dict[str, dict] = {}
     for row in session.execute(stmt).all():
