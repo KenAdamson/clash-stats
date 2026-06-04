@@ -15,13 +15,10 @@ RUN curl -fsSL https://repositories.intel.com/gpu/intel-graphics.key | \
 
 WORKDIR /app
 
-# PyPI proxy — nginx caching proxy on the LAN
-# BuildKit can't resolve .lan hostnames even with --network=host,
-# so we use the IP directly. Override with --build-arg if IP changes.
-ARG PYPI_HOST=192.168.7.58:8081
-ARG PIP_INDEX_URL=http://192.168.7.58:8081/simple/
-ARG PIP_TRUSTED_HOST=192.168.7.58
-ARG PYTORCH_INDEX=http://192.168.7.58:8081/whl/xpu
+# Python deps come from PyPI directly (pip's default). torch XPU wheels aren't
+# published to PyPI, so they come from PyTorch's official XPU index. Override
+# PYTORCH_INDEX with --build-arg only if mirroring wheels locally.
+ARG PYTORCH_INDEX=https://download.pytorch.org/whl/xpu
 
 # Layer 1: torch + OpenCL ICD (rarely changes, ~2GB, cached unless pyproject.toml changes)
 # intel-opencl-icd must be installed alongside torch because torch XPU pins
