@@ -67,6 +67,44 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
 
+# Global request-rate cap across ALL threads. RoyaleAPI's Cloudflare issues a
+# bot-challenge (cf-mitigated: challenge, no Retry-After) once sustained req/min
+# crosses a threshold. Pre-fiasco the slow hardware was an accidental governor —
+# requests completed slowly enough to stay under the limit. The faster 64GB/NVMe
+# box removed that governor, so 8-concurrent now bursts past the threshold. This
+# caps the average request rate explicitly, independent of concurrency or
+# hardware speed. Tune via env without a rebuild.
+REQUESTS_PER_SEC = float(os.environ.get("ROYALEAPI_REQUESTS_PER_SEC", "2.0"))
+
+
+class _RateLimiter:
+    """Thread-safe global rate limiter.
+
+    Reserves a time slot under a short lock, then sleeps outside the lock until
+    the slot — so N threads get staggered start times averaging REQUESTS_PER_SEC
+    without serializing on the lock during the wait.
+    """
+
+    def __init__(self, rate_per_sec: float):
+        self._min_interval = 1.0 / rate_per_sec if rate_per_sec > 0 else 0.0
+        self._lock = threading.Lock()
+        self._next = 0.0
+
+    def acquire(self) -> None:
+        if self._min_interval <= 0:
+            return
+        with self._lock:
+            now = time.monotonic()
+            slot = now if now >= self._next else self._next
+            self._next = slot + self._min_interval
+        wait = slot - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+
+
+_RATE_LIMITER = _RateLimiter(REQUESTS_PER_SEC)
+
+
 # Regex patterns for extracting replay data from battle page HTML
 _REPLAY_BUTTON_RE_ALT = re.compile(
     r'data-replay="(?P<tag>[^"]+)"',
@@ -114,6 +152,7 @@ def _http_get(url: str, cookie_header: str) -> tuple[int, str, list[str]]:
     Returns:
         (status_code, response_body, set_cookie_headers)
     """
+    _RATE_LIMITER.acquire()  # global rate cap — gate every RoyaleAPI request
     req = urllib.request.Request(url, headers={
         "User-Agent": USER_AGENT,
         "Referer": f"{ROYALEAPI_BASE}/",

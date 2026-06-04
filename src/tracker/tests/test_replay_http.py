@@ -11,12 +11,49 @@ silently drop it (the regression that took the replay pipeline down in 06/2026).
 import json
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from tracker.replay_http import (
     _parse_renewed_cookies,
     _persist_session_cookies,
+    _RateLimiter,
     RENEWABLE_COOKIE_NAMES,
 )
+
+
+# ---------------------------------------------------------------------------
+# _RateLimiter
+# ---------------------------------------------------------------------------
+
+def test_rate_limiter_spaces_sequential_calls():
+    """N acquires at R/s take ~(N-1)/R seconds (first is immediate)."""
+    rl = _RateLimiter(20)  # 20/s -> 0.05s interval
+    start = time.monotonic()
+    for _ in range(5):
+        rl.acquire()
+    elapsed = time.monotonic() - start
+    # 4 gaps * 0.05s = 0.2s expected; allow scheduling slack.
+    assert 0.18 < elapsed < 0.45
+
+
+def test_rate_limiter_disabled_is_immediate():
+    """rate<=0 disables limiting (no sleeps)."""
+    rl = _RateLimiter(0)
+    start = time.monotonic()
+    for _ in range(100):
+        rl.acquire()
+    assert time.monotonic() - start < 0.05
+
+
+def test_rate_limiter_caps_across_threads():
+    """Concurrent threads share the global cap: total time respects the rate."""
+    rl = _RateLimiter(20)  # 20/s
+    start = time.monotonic()
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        list(ex.map(lambda _: rl.acquire(), range(16)))
+    elapsed = time.monotonic() - start
+    # 16 acquires at 20/s -> ~15*0.05 = 0.75s floor regardless of 8 threads.
+    assert elapsed > 0.6
 
 
 # ---------------------------------------------------------------------------
