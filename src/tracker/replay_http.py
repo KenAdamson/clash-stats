@@ -21,14 +21,17 @@ Flow:
 
 import json
 import logging
+import os
 import random
 import re
+import threading
 import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from http.cookies import SimpleCookie
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 from urllib.parse import urlencode
 
 from sqlalchemy.orm import Session
@@ -50,7 +53,11 @@ from tracker.replays import (
 logger = logging.getLogger(__name__)
 
 # Tuning knobs
-MAX_CONCURRENT = 8           # concurrent HTTP requests — Cloudflare limit is between 8-10
+# 2026-06-04: dropped 8 -> 4 after sustained 100% 429 rate-limiting (started
+# 06-02). Isolated requests still return 200, so it was purely our burst rate
+# crossing Cloudflare's threshold; 8 concurrent + the every-1-min corpus cron +
+# 8-retry amplification kept us flagged. 4 backs us under the limit.
+MAX_CONCURRENT = 4           # concurrent HTTP requests — Cloudflare throttles above this
 REPLAY_DELAY = 0.5           # seconds between replay fetches (rate limiting)
 BATCH_PAGE_DELAY = 0.2       # seconds between battle page fetches
 STARTUP_JITTER = 1.0         # max seconds of random jitter per thread at startup
@@ -97,7 +104,7 @@ def _build_cookie_header(cookies: dict[str, str]) -> str:
     return "; ".join(f"{k}={v}" for k, v in cookies.items())
 
 
-def _http_get(url: str, cookie_header: str) -> tuple[int, str]:
+def _http_get(url: str, cookie_header: str) -> tuple[int, str, list[str]]:
     """Make an HTTP GET request using urllib.
 
     Args:
@@ -105,7 +112,7 @@ def _http_get(url: str, cookie_header: str) -> tuple[int, str]:
         cookie_header: Pre-built Cookie header string.
 
     Returns:
-        (status_code, response_body)
+        (status_code, response_body, set_cookie_headers)
     """
     req = urllib.request.Request(url, headers={
         "User-Agent": USER_AGENT,
@@ -117,13 +124,105 @@ def _http_get(url: str, cookie_header: str) -> tuple[int, str]:
     try:
         resp = urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT)
         body = resp.read().decode("utf-8", errors="replace")
+        set_cookies = resp.headers.get_all("Set-Cookie") or []
         # Check for login redirect
         if "/login" in resp.url:
             raise SessionExpiredError("Redirected to login")
-        return resp.status, body
+        return resp.status, body, set_cookies
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace") if e.fp else ""
-        return e.code, body
+        set_cookies = e.headers.get_all("Set-Cookie") if e.headers else []
+        return e.code, body, set_cookies or []
+
+
+# RoyaleAPI cookies worth persisting back to the session file. The login
+# session is a sliding-expiry cookie: every authenticated response carries a
+# Set-Cookie that bumps its 7-day expiry forward. Capturing and re-saving it
+# keeps the login alive indefinitely (as the old Playwright storage_state
+# save-back used to) instead of letting it age out 7 days after login.
+RENEWABLE_COOKIE_NAMES = ("__royaleapi_session_v2", "cf_clearance", "NB_SRVID")
+
+
+def _parse_renewed_cookies(set_cookie_headers: list[str]) -> dict[str, dict]:
+    """Parse Set-Cookie headers into {name: {value, expires}} for tracked cookies.
+
+    ``expires`` is a unix timestamp (float) or None when the header gives no
+    explicit lifetime.
+    """
+    renewed: dict[str, dict] = {}
+    for raw in set_cookie_headers:
+        try:
+            jar = SimpleCookie()
+            jar.load(raw)
+        except Exception:
+            continue
+        for name, morsel in jar.items():
+            if name not in RENEWABLE_COOKIE_NAMES or not morsel.value:
+                continue
+            expires = None
+            max_age = morsel["max-age"]
+            if max_age:
+                try:
+                    expires = time.time() + float(max_age)
+                except ValueError:
+                    expires = None
+            elif morsel["expires"]:
+                try:
+                    # e.g. "Wed, 04 Jun 2026 07:24:28 GMT"
+                    from email.utils import parsedate_to_datetime
+                    expires = parsedate_to_datetime(morsel["expires"]).timestamp()
+                except Exception:
+                    expires = None
+            renewed[name] = {"value": morsel.value, "expires": expires}
+    return renewed
+
+
+def _persist_session_cookies(state_path: str, renewed: dict[str, dict]) -> None:
+    """Atomically merge renewed cookie values/expiries into the session file.
+
+    Updates the Playwright storage_state JSON in place (value + expires) for any
+    tracked cookie that was renewed, then rewrites via temp-file + os.replace so
+    a concurrent reader never sees a half-written file (the SQLite corruption
+    lesson applies to this file too).
+    """
+    if not renewed:
+        return
+    try:
+        with open(state_path) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning("Cannot read session file to persist cookies: %s", e)
+        return
+
+    cookies = data.get("cookies", [])
+    by_name = {c.get("name"): c for c in cookies}
+    changed = False
+    for name, info in renewed.items():
+        existing = by_name.get(name)
+        if existing is None:
+            continue  # only renew cookies already established by login
+        if existing.get("value") != info["value"]:
+            existing["value"] = info["value"]
+            changed = True
+        if info["expires"] and existing.get("expires") != info["expires"]:
+            existing["expires"] = info["expires"]
+            changed = True
+
+    if not changed:
+        return
+
+    tmp = f"{state_path}.tmp.{os.getpid()}"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, state_path)
+        logger.info("Persisted renewed session cookies: %s", ", ".join(sorted(renewed)))
+    except OSError as e:
+        logger.warning("Failed to persist renewed cookies: %s", e)
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 
 
 def _extract_replay_links_from_html(html: str) -> list[dict]:
@@ -210,6 +309,7 @@ def _fetch_replay_with_retry(
     cookie_header: str,
     battle_id: str,
     max_retries: int = 8,
+    on_cookies: Optional[Callable[[list[str]], None]] = None,
 ) -> tuple[int, str]:
     """Fetch a single replay with exponential backoff on 429s.
 
@@ -218,7 +318,9 @@ def _fetch_replay_with_retry(
     """
     total_backoff = 0.0
     for attempt in range(max_retries):
-        status, body = _http_get(url, cookie_header)
+        status, body, set_cookies = _http_get(url, cookie_header)
+        if on_cookies and set_cookies:
+            on_cookies(set_cookies)
 
         if status in (429, 403):
             is_cloudflare = "just a moment" in body.lower() if body else False
@@ -304,6 +406,19 @@ def fetch_replays_http(
     cookie_header = _build_cookie_header(cookies)
     stats = {"fetched": 0, "no_link": 0, "failed": 0, "empty": 0}
 
+    # Accumulate renewed session cookies seen on authenticated responses, then
+    # persist once at the end so the sliding 7-day login window keeps advancing.
+    # Thread-safe: replay fetches run in a pool, so the page loop (main thread)
+    # and worker threads both feed _capture_cookies.
+    _renewed: dict[str, dict] = {}
+    _renewed_lock = threading.Lock()
+
+    def _capture_cookies(set_cookie_headers: list[str]) -> None:
+        parsed = _parse_renewed_cookies(set_cookie_headers)
+        if parsed:
+            with _renewed_lock:
+                _renewed.update(parsed)
+
     # Build unmatched set for early pagination exit
     unmatched = set()
     for b in unfetched:
@@ -328,7 +443,9 @@ def fetch_replays_http(
             url = f"{ROYALEAPI_BASE}/player/{tag_clean}/battles"
 
         try:
-            status, html = _http_get(url, cookie_header)
+            status, html, set_cookies = _http_get(url, cookie_header)
+            if set_cookies:
+                _capture_cookies(set_cookies)
         except SessionExpiredError:
             logger.error("Session expired fetching battles for %s", tag_clean)
             return -1
@@ -401,7 +518,9 @@ def fetch_replays_http(
         time.sleep(REPLAY_DELAY * random.uniform(0.5, 1.5))
 
         try:
-            status, html = _fetch_replay_with_retry(url, cookie_header, battle.battle_id)
+            status, html = _fetch_replay_with_retry(
+                url, cookie_header, battle.battle_id, on_cookies=_capture_cookies,
+            )
         except Exception as e:
             logger.warning("Error fetching replay %s: %s", battle.battle_id[:12], e)
             stats["failed"] += 1
@@ -453,6 +572,10 @@ def fetch_replays_http(
             store_replay_data(db_session, bid, data)
 
     db_session.commit()
+
+    # Persist any renewed session cookies so the login window slides forward.
+    with _renewed_lock:
+        _persist_session_cookies(state_path, dict(_renewed))
 
     logger.info(
         "HTTP replay fetch for %s: %d fetched, %d empty, %d no_link, %d failed (of %d)",
