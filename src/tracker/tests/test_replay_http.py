@@ -8,17 +8,48 @@ after login. These tests lock in that behavior so a future refactor can't
 silently drop it (the regression that took the replay pipeline down in 06/2026).
 """
 
+import fcntl
 import json
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+import pytest
+
+import tracker.replay_http as rh
 from tracker.replay_http import (
     _parse_renewed_cookies,
     _persist_session_cookies,
     _RateLimiter,
     RENEWABLE_COOKIE_NAMES,
 )
+
+
+# ---------------------------------------------------------------------------
+# _royaleapi_serialize (cross-process scrape lock)
+# ---------------------------------------------------------------------------
+
+def test_royaleapi_lock_is_exclusive(tmp_path, monkeypatch):
+    """While the lock is held, an independent fd cannot acquire it; once
+    released, it can. Proves the cross-process mutex actually excludes."""
+    lockpath = str(tmp_path / "scrape.lock")
+    monkeypatch.setattr(rh, "ROYALEAPI_LOCK_PATH", lockpath)
+
+    with rh._royaleapi_serialize():
+        fd = os.open(lockpath, os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(fd)
+
+    # Released — now acquirable.
+    fd = os.open(lockpath, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # must not raise
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 # ---------------------------------------------------------------------------

@@ -19,6 +19,8 @@ Flow:
   4. parse_replay_html() + store_replay_data() — existing pipeline
 """
 
+import contextlib
+import fcntl
 import json
 import logging
 import os
@@ -103,6 +105,36 @@ class _RateLimiter:
 
 
 _RATE_LIMITER = _RateLimiter(REQUESTS_PER_SEC)
+
+
+# Cross-process serialization for RoyaleAPI scraping. The per-process rate
+# limiter only governs one process; the cron runs several replay-fetching
+# processes (personal + corpus) that would otherwise stack their rates and
+# re-trip the Cloudflare challenge. A single flock funnels all of them so at
+# most one process scrapes at a time — restoring the implicit serialization the
+# old shared cr-browser used to provide. flock auto-releases on process death,
+# so a crashed cron job can't wedge the pipeline.
+ROYALEAPI_LOCK_PATH = os.environ.get(
+    "ROYALEAPI_SCRAPE_LOCK", "/app/data/.royaleapi_scrape.lock"
+)
+
+
+@contextlib.contextmanager
+def _royaleapi_serialize():
+    """Hold an exclusive flock for the duration of one RoyaleAPI scrape pass."""
+    fd = os.open(ROYALEAPI_LOCK_PATH, os.O_CREAT | os.O_RDWR, 0o644)
+    t0 = time.monotonic()
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        waited = time.monotonic() - t0
+        if waited > 1.0:
+            logger.info("Waited %.1fs for RoyaleAPI scrape lock", waited)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
 # Regex patterns for extracting replay data from battle page HTML
@@ -398,6 +430,25 @@ def _fetch_replay_with_retry(
 
 
 def fetch_replays_http(
+    db_session: Session,
+    player_tag: str,
+    state_path: str = DEFAULT_SESSION_PATH,
+    limit: int = 25,
+    max_pages: int = 20,
+) -> int:
+    """Fetch replays for a player, serialized across processes.
+
+    Thin wrapper holding the cross-process RoyaleAPI lock so concurrent cron
+    jobs (personal + corpus) take turns rather than stacking their request
+    rates. Per-player granularity keeps them interleaving fairly.
+    """
+    with _royaleapi_serialize():
+        return _fetch_replays_http_impl(
+            db_session, player_tag, state_path, limit, max_pages
+        )
+
+
+def _fetch_replays_http_impl(
     db_session: Session,
     player_tag: str,
     state_path: str = DEFAULT_SESSION_PATH,
