@@ -44,6 +44,11 @@ services:
       - FETCH_INTERVAL=14400  # 4 hours in seconds
       - BROWSER_WS_URL=http://cr-browser:9223
       - ROYALEAPI_SESSION_PATH=/app/data/royaleapi_session.json
+      # RoyaleAPI request-rate cap (req/s), defense-in-depth only. The real
+      # control is keeping cf_clearance fresh (auto-refresh via FlareSolverr) —
+      # a fresh token tolerates concurrency 8 cleanly. This cap just bounds the
+      # blast radius if a refresh fails and we fall back to a stale token.
+      - ROYALEAPI_REQUESTS_PER_SEC=10.0
       - DATABASE_URL=postgresql://clash_stats:${DB_PASSWORD}@clash-postgres,192.168.7.62/clash_stats?target_session_attrs=read-write
       - DASHBOARD_DATABASE_URL=postgresql://clash_stats:${DB_PASSWORD}@192.168.7.62/clash_stats
     volumes:

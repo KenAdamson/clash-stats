@@ -55,11 +55,12 @@ from tracker.replays import (
 logger = logging.getLogger(__name__)
 
 # Tuning knobs
-# 2026-06-04: dropped 8 -> 4 after sustained 100% 429 rate-limiting (started
-# 06-02). Isolated requests still return 200, so it was purely our burst rate
-# crossing Cloudflare's threshold; 8 concurrent + the every-1-min corpus cron +
-# 8-retry amplification kept us flagged. 4 backs us under the limit.
-MAX_CONCURRENT = 4           # concurrent HTTP requests — Cloudflare throttles above this
+# 2026-06-04: the 06-02 challenge storm was cf_clearance *trust* decay, not
+# concurrency (proven: fresh token does 40/40 at concurrency 8, stale token
+# 26/40). With the refresh-if-stale machinery keeping the token fresh, 8 is
+# safe again — restoring the pre-fiasco throughput. The flock serializes
+# processes and REQUESTS_PER_SEC caps the average as defense-in-depth.
+MAX_CONCURRENT = 8           # concurrent HTTP requests (fresh token tolerates this)
 REPLAY_DELAY = 0.5           # seconds between replay fetches (rate limiting)
 BATCH_PAGE_DELAY = 0.2       # seconds between battle page fetches
 STARTUP_JITTER = 1.0         # max seconds of random jitter per thread at startup
@@ -186,7 +187,7 @@ def _http_get(url: str, cookie_header: str) -> tuple[int, str, list[str]]:
     """
     _RATE_LIMITER.acquire()  # global rate cap — gate every RoyaleAPI request
     req = urllib.request.Request(url, headers={
-        "User-Agent": USER_AGENT,
+        "User-Agent": _ACTIVE_USER_AGENT,  # must match the UA that minted cf_clearance
         "Referer": f"{ROYALEAPI_BASE}/",
         "Accept": "text/html,application/xhtml+xml,application/json,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.5",
@@ -294,6 +295,127 @@ def _persist_session_cookies(state_path: str, renewed: dict[str, dict]) -> None:
             os.unlink(tmp)
         except OSError:
             pass
+
+
+# --- cf_clearance refresh via FlareSolverr -------------------------------
+#
+# Root cause of the 06-02 challenge storm (proven 2026-06-04): cf_clearance
+# *trust* decays well before its 358-day expiry. A stale token gets challenged
+# under load (stale: 26/40 ok; fresh: 40/40 ok at concurrency 8, same urllib
+# client). FlareSolverr mints a fresh, high-trust token in ~4s. The token is
+# bound to the User-Agent that solved it, so we store and reuse FlareSolverr's
+# UA alongside it.
+FLARESOLVERR_URL = os.environ.get("FLARESOLVERR_URL", "http://flaresolverr:8191/v1")
+# Refresh the token when it's older than this many seconds (trust window).
+CF_REFRESH_MAX_AGE = float(os.environ.get("CF_CLEARANCE_MAX_AGE", "1800"))  # 30 min
+
+# UA matching the current cf_clearance. Set per scrape pass from the session
+# file; falls back to the static USER_AGENT. Read by _http_get.
+_ACTIVE_USER_AGENT = USER_AGENT
+
+
+def _write_session_atomic(state_path: str, data: dict) -> bool:
+    """Write the session JSON via temp-file + os.replace. Returns success."""
+    tmp = f"{state_path}.tmp.{os.getpid()}"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, state_path)
+        return True
+    except OSError as e:
+        logger.warning("Failed to write session file: %s", e)
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return False
+
+
+def _cf_clearance_is_stale(state_path: str) -> bool:
+    """True if the cf_clearance should be refreshed (missing or older than the
+    trust window). Reads our own _cf_refreshed_at marker, not the cookie expiry
+    (which is ~358d and unrelated to Cloudflare's trust horizon)."""
+    try:
+        with open(state_path) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return True
+    refreshed_at = data.get("_cf_refreshed_at")
+    if not refreshed_at:
+        return True
+    return (time.time() - refreshed_at) > CF_REFRESH_MAX_AGE
+
+
+def _session_user_agent(state_path: str) -> str:
+    """UA stored with the current cf_clearance, or the static default."""
+    try:
+        with open(state_path) as f:
+            return json.load(f).get("_cf_user_agent") or USER_AGENT
+    except (OSError, json.JSONDecodeError):
+        return USER_AGENT
+
+
+def refresh_cf_clearance(state_path: str, warmup_tag: Optional[str] = None) -> bool:
+    """Mint a fresh cf_clearance via FlareSolverr and persist it + matching UA.
+
+    FlareSolverr drives a real headless Chrome, so the token it returns carries
+    full Cloudflare trust (unlike our aging stored token). Anonymous — it cannot
+    log in, so it only refreshes cf_clearance; the login session (__royaleapi_
+    session_v2) is left untouched. Returns True on success.
+    """
+    warm_url = f"{ROYALEAPI_BASE}/"
+    if warmup_tag:
+        warm_url = f"{ROYALEAPI_BASE}/player/{warmup_tag.lstrip('#')}/battles"
+    payload = json.dumps(
+        {"cmd": "request.get", "url": warm_url, "maxTimeout": 60000}
+    ).encode()
+    req = urllib.request.Request(
+        FLARESOLVERR_URL, data=payload, headers={"Content-Type": "application/json"}
+    )
+    try:
+        resp = urllib.request.urlopen(req, timeout=90)
+        sol = json.loads(resp.read()).get("solution", {})
+    except Exception as e:
+        logger.warning("FlareSolverr cf_clearance refresh failed: %s", e)
+        return False
+
+    ua = sol.get("userAgent")
+    cf_value = cf_expires = None
+    for c in sol.get("cookies", []):
+        if c.get("name") == "cf_clearance":
+            cf_value = c.get("value")
+            cf_expires = c.get("expires")
+    if not cf_value or not ua:
+        logger.warning("FlareSolverr returned no cf_clearance/userAgent")
+        return False
+
+    try:
+        with open(state_path) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning("Cannot read session file to refresh cf_clearance: %s", e)
+        return False
+
+    cookies = data.setdefault("cookies", [])
+    for c in cookies:
+        if c.get("name") == "cf_clearance":
+            c["value"] = cf_value
+            if cf_expires:
+                c["expires"] = cf_expires
+            break
+    else:
+        cookies.append({
+            "name": "cf_clearance", "value": cf_value,
+            "domain": ".royaleapi.com", "path": "/",
+            "expires": cf_expires or -1,
+        })
+    data["_cf_user_agent"] = ua
+    data["_cf_refreshed_at"] = time.time()
+
+    if _write_session_atomic(state_path, data):
+        logger.info("Refreshed cf_clearance via FlareSolverr (UA aligned)")
+        return True
+    return False
 
 
 def _extract_replay_links_from_html(html: str) -> list[dict]:
@@ -488,10 +610,20 @@ def _fetch_replays_http_impl(
         logger.warning("No session file at %s — cannot fetch replays", state_path)
         return 0
 
+    # Keep cf_clearance fresh: a token past its trust window gets challenged
+    # under load. Cheap (~4s) and bounded — only fires when actually stale.
+    # Runs inside the cross-process scrape lock, so no concurrent-refresh race.
+    if _cf_clearance_is_stale(state_path):
+        refresh_cf_clearance(state_path, warmup_tag=tag_clean)
+
     cookies = _load_cookies(state_path)
     if "cf_clearance" not in cookies:
         logger.warning("No cf_clearance cookie — browser login required")
         return 0
+
+    # Use the UA that minted the current cf_clearance (the token is UA-bound).
+    global _ACTIVE_USER_AGENT
+    _ACTIVE_USER_AGENT = _session_user_agent(state_path)
 
     cookie_header = _build_cookie_header(cookies)
     stats = {"fetched": 0, "no_link": 0, "failed": 0, "empty": 0}

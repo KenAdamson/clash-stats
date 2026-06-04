@@ -206,3 +206,79 @@ def test_persist_missing_file_is_safe(tmp_path):
     """A non-existent session file is handled gracefully (logged, no raise)."""
     _persist_session_cookies(str(tmp_path / "nope.json"),
                              {"cf_clearance": {"value": "x", "expires": None}})
+
+
+# ---------------------------------------------------------------------------
+# cf_clearance freshness + refresh
+# ---------------------------------------------------------------------------
+
+def test_cf_stale_when_no_marker_or_missing_file(tmp_path):
+    missing = str(tmp_path / "nope.json")
+    assert rh._cf_clearance_is_stale(missing) is True
+    p = tmp_path / "s.json"
+    p.write_text(json.dumps({"cookies": []}))  # no _cf_refreshed_at
+    assert rh._cf_clearance_is_stale(str(p)) is True
+
+
+def test_cf_fresh_within_window_stale_past_it(tmp_path, monkeypatch):
+    monkeypatch.setattr(rh, "CF_REFRESH_MAX_AGE", 1800)
+    p = tmp_path / "s.json"
+    p.write_text(json.dumps({"cookies": [], "_cf_refreshed_at": time.time() - 60}))
+    assert rh._cf_clearance_is_stale(str(p)) is False        # 1 min old
+    p.write_text(json.dumps({"cookies": [], "_cf_refreshed_at": time.time() - 3600}))
+    assert rh._cf_clearance_is_stale(str(p)) is True          # 1 hr old
+
+
+def test_session_user_agent_fallback(tmp_path):
+    p = tmp_path / "s.json"
+    p.write_text(json.dumps({"cookies": []}))
+    assert rh._session_user_agent(str(p)) == rh.USER_AGENT    # no stored UA
+    p.write_text(json.dumps({"cookies": [], "_cf_user_agent": "FreshUA/1.0"}))
+    assert rh._session_user_agent(str(p)) == "FreshUA/1.0"
+
+
+def test_refresh_cf_clearance_persists_token_ua_and_marker(tmp_path, monkeypatch):
+    """With FlareSolverr stubbed, refresh writes cf_clearance value, UA, and
+    the freshness marker, leaving the login cookie untouched."""
+    p = tmp_path / "s.json"
+    p.write_text(json.dumps({"cookies": [
+        {"name": "cf_clearance", "value": "OLD", "domain": ".royaleapi.com", "path": "/"},
+        {"name": "__royaleapi_session_v2", "value": "LOGIN", "domain": ".royaleapi.com", "path": "/"},
+    ]}))
+
+    class _FakeResp:
+        def __init__(self, body): self._b = body
+        def read(self): return self._b
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    fake = json.dumps({"solution": {
+        "userAgent": "FreshUA/2.0",
+        "cookies": [{"name": "cf_clearance", "value": "FRESH", "expires": 9999999999}],
+    }}).encode()
+    monkeypatch.setattr(rh.urllib.request, "urlopen", lambda *a, **k: _FakeResp(fake))
+
+    assert rh.refresh_cf_clearance(str(p), warmup_tag="L90009GPP") is True
+    data = json.loads(p.read_text())
+    by = {c["name"]: c for c in data["cookies"]}
+    assert by["cf_clearance"]["value"] == "FRESH"
+    assert by["__royaleapi_session_v2"]["value"] == "LOGIN"   # login untouched
+    assert data["_cf_user_agent"] == "FreshUA/2.0"
+    assert data["_cf_refreshed_at"] > 0
+    assert rh._cf_clearance_is_stale(str(p)) is False          # now fresh
+    assert rh._session_user_agent(str(p)) == "FreshUA/2.0"
+
+
+def test_refresh_cf_clearance_handles_flaresolverr_failure(tmp_path, monkeypatch):
+    p = tmp_path / "s.json"
+    p.write_text(json.dumps({"cookies": [
+        {"name": "cf_clearance", "value": "OLD", "domain": ".royaleapi.com", "path": "/"},
+    ]}))
+
+    def _boom(*a, **k):
+        raise OSError("flaresolverr down")
+    monkeypatch.setattr(rh.urllib.request, "urlopen", _boom)
+
+    assert rh.refresh_cf_clearance(str(p)) is False
+    # File untouched on failure.
+    assert json.loads(p.read_text())["cookies"][0]["value"] == "OLD"
