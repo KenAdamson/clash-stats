@@ -273,6 +273,19 @@ def create_app(db_path: str | None = None) -> Flask:
         finally:
             session.close()
 
+    @app.route("/api/classic-1v1")
+    def api_classic_1v1():
+        cached = _cache.get("classic_1v1")
+        if cached is not None:
+            return jsonify(cached)
+        session = get_session(engine)
+        try:
+            result = analytics.get_classic_1v1_stats(session)
+            _cache.set("classic_1v1", result, CACHE_TTL)
+            return jsonify(result)
+        finally:
+            session.close()
+
     @app.route("/api/nemeses")
     def api_nemeses():
         cache_key = f"nemeses:{_ladder_only()}"

@@ -158,6 +158,43 @@ async function fetchStreaks() {
     }
 }
 
+async function fetchClassic1v1() {
+    try {
+        const data = await fetch("/api/classic-1v1").then(r => r.json());
+        renderClassic1v1(data);
+    } catch (e) {
+        console.error("Classic 1v1 fetch failed:", e);
+    }
+}
+
+function renderClassic1v1(data) {
+    if (!data || !data.total) return;  // hide section until there are games
+    const section = document.getElementById("classic1v1-section");
+    section.style.display = "";
+
+    const wrCls = wrClass(data.win_rate);
+    const streakLabel = data.streak
+        ? `${data.streak}${(data.streak_type || "").charAt(0).toUpperCase()}`
+        : "—";
+    document.getElementById("classic1v1-summary").innerHTML = `
+        <div class="streak-card"><div class="streak-value ${wrCls}">${data.win_rate}%</div><div class="streak-label">Win Rate</div></div>
+        <div class="streak-card"><div class="streak-value">${data.wins}-${data.losses}</div><div class="streak-label">Record</div></div>
+        <div class="streak-card"><div class="streak-value">${streakLabel}</div><div class="streak-label">Streak</div></div>`;
+
+    const tbody = document.querySelector("#classic1v1-table tbody");
+    tbody.innerHTML = (data.recent || []).map(g => {
+        const when = (g.battle_time || "").slice(4, 8).replace(/(\d\d)(\d\d)/, "$1/$2");
+        const rCls = g.result === "win" ? "wr-good" : "wr-bad";
+        return `<tr>
+            <td>${when}</td>
+            <td class="${rCls}">${g.result === "win" ? "W" : "L"}</td>
+            <td>${g.crowns}</td>
+            <td>${g.opponent_name || "Unknown"}</td>
+            <td class="archetype-col">${g.archetype}</td>
+        </tr>`;
+    }).join("");
+}
+
 // Fire all sections independently — each renders as soon as its data arrives
 function fetchAll() {
     fetchOverview();
@@ -165,6 +202,7 @@ function fetchAll() {
     fetchMatchups();
     fetchRecent();
     fetchStreaks();
+    fetchClassic1v1();
     document.getElementById("last-updated").textContent = new Date().toLocaleTimeString();
 }
 

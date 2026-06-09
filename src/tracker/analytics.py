@@ -15,6 +15,9 @@ from tracker.models import Battle, CorpusHourlyStat, DeckCard, PlayerSnapshot
 # Battle types considered "ladder" (competitive, with trophy stakes)
 LADDER_TYPES = ("PvP",)
 
+# Classic 1v1 — level-capped, no-trophy practice mode (API gameMode name)
+SHOWDOWN_FRIENDLY_MODE = "Showdown_Friendly"
+
 
 def _card_variant(card: dict) -> str:
     """Classify a card as base, evo, or hero from API data."""
@@ -677,6 +680,75 @@ def get_archetype_stats(session: Session, min_battles: int = 3, ladder_only: boo
                 "win_rate": round(data["wins"] / total * 100, 1) if total > 0 else 0.0,
             })
     return sorted(results, key=lambda x: x["total"], reverse=True)
+
+
+def get_classic_1v1_stats(session: Session, recent_limit: int = 15) -> dict:
+    """Stats for Classic 1v1 (Showdown_Friendly) — the level-capped, no-trophy
+    practice mode used to isolate and drill skill.
+
+    Returns win rate, W-L record, current streak, and recent games with the
+    opponent's deck archetype.
+    """
+    rows = session.execute(
+        select(
+            Battle.battle_time,
+            Battle.result,
+            Battle.player_crowns,
+            Battle.opponent_crowns,
+            Battle.opponent_name,
+            Battle.opponent_tag,
+            Battle.opponent_deck,
+        )
+        .where(
+            Battle.corpus == "personal",
+            Battle.game_mode_name == SHOWDOWN_FRIENDLY_MODE,
+            Battle.result.in_(["win", "loss"]),
+        )
+        .order_by(Battle.battle_time.desc())
+    ).all()
+
+    total = len(rows)
+    wins = sum(1 for r in rows if r.result == "win")
+    losses = total - wins
+    win_rate = round(wins / total * 100, 1) if total else 0.0
+
+    # Current streak from the most recent game backward.
+    streak = 0
+    streak_type = None
+    for r in rows:
+        if streak_type is None:
+            streak_type, streak = r.result, 1
+        elif r.result == streak_type:
+            streak += 1
+        else:
+            break
+
+    recent = []
+    for r in rows[:recent_limit]:
+        archetype = "Unknown"
+        if r.opponent_deck:
+            try:
+                archetype = classify_archetype(json.loads(r.opponent_deck))
+            except (json.JSONDecodeError, TypeError):
+                pass
+        recent.append({
+            "battle_time": r.battle_time,
+            "result": r.result,
+            "crowns": f"{r.player_crowns}-{r.opponent_crowns}",
+            "opponent_name": r.opponent_name,
+            "opponent_tag": r.opponent_tag,
+            "archetype": archetype,
+        })
+
+    return {
+        "total": total,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": win_rate,
+        "streak": streak,
+        "streak_type": streak_type,
+        "recent": recent,
+    }
 
 
 def get_top_opponents(
