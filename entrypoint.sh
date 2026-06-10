@@ -37,8 +37,25 @@ git config --global user.name "cr-tracker"
 # .git is mounted at /app/.git — tell git it's safe
 git config --global --add safe.directory /app
 
+# Cron runs jobs in a CLEAN environment — container env vars (set by compose)
+# are NOT visible to cron-spawned jobs. Anything a job needs must be baked into
+# its wrapper at startup. CR_API_KEY etc. are baked inline below; the RoyaleAPI
+# scraper's proxy/solver/rotation endpoints are baked here into one reusable
+# block. Without this, cron replay scraping bypasses the VPN proxy and egresses
+# from the container's (banned) residential IP. Each var is included only if
+# non-empty — exporting an empty GLUETUN_CONTROL_URL would disable rotation.
+SCRAPER_ENV_EXPORTS=""
+[ -n "${ROYALEAPI_PROXY}" ]      && SCRAPER_ENV_EXPORTS="${SCRAPER_ENV_EXPORTS}export ROYALEAPI_PROXY=\"${ROYALEAPI_PROXY}\"
+"
+[ -n "${FLARESOLVERR_URL}" ]     && SCRAPER_ENV_EXPORTS="${SCRAPER_ENV_EXPORTS}export FLARESOLVERR_URL=\"${FLARESOLVERR_URL}\"
+"
+[ -n "${GLUETUN_CONTROL_URL}" ]  && SCRAPER_ENV_EXPORTS="${SCRAPER_ENV_EXPORTS}export GLUETUN_CONTROL_URL=\"${GLUETUN_CONTROL_URL}\"
+"
+[ -n "${ROYALEAPI_REQUESTS_PER_SEC}" ] && SCRAPER_ENV_EXPORTS="${SCRAPER_ENV_EXPORTS}export ROYALEAPI_REQUESTS_PER_SEC=\"${ROYALEAPI_REQUESTS_PER_SEC}\"
+"
+
 # Build fetch script with baked-in env vars
-# (BusyBox crond runs jobs in a clean environment)
+# (Debian cron runs jobs in a clean environment)
 cat > /app/fetch.sh << EOF
 #!/bin/sh
 exec flock -n ${LOCKDIR}/fetch.lock sh -c '
@@ -72,6 +89,7 @@ export CR_API_KEY="${CR_API_KEY}"
 export CR_PLAYER_TAG="${CR_PLAYER_TAG}"
 [ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
 [ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
+${SCRAPER_ENV_EXPORTS}
 export PYTHONUNBUFFERED=1
 clash-stats --personal-combined --player-tag "${CR_PLAYER_TAG}" ${DB_FLAG}
 ' || echo "personal_combined: previous run still active, skipping"
@@ -176,11 +194,42 @@ export BROWSER_WS_URL="${BROWSER_WS_URL:-http://cr-browser:9223}"
 export ROYALEAPI_SESSION_PATH="${ROYALEAPI_SESSION_PATH:-/app/data/royaleapi_session.json}"
 export REPLAYS_PER_PLAYER="${REPLAYS_PER_PLAYER:-25}"
 [ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
+${SCRAPER_ENV_EXPORTS}
 export PYTHONUNBUFFERED=1
 clash-stats --corpus-combined --corpus-limit 50 --concurrency 12 --max-pages 3 ${DB_FLAG}
 ' || echo "corpus_combined: previous run still active, skipping"
 EOF
 chmod +x /app/corpus_combined.sh
+
+# Corpus replays — SLOW trickle (decoupled from corpus_scrape, which pulls
+# battles via the official CR API and is unaffected by RoyaleAPI/Cloudflare).
+# Corpus-scale replay volume (50 players × concurrency 12 every minute) burned
+# exits faster than the pool recovered. This is the opposite end of the dial: a
+# few players' freshest replays, fully gentle (1 req/s, low concurrency, first
+# battle page only), every 10 min. Some corpus replay data gathered slowly —
+# the counterfactual sim needs OTHER players' games — beats none. A challenged
+# exit triggers a cooldown-guarded reactive rotation between passes.
+#
+# Uses --corpus-combined (the HTTP replay path via fetch_replays_http, routed
+# through the VPN proxy) — NOT --corpus-replays, which is the legacy Playwright/
+# cr-browser path. CR_API_KEY is baked (the combined pass also refreshes the 3
+# players' battles via the official API). CR_PLAYER_TAG is deliberately NOT
+# baked so personal_tag stays None — personal replays are owned by
+# personal_combined; this job is corpus-only.
+cat > /app/corpus_replays.sh << EOF
+#!/bin/sh
+exec flock -n ${LOCKDIR}/corpus_replays.lock sh -c '
+export CR_API_KEY="${CR_API_KEY}"
+[ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
+export ROYALEAPI_SESSION_PATH="${ROYALEAPI_SESSION_PATH:-/app/data/royaleapi_session.json}"
+[ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
+${SCRAPER_ENV_EXPORTS}
+export ROYALEAPI_REQUESTS_PER_SEC="${CORPUS_REPLAY_RATE:-1.0}"
+export PYTHONUNBUFFERED=1
+clash-stats --corpus-combined --corpus-limit 3 --replays-per-player 8 --max-pages 1 --concurrency 2 ${DB_FLAG}
+' || echo "corpus_replays: previous run still active, skipping"
+EOF
+chmod +x /app/corpus_replays.sh
 
 # Incremental WP inference: process games with replays but no WP data
 cat > /app/wp_infer_new.sh << EOF
@@ -203,6 +252,7 @@ chmod +x /app/wp_infer_new.sh
 cat > /app/rotate_exit.sh << EOF
 #!/bin/sh
 exec flock -n ${LOCKDIR}/corpus_combined.lock flock -n ${LOCKDIR}/personal_combined.lock sh -c '
+${SCRAPER_ENV_EXPORTS}
 export PYTHONUNBUFFERED=1
 clash-stats --rotate-exit ${DB_FLAG}
 ' || echo "rotate_exit: scrape in progress, skipping"
