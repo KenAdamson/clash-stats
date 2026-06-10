@@ -9,12 +9,13 @@ PATH=/usr/local/bin:/usr/bin:/bin
 # Corpus battles: every minute, via the official CR API (IP-whitelisted,
 # unaffected by RoyaleAPI/Cloudflare). High volume here is fine.
 * * * * * root /app/corpus_scrape.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
-# Corpus replays: SLOW trickle every 10 min (RoyaleAPI scrape through the VPN
+# Corpus replays: SLOW trickle every 5 min (RoyaleAPI scrape through the VPN
 # pool). Corpus-SCALE replay volume was proven non-viable 06-10 (rotation
 # thrashed: 0 fetched / 30 challenges / 13 rotations in 6 min). This is the
 # throttled opposite — a few players' freshest replays, gently — so the
-# counterfactual sim gets OTHER players' games without spamming exits.
-3-59/10 * * * * root /app/corpus_replays.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
+# counterfactual sim gets OTHER players' games without spamming exits. Bumped
+# 3→8 players / 10→5 min on 06-10 after a clean hour proved ample headroom.
+2-59/5 * * * * root /app/corpus_replays.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Weekly: refresh top-ladder player tags (Monday 6am UTC)
 0 6 * * 1 root /app/corpus_update.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Refresh simulation results daily at 2am UTC

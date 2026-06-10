@@ -206,7 +206,10 @@ chmod +x /app/corpus_combined.sh
 # Corpus-scale replay volume (50 players × concurrency 12 every minute) burned
 # exits faster than the pool recovered. This is the opposite end of the dial: a
 # few players' freshest replays, fully gentle (1 req/s, low concurrency, first
-# battle page only), every 10 min. Some corpus replay data gathered slowly —
+# battle page only), every 5 min. Bumped 3→8 players / 10→5 min on 06-10 after
+# a clean hour (42 replays, 0 challenges/failures) showed the exit ~95% idle;
+# headroom remains, still far below the corpus-scale config that thrashed. Some
+# corpus replay data gathered slowly —
 # the counterfactual sim needs OTHER players' games — beats none. A challenged
 # exit triggers a cooldown-guarded reactive rotation between passes.
 #
@@ -226,7 +229,7 @@ export ROYALEAPI_SESSION_PATH="${ROYALEAPI_SESSION_PATH:-/app/data/royaleapi_ses
 ${SCRAPER_ENV_EXPORTS}
 export ROYALEAPI_REQUESTS_PER_SEC="${CORPUS_REPLAY_RATE:-1.0}"
 export PYTHONUNBUFFERED=1
-clash-stats --corpus-combined --corpus-limit 3 --replays-per-player 8 --max-pages 1 --concurrency 2 ${DB_FLAG}
+clash-stats --corpus-combined --corpus-limit 8 --replays-per-player 8 --max-pages 1 --concurrency 2 ${DB_FLAG}
 ' || echo "corpus_replays: previous run still active, skipping"
 EOF
 chmod +x /app/corpus_replays.sh
