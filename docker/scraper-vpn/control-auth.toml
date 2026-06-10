@@ -1,0 +1,6 @@
+# gluetun control-server auth. The control server is NOT published to the host
+# (docker-internal only), so the rotation routes are allowed without auth.
+[[roles]]
+name = "rotation"
+routes = ["GET /v1/publicip/ip", "GET /v1/vpn/status", "PUT /v1/vpn/status"]
+auth = "none"

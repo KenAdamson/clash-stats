@@ -112,15 +112,22 @@ services:
       VPN_TYPE: wireguard
       WIREGUARD_PRIVATE_KEY: ${SCRAPER_WG_PRIVATE_KEY}
       WIREGUARD_ADDRESSES: ${SCRAPER_WG_ADDRESS}
-      SERVER_HOSTNAMES: ee-tll-wg-003
+      # Rotation POOL, not a single pinned server: all xtom (proven non-M247 /
+      # CF-trusted), in cities OTHER than Tallinn (flare-it's exit). A control-
+      # API reconnect re-rolls a random server from this pool → fresh exit IP,
+      # spreading corpus volume across ~12 IPs so none crosses the CF threshold.
+      SERVER_PROVIDERS: xtom
+      SERVER_CITIES: Dusseldorf,Frankfurt,London,Amsterdam
       TZ: America/New_York
       DNS_KEEP_NAMESERVER: "on"
       # Allow inbound from the docker subnet (so cr-tracker reaches the proxy +
       # control server) and the LAN (Pi-hole DNS).
       FIREWALL_OUTBOUND_SUBNETS: "172.17.1.0/24,192.168.7.0/24"
-      # HTTP proxy for replay_http; control server for exit rotation later.
+      # HTTP proxy for replay_http; control server for exit rotation.
       HTTPPROXY: "on"
       HTTP_CONTROL_SERVER_ADDRESS: ":8000"
+    volumes:
+      - ./docker/scraper-vpn/control-auth.toml:/gluetun/auth/config.toml:ro
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- https://am.i.mullvad.net/connected | grep -q 'connected to Mullvad' || exit 1"]

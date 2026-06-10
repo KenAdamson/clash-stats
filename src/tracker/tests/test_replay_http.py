@@ -25,6 +25,14 @@ from tracker.replay_http import (
 )
 
 
+class _FakeResp:
+    """Minimal urlopen stand-in: readable + usable as a context manager."""
+    def __init__(self, body): self._b = body
+    def read(self): return self._b
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+
+
 # ---------------------------------------------------------------------------
 # _royaleapi_serialize (cross-process scrape lock)
 # ---------------------------------------------------------------------------
@@ -313,3 +321,69 @@ def test_refresh_cf_clearance_handles_flaresolverr_failure(tmp_path, monkeypatch
     assert rh.refresh_cf_clearance(str(p)) is False
     # File untouched on failure.
     assert json.loads(p.read_text())["cookies"][0]["value"] == "OLD"
+
+
+# ---------------------------------------------------------------------------
+# rotate_vpn_exit cooldown (cross-process anti-thrash floor)
+# ---------------------------------------------------------------------------
+
+def test_rotation_cooldown_blocks_within_interval(tmp_path, monkeypatch):
+    """A rotation stamps a shared timestamp; a second attempt within the
+    interval is reported on cooldown."""
+    ts = str(tmp_path / ".rt")
+    monkeypatch.setattr(rh, "ROTATE_TS_PATH", ts)
+    monkeypatch.setattr(rh, "ROTATE_MIN_INTERVAL", 300.0)
+
+    assert rh._rotation_on_cooldown() is False  # never rotated
+    rh._mark_rotation()
+    assert rh._rotation_on_cooldown() is True  # just stamped
+
+
+def test_rotation_cooldown_expires(tmp_path, monkeypatch):
+    """Once the interval passes, rotation is allowed again."""
+    ts = str(tmp_path / ".rt")
+    monkeypatch.setattr(rh, "ROTATE_TS_PATH", ts)
+    monkeypatch.setattr(rh, "ROTATE_MIN_INTERVAL", 0.0)  # everything is expired
+
+    rh._mark_rotation()
+    assert rh._rotation_on_cooldown() is False
+
+
+def test_rotate_vpn_exit_suppressed_by_cooldown(tmp_path, monkeypatch):
+    """rotate_vpn_exit() is a no-op (returns None) while on cooldown, and never
+    issues a control call. force=True bypasses the cooldown."""
+    ts = str(tmp_path / ".rt")
+    monkeypatch.setattr(rh, "ROTATE_TS_PATH", ts)
+    monkeypatch.setattr(rh, "ROTATE_MIN_INTERVAL", 300.0)
+    monkeypatch.setattr(rh, "GLUETUN_CONTROL_URL", "http://gluetun:8000")
+
+    calls = []
+    monkeypatch.setattr(rh.urllib.request, "urlopen",
+                        lambda *a, **k: calls.append(a) or _FakeResp(b"{}"))
+
+    rh._mark_rotation()  # arm the cooldown
+    assert rh.rotate_vpn_exit() is None
+    assert calls == []  # cooldown short-circuits before any control call
+
+
+def test_rotate_vpn_exit_force_bypasses_cooldown(tmp_path, monkeypatch):
+    """force=True rotates even while on cooldown (manual/periodic CLI path)."""
+    ts = str(tmp_path / ".rt")
+    monkeypatch.setattr(rh, "ROTATE_TS_PATH", ts)
+    monkeypatch.setattr(rh, "ROTATE_MIN_INTERVAL", 300.0)
+    monkeypatch.setattr(rh, "GLUETUN_CONTROL_URL", "http://gluetun:8000")
+
+    ips = iter(['{"public_ip":"1.1.1.1"}', '{"public_ip":"2.2.2.2"}',
+                '{"public_ip":"2.2.2.2"}'])
+
+    def _fake_urlopen(req, *a, **k):
+        # PUT status calls return {}; GET publicip returns the next IP.
+        if getattr(req, "get_method", lambda: "GET")() == "PUT":
+            return _FakeResp(b"{}")
+        return _FakeResp(next(ips).encode())
+
+    monkeypatch.setattr(rh.urllib.request, "urlopen", _fake_urlopen)
+    monkeypatch.setattr(rh.time, "sleep", lambda *_: None)
+
+    rh._mark_rotation()  # arm the cooldown
+    assert rh.rotate_vpn_exit(force=True) == "2.2.2.2"

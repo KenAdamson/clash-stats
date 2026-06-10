@@ -368,6 +368,95 @@ def _session_user_agent(state_path: str) -> str:
         return USER_AGENT
 
 
+# --- VPN exit rotation -----------------------------------------------------
+#
+# A single exit IP can't take corpus-scale replay volume (it gets CF-challenged
+# within minutes). The scraper VPN (gluetun) is configured with a POOL of
+# trusted xtom servers; reconnecting via its control API re-rolls a random
+# server → fresh exit IP. Rotating periodically + on-block spreads the load
+# across ~12 IPs so none crosses the threshold.
+GLUETUN_CONTROL_URL = os.environ.get("GLUETUN_CONTROL_URL", "http://cr-scraper-vpn:8000")
+
+# Cross-process rotation cooldown. Reactive rotation (one per battle-page 403)
+# is safe at low volume but THRASHES under corpus volume: every cron pass and
+# every concurrent process hits a 403 on a stale exit, each fires a rotation,
+# and rotations (~10s each, plus a fresh exit's CF trust decays in ~1min) burn
+# the pool faster than it recovers — proven 06-10: 0 fetched / 30 challenges /
+# 13 rotations in 6 min. The fix is a global floor on rotation frequency,
+# enforced via a timestamp file's mtime (shared across all scraper processes).
+# A rotation that's still on cooldown is a no-op returning None.
+ROTATE_MIN_INTERVAL = float(os.environ.get("VPN_ROTATE_MIN_INTERVAL", "300"))
+ROTATE_TS_PATH = os.environ.get("VPN_ROTATE_TS", "/app/data/.vpn_last_rotate")
+
+
+def _rotation_on_cooldown() -> bool:
+    """True if a rotation happened within ROTATE_MIN_INTERVAL (any process)."""
+    try:
+        age = time.time() - os.path.getmtime(ROTATE_TS_PATH)
+    except OSError:
+        return False  # never rotated → not on cooldown
+    return age < ROTATE_MIN_INTERVAL
+
+
+def _mark_rotation() -> None:
+    """Stamp the shared rotation timestamp (touch the file)."""
+    try:
+        with open(ROTATE_TS_PATH, "a"):
+            os.utime(ROTATE_TS_PATH, None)
+    except OSError as e:
+        logger.warning("Could not stamp rotation timestamp: %s", e)
+
+
+def rotate_vpn_exit(wait_timeout: float = 60.0, force: bool = False) -> Optional[str]:
+    """Reconnect the scraper VPN to a new random pool server. Returns the new
+    public IP, or None on failure/timeout/cooldown. No-op if no control URL
+    configured. Respects ROTATE_MIN_INTERVAL unless force=True (manual/CLI)."""
+    if not GLUETUN_CONTROL_URL:
+        return None
+    if not force and _rotation_on_cooldown():
+        logger.info(
+            "VPN rotation suppressed — last rotation < %.0fs ago (cooldown)",
+            ROTATE_MIN_INTERVAL,
+        )
+        return None
+    # Stamp BEFORE rotating so concurrent processes see the cooldown immediately,
+    # not only after our ~10s rotation completes.
+    _mark_rotation()
+
+    def _ctrl(path, method="GET", body=None):
+        data = json.dumps(body).encode() if body is not None else None
+        headers = {"Content-Type": "application/json"} if data else {}
+        req = urllib.request.Request(
+            GLUETUN_CONTROL_URL + path, data=data, headers=headers, method=method
+        )
+        return urllib.request.urlopen(req, timeout=20).read()
+
+    def _ip():
+        try:
+            return json.loads(_ctrl("/v1/publicip/ip")).get("public_ip")
+        except Exception:
+            return None
+
+    old = _ip()
+    try:
+        _ctrl("/v1/vpn/status", "PUT", {"status": "stopped"})
+        time.sleep(2)
+        _ctrl("/v1/vpn/status", "PUT", {"status": "running"})
+    except Exception as e:
+        logger.warning("VPN rotation control call failed: %s", e)
+        return None
+
+    deadline = time.monotonic() + wait_timeout
+    while time.monotonic() < deadline:
+        time.sleep(3)
+        new = _ip()
+        if new and new != old:
+            logger.info("Rotated VPN exit: %s -> %s", old, new)
+            return new
+    logger.warning("VPN rotation: no new exit IP within %.0fs", wait_timeout)
+    return None
+
+
 def refresh_cf_clearance(state_path: str, warmup_tag: Optional[str] = None) -> bool:
     """Mint a fresh cf_clearance via FlareSolverr and persist it + matching UA.
 
@@ -682,6 +771,7 @@ def _fetch_replays_http_impl(
     # Page 2+: GET /player/{tag}/battles/scroll/{data-index}/type/all
     all_links: list[dict] = []
     scroll_cursor = None
+    rotated_this_pass = False  # reactive VPN rotation fires at most once per pass
 
     for page_num in range(max_pages):
         if scroll_cursor:
@@ -702,10 +792,20 @@ def _fetch_replays_http_impl(
 
         if status != 200:
             logger.warning("Battle page %d returned %d for %s", page_num + 1, status, tag_clean)
-            if status == 403 and "just a moment" in html.lower():
-                logger.error("Cloudflare challenge — cf_clearance expired")
-                return -1
-            break
+            # Reactive rotation: a 403 means this exit just got CF-challenged.
+            # Roll to a fresh pool IP (once per pass) and retry the same page.
+            if status == 403 and not rotated_this_pass and GLUETUN_CONTROL_URL:
+                rotated_this_pass = True
+                logger.info("Battle page 403 — rotating VPN exit and retrying %s", tag_clean)
+                if rotate_vpn_exit():
+                    try:
+                        status, html, set_cookies = _http_get(url, cookie_header)
+                        if set_cookies:
+                            _capture_cookies(set_cookies)
+                    except Exception as e:
+                        logger.warning("Retry after rotation failed for %s: %s", tag_clean, e)
+            if status != 200:
+                break
 
         links = _extract_replay_links_from_html(html)
         all_links.extend(links)

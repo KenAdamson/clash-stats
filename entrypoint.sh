@@ -194,6 +194,21 @@ clash-stats --wp-infer-new ${DB_FLAG}
 EOF
 chmod +x /app/wp_infer_new.sh
 
+# Manual/on-demand VPN exit rotation (clash-stats --rotate-exit, force=True).
+# No longer cron-scheduled: corpus is battles-only, so there's no sustained
+# replay volume to spread, and periodic rotation needlessly invalidates the
+# personal path's IP-bound cf_clearance. Kept as a tool for manually rolling
+# the exit. Holds both scrape locks during the ~10s reconnect so no fetch runs
+# against a half-rotated tunnel.
+cat > /app/rotate_exit.sh << EOF
+#!/bin/sh
+exec flock -n ${LOCKDIR}/corpus_combined.lock flock -n ${LOCKDIR}/personal_combined.lock sh -c '
+export PYTHONUNBUFFERED=1
+clash-stats --rotate-exit ${DB_FLAG}
+' || echo "rotate_exit: scrape in progress, skipping"
+EOF
+chmod +x /app/rotate_exit.sh
+
 # Incremental TCN embedding (new games only, no retraining)
 cat > /app/embed_new.sh << EOF
 #!/bin/sh

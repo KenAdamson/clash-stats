@@ -202,6 +202,8 @@ Environment variables:
                         help="Run WP inference using existing checkpoint (no retraining)")
     parser.add_argument("--wp-infer-new", action="store_true",
                         help="Run WP inference only on games missing WP data (incremental)")
+    parser.add_argument("--rotate-exit", action="store_true",
+                        help="Rotate the scraper VPN to a fresh pool exit IP")
     parser.add_argument("--wp", type=str, metavar="BATTLE_ID",
                         help="Show P(win) curve for a game")
     parser.add_argument("--wp-critical", type=str, metavar="BATTLE_ID",
@@ -738,6 +740,13 @@ Environment variables:
             else:
                 print(f"  ✓ WP inference: {n} new games processed")
 
+        if args.rotate_exit:
+            from tracker.replay_http import rotate_vpn_exit
+            # Manual/periodic invocation bypasses the reactive-rotation cooldown.
+            new_ip = rotate_vpn_exit(force=True)
+            print(f"  ✓ Rotated VPN exit to {new_ip}" if new_ip
+                  else "  ✗ VPN exit rotation failed")
+
         if args.wp:
             from tracker.ml.wp_storage import WinProbability
             rows = session.query(WinProbability).filter_by(
@@ -924,6 +933,7 @@ Environment variables:
             args.tilt_check, args.train_tcn, args.build_features, args.train_embeddings,
             args.clusters, args.similar, args.embed_new,
             args.train_wp, args.wp_infer, args.wp_infer_new, args.wp, args.wp_critical, args.wp_cards,
+            args.rotate_exit,
             args.train_cvae, args.resume_cvae, args.counterfactual, args.deck_gradient, args.replay_swap,
             args.promote_model, args.list_models,
             args.manifold, args.train_activity_model,
