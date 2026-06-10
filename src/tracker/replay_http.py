@@ -55,12 +55,11 @@ from tracker.replays import (
 logger = logging.getLogger(__name__)
 
 # Tuning knobs
-# 2026-06-04: the 06-02 challenge storm was cf_clearance *trust* decay, not
-# concurrency (proven: fresh token does 40/40 at concurrency 8, stale token
-# 26/40). With the refresh-if-stale machinery keeping the token fresh, 8 is
-# safe again — restoring the pre-fiasco throughput. The flock serializes
-# processes and REQUESTS_PER_SEC caps the average as defense-in-depth.
-MAX_CONCURRENT = 8           # concurrent HTTP requests (fresh token tolerates this)
+# 2026-06-10: dropped 8 -> 4. Sustained corpus-scale scraping at 8 got our
+# residential IP hard-banned by RoyaleAPI's Cloudflare (06-08). Scraping now
+# routes through a dedicated VPN exit; 4 keeps the per-exit footprint lighter
+# so no single rotated IP accumulates a ban-worthy load.
+MAX_CONCURRENT = 4           # concurrent HTTP requests (gentle per-exit footprint)
 REPLAY_DELAY = 0.5           # seconds between replay fetches (rate limiting)
 BATCH_PAGE_DELAY = 0.2       # seconds between battle page fetches
 STARTUP_JITTER = 1.0         # max seconds of random jitter per thread at startup
@@ -106,6 +105,20 @@ class _RateLimiter:
 
 
 _RATE_LIMITER = _RateLimiter(REQUESTS_PER_SEC)
+
+# Route RoyaleAPI requests through a dedicated VPN exit's HTTP proxy when set
+# (post-06-08 residential IP ban). Only _http_get (RoyaleAPI traffic) uses this
+# opener; the FlareSolverr control call in refresh_cf_clearance stays direct,
+# since that's an internal docker request, not RoyaleAPI. cf_clearance is minted
+# through FlareSolverr inside the SAME VPN netns, so token + fetches share one
+# exit IP. Empty value = direct (unchanged behaviour).
+ROYALEAPI_PROXY = os.environ.get("ROYALEAPI_PROXY", "").strip()
+if ROYALEAPI_PROXY:
+    _PROXY_OPENER = urllib.request.build_opener(
+        urllib.request.ProxyHandler({"http": ROYALEAPI_PROXY, "https": ROYALEAPI_PROXY})
+    )
+else:
+    _PROXY_OPENER = urllib.request.build_opener()
 
 
 # Cross-process serialization for RoyaleAPI scraping. The per-process rate
@@ -194,7 +207,7 @@ def _http_get(url: str, cookie_header: str) -> tuple[int, str, list[str]]:
         "Cookie": cookie_header,
     })
     try:
-        resp = urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT)
+        resp = _PROXY_OPENER.open(req, timeout=REQUEST_TIMEOUT)
         body = resp.read().decode("utf-8", errors="replace")
         set_cookies = resp.headers.get_all("Set-Cookie") or []
         # Check for login redirect
@@ -379,15 +392,19 @@ def refresh_cf_clearance(state_path: str, warmup_tag: Optional[str] = None) -> b
         logger.warning("FlareSolverr cf_clearance refresh failed: %s", e)
         return False
 
+    # A high-trust exit (e.g. the dedicated VPN) often serves RoyaleAPI without
+    # any managed challenge, so FlareSolverr returns NO cf_clearance — that's
+    # fine, not a failure. We still want its browser UA + a fresh staleness
+    # marker so we don't re-mint every scrape. Only a missing UA is fatal.
     ua = sol.get("userAgent")
+    if not ua:
+        logger.warning("FlareSolverr returned no userAgent")
+        return False
     cf_value = cf_expires = None
     for c in sol.get("cookies", []):
         if c.get("name") == "cf_clearance":
             cf_value = c.get("value")
             cf_expires = c.get("expires")
-    if not cf_value or not ua:
-        logger.warning("FlareSolverr returned no cf_clearance/userAgent")
-        return False
 
     try:
         with open(state_path) as f:
@@ -396,24 +413,32 @@ def refresh_cf_clearance(state_path: str, warmup_tag: Optional[str] = None) -> b
         logger.warning("Cannot read session file to refresh cf_clearance: %s", e)
         return False
 
+    # Update cf_clearance only if one was issued. Never touch
+    # __royaleapi_session_v2 — that's the logged-in session, and FlareSolverr is
+    # anonymous; overwriting it with FS's anonymous session would break replay
+    # DATA access.
     cookies = data.setdefault("cookies", [])
-    for c in cookies:
-        if c.get("name") == "cf_clearance":
-            c["value"] = cf_value
-            if cf_expires:
-                c["expires"] = cf_expires
-            break
-    else:
-        cookies.append({
-            "name": "cf_clearance", "value": cf_value,
-            "domain": ".royaleapi.com", "path": "/",
-            "expires": cf_expires or -1,
-        })
+    if cf_value:
+        for c in cookies:
+            if c.get("name") == "cf_clearance":
+                c["value"] = cf_value
+                if cf_expires:
+                    c["expires"] = cf_expires
+                break
+        else:
+            cookies.append({
+                "name": "cf_clearance", "value": cf_value,
+                "domain": ".royaleapi.com", "path": "/",
+                "expires": cf_expires or -1,
+            })
     data["_cf_user_agent"] = ua
     data["_cf_refreshed_at"] = time.time()
 
     if _write_session_atomic(state_path, data):
-        logger.info("Refreshed cf_clearance via FlareSolverr (UA aligned)")
+        logger.info(
+            "Refreshed RoyaleAPI session via FlareSolverr (cf_clearance: %s, UA aligned)",
+            "updated" if cf_value else "none issued",
+        )
         return True
     return False
 

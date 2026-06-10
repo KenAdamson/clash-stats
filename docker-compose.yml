@@ -49,6 +49,11 @@ services:
       # a fresh token tolerates concurrency 8 cleanly. This cap just bounds the
       # blast radius if a refresh fails and we fall back to a stale token.
       - ROYALEAPI_REQUESTS_PER_SEC=10.0
+      # Route ALL RoyaleAPI traffic through the dedicated scraper VPN exit.
+      # Both the proxy and the cf_clearance minter share that one Mullvad IP,
+      # keeping our residential IP (banned 06-08) off RoyaleAPI entirely.
+      - ROYALEAPI_PROXY=http://cr-scraper-vpn:8888
+      - FLARESOLVERR_URL=http://cr-scraper-vpn:8191/v1
       - DATABASE_URL=postgresql://clash_stats:${DB_PASSWORD}@clash-postgres,192.168.7.62/clash_stats?target_session_attrs=read-write
       - DASHBOARD_DATABASE_URL=postgresql://clash_stats:${DB_PASSWORD}@192.168.7.62/clash_stats
     volumes:
@@ -88,6 +93,56 @@ services:
     shm_size: '1gb'
     volumes:
       - ./data:/app/data
+
+  # Dedicated VPN exit for RoyaleAPI scraping ONLY. Isolated from flare-it
+  # (which the *arr stack shares) so scraping can never burn that exit's IP.
+  # Mullvad WireGuard, Exact-Dodo device, pinned to ee-tll-wg-003 (xtom/Estonia,
+  # non-M247 = CF-trusted, distinct IP from flare-it's -002). After the 06-08
+  # residential-IP ban, all replay traffic egresses here instead.
+  cr-scraper-vpn:
+    image: qmcgaw/gluetun:latest
+    container_name: cr-scraper-vpn
+    cap_add: [NET_ADMIN]
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    networks:
+      - media-network
+    environment:
+      VPN_SERVICE_PROVIDER: mullvad
+      VPN_TYPE: wireguard
+      WIREGUARD_PRIVATE_KEY: ${SCRAPER_WG_PRIVATE_KEY}
+      WIREGUARD_ADDRESSES: ${SCRAPER_WG_ADDRESS}
+      SERVER_HOSTNAMES: ee-tll-wg-003
+      TZ: America/New_York
+      DNS_KEEP_NAMESERVER: "on"
+      # Allow inbound from the docker subnet (so cr-tracker reaches the proxy +
+      # control server) and the LAN (Pi-hole DNS).
+      FIREWALL_OUTBOUND_SUBNETS: "172.17.1.0/24,192.168.7.0/24"
+      # HTTP proxy for replay_http; control server for exit rotation later.
+      HTTPPROXY: "on"
+      HTTP_CONTROL_SERVER_ADDRESS: ":8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- https://am.i.mullvad.net/connected | grep -q 'connected to Mullvad' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  cr-scraper-fs:
+    # FlareSolverr inside the scraper VPN's netns — mints cf_clearance from the
+    # SAME exit IP that replay_http fetches through (the token is IP-bound).
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: cr-scraper-fs
+    network_mode: "service:cr-scraper-vpn"
+    depends_on:
+      cr-scraper-vpn:
+        condition: service_healthy
+    environment:
+      LOG_LEVEL: info
+      HEADLESS: "true"
+      TZ: America/New_York
+    restart: unless-stopped
 
   cr-samv2:
     build: docker/samv2

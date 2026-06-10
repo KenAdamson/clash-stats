@@ -6,9 +6,12 @@ PATH=/usr/local/bin:/usr/bin:/bin
 */2 * * * * root /app/personal_combined.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Publish stats JSON to GitHub every 5 minutes
 */5 * * * * root /app/publish_wrapper.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
-# Combined corpus scrape: battles + replays in one pass
-# Fires every 1 min; 50-player batches for fresher data, lockfile prevents overlap
-* * * * * root /app/corpus_combined.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
+# Corpus: battles only (official CR API). Replay scraping is intentionally OFF
+# here — corpus-scale replay volume (50 players/min) flags any single egress IP
+# within minutes (residential banned 06-08; VPN exit challenged in ~2 min). Re-
+# enable corpus_combined ONLY once the VPN exit-rotation service exists to spread
+# the load. Personal replays still flow via personal_combined (light volume).
+* * * * * root /app/corpus_scrape.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Weekly: refresh top-ladder player tags (Monday 6am UTC)
 0 6 * * 1 root /app/corpus_update.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Refresh simulation results daily at 2am UTC

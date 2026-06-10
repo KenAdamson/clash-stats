@@ -269,6 +269,37 @@ def test_refresh_cf_clearance_persists_token_ua_and_marker(tmp_path, monkeypatch
     assert rh._session_user_agent(str(p)) == "FreshUA/2.0"
 
 
+def test_refresh_cf_clearance_no_cf_issued_still_persists_ua(tmp_path, monkeypatch):
+    """A high-trust exit serves without a managed challenge, so FlareSolverr
+    returns a UA but NO cf_clearance. That's success, not failure: persist the
+    UA + freshness marker, don't add a cf_clearance, and never clobber login."""
+    p = tmp_path / "s.json"
+    p.write_text(json.dumps({"cookies": [
+        {"name": "__royaleapi_session_v2", "value": "LOGIN", "domain": ".royaleapi.com", "path": "/"},
+    ]}))
+
+    class _FakeResp:
+        def __init__(self, body): self._b = body
+        def read(self): return self._b
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    fake = json.dumps({"solution": {
+        "userAgent": "TrustedExitUA/3.0",
+        "cookies": [{"name": "__royaleapi_session_v2", "value": "ANON"},
+                    {"name": "NB_SRVID", "value": "x"}],   # no cf_clearance
+    }}).encode()
+    monkeypatch.setattr(rh.urllib.request, "urlopen", lambda *a, **k: _FakeResp(fake))
+
+    assert rh.refresh_cf_clearance(str(p)) is True
+    data = json.loads(p.read_text())
+    by = {c["name"]: c for c in data["cookies"]}
+    assert "cf_clearance" not in by                       # none issued, none added
+    assert by["__royaleapi_session_v2"]["value"] == "LOGIN"  # login NOT overwritten with ANON
+    assert data["_cf_user_agent"] == "TrustedExitUA/3.0"
+    assert rh._cf_clearance_is_stale(str(p)) is False      # marker set -> no re-mint storm
+
+
 def test_refresh_cf_clearance_handles_flaresolverr_failure(tmp_path, monkeypatch):
     p = tmp_path / "s.json"
     p.write_text(json.dumps({"cookies": [

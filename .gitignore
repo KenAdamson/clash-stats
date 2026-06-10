@@ -11,3 +11,8 @@ src/cycle_sim/
 replays/
 *.db
 .claude/
+
+# Mullvad WireGuard configs — contain private keys, never commit
+mullvad_wireguard_linux_all_all.zip
+*.conf
+mullvad-wg/
