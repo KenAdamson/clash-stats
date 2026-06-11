@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from sqlalchemy import case, cast, extract, func, Integer, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from tracker.archetypes import classify_archetype
@@ -245,7 +246,19 @@ def store_battle(
     if corpus != "personal" and bt_parsed is not None:
         increment_corpus_hourly_stats(session, bt_parsed.hour)
 
-    session.commit()
+    try:
+        session.commit()
+    except IntegrityError:
+        # Lost a check-then-insert race: another scrape process (corpus_scrape
+        # runs every minute, the corpus_replays combined pass every 5 — both
+        # store battles) committed this battle_id between our existence check
+        # and this commit. Its row is identical, so treat as a dedup. Rollback
+        # keeps the session usable for the rest of the scrape pass instead of
+        # poisoning it with PendingRollbackError.
+        session.rollback()
+        BATTLES_DEDUPED.labels(corpus=corpus).inc()
+        return bid, False
+
     BATTLES_SCRAPED.labels(corpus=corpus).inc()
     return bid, True
 

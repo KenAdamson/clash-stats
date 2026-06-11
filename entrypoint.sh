@@ -59,6 +59,7 @@ SCRAPER_ENV_EXPORTS=""
 cat > /app/fetch.sh << EOF
 #!/bin/sh
 exec flock -n ${LOCKDIR}/fetch.lock sh -c '
+cd /app
 export CR_API_KEY="${CR_API_KEY}"
 export CR_PLAYER_TAG="${CR_PLAYER_TAG}"
 [ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
@@ -73,6 +74,7 @@ chmod +x /app/fetch.sh
 cat > /app/publish_wrapper.sh << EOF
 #!/bin/sh
 exec flock -n ${LOCKDIR}/publish.lock sh -c '
+cd /app
 export STATS_REPO_URL="${STATS_REPO_URL}"
 export STATS_BRANCH="${STATS_BRANCH:-stats}"
 export STATS_REMOTE="${STATS_REMOTE:-origin}"
@@ -85,6 +87,7 @@ chmod +x /app/publish_wrapper.sh
 cat > /app/personal_combined.sh << EOF
 #!/bin/sh
 exec flock -n ${LOCKDIR}/personal_combined.lock sh -c '
+cd /app
 export CR_API_KEY="${CR_API_KEY}"
 export CR_PLAYER_TAG="${CR_PLAYER_TAG}"
 [ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
@@ -100,6 +103,7 @@ chmod +x /app/personal_combined.sh
 cat > /app/corpus_update.sh << EOF
 #!/bin/sh
 exec flock -n ${LOCKDIR}/corpus_update.lock sh -c '
+cd /app
 export CR_API_KEY="${CR_API_KEY}"
 [ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
 [ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
@@ -112,6 +116,7 @@ chmod +x /app/corpus_update.sh
 cat > /app/corpus_scrape.sh << EOF
 #!/bin/sh
 exec flock -n ${LOCKDIR}/corpus_scrape.lock sh -c '
+cd /app
 export CR_API_KEY="${CR_API_KEY}"
 [ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
 [ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
@@ -124,6 +129,7 @@ chmod +x /app/corpus_scrape.sh
 cat > /app/sim_refresh.sh << EOF
 #!/bin/sh
 exec flock -n ${LOCKDIR}/sim_refresh.lock sh -c '
+cd /app
 export CR_PLAYER_TAG="${CR_PLAYER_TAG}"
 [ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
@@ -132,23 +138,15 @@ clash-stats --sim-full --player-tag "${CR_PLAYER_TAG}" ${DB_FLAG}
 EOF
 chmod +x /app/sim_refresh.sh
 
-cat > /app/corpus_replays.sh << EOF
-#!/bin/sh
-exec flock -n ${LOCKDIR}/corpus_replays.lock sh -c '
-export BROWSER_WS_URL="${BROWSER_WS_URL:-http://cr-browser:9223}"
-export ROYALEAPI_SESSION_PATH="${ROYALEAPI_SESSION_PATH:-/app/data/royaleapi_session.json}"
-export REPLAYS_PER_PLAYER="${REPLAYS_PER_PLAYER:-25}"
-[ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
-export PYTHONUNBUFFERED=1
-clash-stats --corpus-replays --corpus-limit 500 --concurrency 12 --max-pages 2 ${DB_FLAG}
-' || echo "corpus_replays: previous run still active, skipping"
-EOF
-chmod +x /app/corpus_replays.sh
+# (The corpus_replays.sh wrapper is defined further below — the legacy
+# Playwright-based version that lived here was dead code, overwritten by the
+# HTTP-path version at write time.)
 
 # Network discovery: mine opponent tags and add to corpus
 cat > /app/corpus_discover.sh << EOF
 #!/bin/sh
 exec flock -n ${LOCKDIR}/corpus_discover.lock sh -c '
+cd /app
 export CR_API_KEY="${CR_API_KEY}"
 [ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
 [ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
@@ -162,6 +160,7 @@ chmod +x /app/corpus_discover.sh
 cat > /app/corpus_locations.sh << EOF
 #!/bin/sh
 exec flock -n ${LOCKDIR}/corpus_locations.lock sh -c '
+cd /app
 export CR_API_KEY="${CR_API_KEY}"
 [ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
 [ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
@@ -175,6 +174,7 @@ chmod +x /app/corpus_locations.sh
 cat > /app/corpus_nemeses.sh << EOF
 #!/bin/sh
 exec flock -n ${LOCKDIR}/corpus_nemeses.lock sh -c '
+cd /app
 export CR_PLAYER_TAG="${CR_PLAYER_TAG}"
 [ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
@@ -187,6 +187,7 @@ chmod +x /app/corpus_nemeses.sh
 cat > /app/corpus_combined.sh << EOF
 #!/bin/sh
 exec flock -n ${LOCKDIR}/corpus_combined.lock sh -c '
+cd /app
 export CR_API_KEY="${CR_API_KEY}"
 export CR_PLAYER_TAG="${CR_PLAYER_TAG}"
 [ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
@@ -222,6 +223,7 @@ chmod +x /app/corpus_combined.sh
 cat > /app/corpus_replays.sh << EOF
 #!/bin/sh
 exec flock -n ${LOCKDIR}/corpus_replays.lock sh -c '
+cd /app
 export CR_API_KEY="${CR_API_KEY}"
 [ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
 export ROYALEAPI_SESSION_PATH="${ROYALEAPI_SESSION_PATH:-/app/data/royaleapi_session.json}"
@@ -255,6 +257,7 @@ chmod +x /app/wp_infer_new.sh
 cat > /app/rotate_exit.sh << EOF
 #!/bin/sh
 exec flock -n ${LOCKDIR}/corpus_combined.lock flock -n ${LOCKDIR}/personal_combined.lock sh -c '
+cd /app
 ${SCRAPER_ENV_EXPORTS}
 export PYTHONUNBUFFERED=1
 clash-stats --rotate-exit ${DB_FLAG}
@@ -266,6 +269,7 @@ chmod +x /app/rotate_exit.sh
 cat > /app/embed_new.sh << EOF
 #!/bin/sh
 exec flock -n ${LOCKDIR}/embed_new.lock sh -c '
+cd /app
 [ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
 clash-stats --embed-new ${DB_FLAG}
@@ -277,6 +281,7 @@ chmod +x /app/embed_new.sh
 cat > /app/tcn_train.sh << EOF
 #!/bin/sh
 exec flock -n ${LOCKDIR}/tcn_train.lock sh -c '
+cd /app
 [ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
 clash-stats --train-tcn ${DB_FLAG}
@@ -288,6 +293,7 @@ chmod +x /app/tcn_train.sh
 cat > /app/train_activity.sh << EOF
 #!/bin/sh
 exec flock -n ${LOCKDIR}/train_activity.lock sh -c '
+cd /app
 [ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
 clash-stats --train-activity-model ${DB_FLAG}
