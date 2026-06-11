@@ -64,6 +64,10 @@ DATALOADER_NUM_WORKERS = int(os.environ.get("TCN_DATALOADER_WORKERS", "4"))
 # measured 06-11, with the XPU far better utilized. Env-overridable for other
 # hardware. (Larger batch slightly slows per-epoch convergence but each epoch is
 # ~6× cheaper; val accuracy tracks the same within a couple epochs.)
+# DO NOT raise past 512 on the A770: batch 1024 and 2048 both crash on the
+# first backward with level_zero UR_RESULT_ERROR_OUT_OF_HOST_MEMORY (06-11).
+# The 16GB VRAM is not the constraint — the Level Zero runtime's host/single-
+# allocation ceiling on the padded activation-gradient tensors is.
 DATALOADER_BATCH_SIZE = int(os.environ.get("TCN_BATCH_SIZE", "512"))
 
 
