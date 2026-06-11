@@ -7,12 +7,38 @@ from the deck_cards table, which is populated by the scraper.
 import logging
 from typing import Optional
 
-from sqlalchemy import select, distinct
+from sqlalchemy import select, distinct, text
 from sqlalchemy.orm import Session
 
 from tracker.models import DeckCard
 
 logger = logging.getLogger(__name__)
+
+# Loose index-scan (skip-scan) over deck_cards. The table is ~85M rows but holds
+# only ~121 distinct cards; a plain DISTINCT/Index-Scan→Unique walks all 85M
+# index entries with a per-row heap fetch for the elixir (~49 min observed). The
+# recursive CTE hops directly from one distinct card_name to the next (~121
+# index probes), pulling one elixir per card — seconds instead of minutes.
+# PostgreSQL-only (SQLite's recursive CTE can't reference the recursive table in
+# a correlated subquery); the test suite uses tiny SQLite data where the plain
+# DISTINCT below is instant.
+_LOOSE_SCAN_SQL = text("""
+    WITH RECURSIVE names AS (
+        (SELECT card_name FROM deck_cards ORDER BY card_name LIMIT 1)
+        UNION ALL
+        SELECT (SELECT dc.card_name FROM deck_cards dc
+                WHERE dc.card_name > names.card_name
+                ORDER BY dc.card_name LIMIT 1)
+        FROM names WHERE names.card_name IS NOT NULL
+    )
+    SELECT n.card_name,
+           (SELECT dc.card_elixir FROM deck_cards dc
+            WHERE dc.card_name = n.card_name AND dc.card_elixir IS NOT NULL
+            LIMIT 1) AS card_elixir
+    FROM names n
+    WHERE n.card_name IS NOT NULL
+    ORDER BY n.card_name
+""")
 
 # Card type classification for one-hot encoding in TCN sequence features.
 # Keys are Title Case (matching deck_cards.card_name / CardVocabulary).
@@ -72,12 +98,17 @@ class CardVocabulary:
     """
 
     def __init__(self, session: Session):
-        # Query all distinct card names, sorted for deterministic ordering
-        rows = session.execute(
-            select(DeckCard.card_name, DeckCard.card_elixir)
-            .distinct(DeckCard.card_name)
-            .order_by(DeckCard.card_name)
-        ).all()
+        # Query distinct (card_name, elixir), sorted for deterministic ordering.
+        # On PostgreSQL use the loose index-scan to avoid a full 85M-row walk;
+        # elsewhere (SQLite tests) fall back to a plain DISTINCT on tiny data.
+        if session.bind is not None and session.bind.dialect.name == "postgresql":
+            rows = session.execute(_LOOSE_SCAN_SQL).all()
+        else:
+            rows = session.execute(
+                select(DeckCard.card_name, DeckCard.card_elixir)
+                .distinct(DeckCard.card_name)
+                .order_by(DeckCard.card_name)
+            ).all()
 
         # Build name→index mapping with special tokens at 0, 1
         self._card_to_idx: dict[str, int] = {PAD_TOKEN: 0, UNK_TOKEN: 1}

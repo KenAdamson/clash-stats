@@ -155,6 +155,11 @@ class SequenceDataset(Dataset):
 
         self._samples: list[tuple[np.ndarray, np.ndarray, float]] = []
         # samples: list of (card_ids, features, label)
+        # battle_ids_in_order[i] is the battle_id for _samples[i] — games that
+        # fail the MIN_EVENTS check at load time are skipped here too, so this
+        # stays aligned with _samples. Incremental inference reads it to map
+        # output embeddings back to battles without a second query.
+        self.battle_ids_in_order: list[str] = []
 
         # Batch-load all replay events grouped by battle_id
         battle_ids = [r[0] for r in battle_rows]
@@ -227,6 +232,7 @@ class SequenceDataset(Dataset):
 
             label = result_map[battle_id]
             self._samples.append((card_ids, features, label))
+            self.battle_ids_in_order.append(battle_id)
 
         logger.info(
             "SequenceDataset: %d games loaded, %d skipped, avg %.1f events/game",

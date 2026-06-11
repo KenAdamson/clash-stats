@@ -6,6 +6,7 @@ storage of 128-dim TCN embeddings.
 """
 
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Optional
@@ -36,6 +37,19 @@ EARLY_STOPPING_PATIENCE = 10
 DROPOUT = 0.2
 EMBEDDING_DIM = 128
 VAL_FRACTION = 0.2
+
+# Cap on games embedded per incremental run. Bounds the scoped dataset's IN
+# clause and per-run wall time; a large backlog (e.g. after the pipeline was
+# down) drains over consecutive cron runs, oldest-first, instead of choking a
+# single run. Steady-state new-game counts are far below this, so the cap is
+# inert in normal operation. Override via EMBED_MAX_PER_RUN.
+MAX_EMBED_PER_RUN = int(os.environ.get("EMBED_MAX_PER_RUN", "5000"))
+
+# Above this NaN fraction, treat the saved UMAP reducer as broken (version
+# incompatibility) and abort the run storing nothing, rather than dribbling in
+# the unrepresentative minority that happened to project. Below it, a few NaN
+# rows are treated as genuinely degenerate inputs and skipped individually.
+BROKEN_REDUCER_NAN_FRACTION = 0.25
 
 
 def _detect_device() -> torch.device:
@@ -380,7 +394,10 @@ def embed_new(session: Session, model_dir: Optional[Path] = None) -> int:
         print("  ✗ No fitted UMAP reducer found. Run --train-tcn first.")
         return 0
 
-    # 1. Find battles with replay data but no embedding (JOIN avoids correlated subquery)
+    # 1. Find battles with replay data but no embedding (JOIN avoids correlated
+    #    subquery), oldest-first, capped at MAX_EMBED_PER_RUN. The cap bounds the
+    #    scoped dataset below and lets a large backlog drain over several runs in
+    #    chronological order rather than choking a single run.
     new_rows = session.execute(
         sa_text("""
             SELECT b.battle_id
@@ -396,63 +413,81 @@ def embed_new(session: Session, model_dir: Optional[Path] = None) -> int:
                   WHERE ge.model_version = :model_version
               )
             ORDER BY b.battle_time
+            LIMIT :max_per_run
         """),
-        {"min_events": MIN_EVENTS, "model_version": TCN_MODEL_VERSION},
+        {
+            "min_events": MIN_EVENTS,
+            "model_version": TCN_MODEL_VERSION,
+            "max_per_run": MAX_EMBED_PER_RUN,
+        },
     ).scalars().all()
 
     if not new_rows:
         print("  · All games already embedded — nothing to do")
         return 0
 
-    logger.info("Found %d new games to embed", len(new_rows))
-    print(f"  → {len(new_rows)} new games to embed")
+    capped = len(new_rows) == MAX_EMBED_PER_RUN
+    logger.info(
+        "Embedding %d new games this run%s",
+        len(new_rows),
+        f" (capped at {MAX_EMBED_PER_RUN}; more remain, will drain next run)" if capped else "",
+    )
+    print(f"  → {len(new_rows)} new games to embed"
+          + (f" (per-run cap {MAX_EMBED_PER_RUN}; backlog drains over consecutive runs)" if capped else ""))
 
-    # 2. Build vocabulary and dataset for new games only
+    # 1a. Reducer pre-flight. The expensive steps below (scoped dataset build +
+    #     TCN inference) are wasted if the saved reducer is broken and NaNs on
+    #     output. Probe it against a random sample of already-stored 128d
+    #     embeddings first; a high NaN rate means the reducer is version-
+    #     incompatible — abort before doing the work. Loaded reducer is reused
+    #     in step 6. Skipped when nothing is stored yet (nothing to probe with).
+    import json as _json
+    umap_reducer = None
+    probe = session.execute(sa_text(
+        "SELECT embedding_tcn_128d FROM game_embeddings "
+        "WHERE embedding_tcn_128d IS NOT NULL ORDER BY random() LIMIT 64"
+    )).scalars().all()
+    if probe:
+        with open(umap_path, "rb") as f:
+            umap_reducer = pickle.load(f)
+        P = np.array([_json.loads(r) if isinstance(r, str) else list(r) for r in probe],
+                     dtype=np.float32)
+        probe_nan = float(np.isnan(umap_reducer.transform(P)).any(axis=1).mean())
+        if probe_nan > BROKEN_REDUCER_NAN_FRACTION:
+            logger.error(
+                "UMAP reducer pre-flight: NaN on %.0f%% of %d probe embeddings — "
+                "umap_3d_standalone.pkl is incompatible with the current "
+                "umap/numba/numpy versions. Aborting before TCN inference. "
+                "Refit the 128d→3d reducer to resume.",
+                100 * probe_nan, len(P),
+            )
+            print(f"  ✗ UMAP reducer broken (pre-flight NaN {100*probe_nan:.0f}%) — "
+                  "aborting before inference. Refit umap_3d_standalone.pkl.")
+            return 0
+
+    # 2. Vocabulary + checkpoint
     device = _detect_device()
     vocab = CardVocabulary(session)
-
-    # Load the checkpoint to get vocab_size
     checkpoint = torch.load(tcn_path, map_location=device, weights_only=True)
     saved_vocab_size = checkpoint["vocab_size"]
-
-    # If vocabulary has grown, we need to handle it
     if vocab.size > saved_vocab_size:
         logger.warning(
             "Vocabulary grew (%d → %d). New cards will use index 0 (unknown).",
             saved_vocab_size, vocab.size,
         )
 
-    # 3. Build dataset (will load ALL eligible games, but we only need new ones)
-    # More efficient: build a mini-dataset from just the new battle_ids
-    dataset = SequenceDataset(session, vocab)
+    # 3. Build a SCOPED dataset over only the new games — not the full corpus.
+    #    The dataset exposes battle_ids_in_order (aligned with its samples and
+    #    skipping any that fail the MIN_EVENTS load check), so embeddings map
+    #    straight back to battles without a second full-table query.
+    dataset = SequenceDataset(session, vocab, battle_ids=new_rows)
+    new_battle_ids = dataset.battle_ids_in_order
 
-    # Map dataset indices to battle_ids using JOIN (avoids slow correlated subquery)
-    dataset_battle_ids = session.execute(
-        sa_text("""
-            SELECT b.battle_id
-            FROM battles b
-            JOIN (
-                SELECT battle_id FROM replay_events
-                WHERE card_name != '_invalid'
-                GROUP BY battle_id HAVING COUNT(*) >= :min_events
-            ) re_counts ON re_counts.battle_id = b.battle_id
-            WHERE b.battle_type = 'PvP' AND b.result IN ('win', 'loss')
-            ORDER BY b.battle_time
-        """),
-        {"min_events": MIN_EVENTS},
-    ).scalars().all()
-    dataset_battle_ids = list(dataset_battle_ids)[:len(dataset)]
-
-    # Find indices of new games within the dataset
-    new_set = set(new_rows)
-    new_indices = [i for i, bid in enumerate(dataset_battle_ids) if bid in new_set]
-    new_battle_ids = [dataset_battle_ids[i] for i in new_indices]
-
-    if not new_indices:
+    if len(dataset) == 0:
         print("  · New games didn't survive dataset filtering — no events?")
         return 0
 
-    logger.info("Embedding %d new games (of %d in dataset)", len(new_indices), len(dataset))
+    logger.info("Embedding %d new games (scoped dataset)", len(dataset))
 
     # 4. Load trained model
     model = GameEmbeddingModel(
@@ -464,10 +499,11 @@ def embed_new(session: Session, model_dir: Optional[Path] = None) -> int:
     model.to(device)
     model.eval()
 
-    # 5. Run inference on new games only
-    from torch.utils.data import DataLoader, Subset
+    # 5. Run inference. The dataset already contains only the new games, so we
+    #    iterate it directly (no Subset). DataLoader preserves order
+    #    (shuffle=False), keeping embeddings aligned with battle_ids_in_order.
     new_loader = DataLoader(
-        Subset(dataset, new_indices),
+        dataset,
         batch_size=BATCH_SIZE,
         shuffle=False,
         collate_fn=collate_fn,
@@ -486,12 +522,48 @@ def embed_new(session: Session, model_dir: Optional[Path] = None) -> int:
     embeddings_128d = np.concatenate(all_embeddings, axis=0)
     logger.info("Extracted %d embeddings of dim %d", *embeddings_128d.shape)
 
-    # 6. UMAP transform (not fit!) using saved reducer
-    with open(umap_path, "rb") as f:
-        umap_reducer = pickle.load(f)
+    # 6. UMAP transform (not fit!) using saved reducer. Reuse the reducer loaded
+    #    in the pre-flight; load now only if there was nothing to probe with.
+    if umap_reducer is None:
+        with open(umap_path, "rb") as f:
+            umap_reducer = pickle.load(f)
 
     embeddings_3d = umap_reducer.transform(embeddings_128d)
     logger.info("Projected to 3D via saved UMAP reducer")
+
+    # 6a. Guard against a version-incompatible reducer. A UMAP/numba/numpy
+    #     version bump can leave umap_3d_standalone.pkl loadable but broken —
+    #     transform() then returns NaN for valid input (observed 06-10 after the
+    #     1.8→1.9 stack bump: 97% NaN on a random 1000-game sample, deterministic).
+    #     Storing NaN fails the pgvector insert ("NaN not allowed in vector").
+    #     A HIGH NaN rate means the reducer itself is broken: abort and store
+    #     nothing (the lucky few that survive are a biased subset — dribbling
+    #     them in would pollute the manifold). Only a LOW rate is treated as
+    #     genuine degenerate inputs and skipped row-wise. Either way the skipped
+    #     games stay un-embedded and get picked up once the reducer is refit.
+    nan_rows = np.isnan(embeddings_3d).any(axis=1)
+    nan_frac = float(nan_rows.mean()) if len(nan_rows) else 0.0
+    if nan_frac > BROKEN_REDUCER_NAN_FRACTION:
+        logger.error(
+            "UMAP reducer produced NaN for %.0f%% of %d games — "
+            "umap_3d_standalone.pkl is incompatible with the current "
+            "umap/numba/numpy versions. Aborting (no rows stored). Refit the "
+            "128d→3d reducer before incremental embedding can resume.",
+            100 * nan_frac, len(embeddings_3d),
+        )
+        print(f"  ✗ UMAP reducer producing NaN for {100*nan_frac:.0f}% of games "
+              "(version-incompatible) — aborting, no rows stored. "
+              "Refit umap_3d_standalone.pkl.")
+        return 0
+    if nan_rows.any():
+        keep = ~nan_rows
+        logger.warning(
+            "Skipping %d/%d games with a NaN 3D projection (degenerate input)",
+            int(nan_rows.sum()), len(embeddings_3d),
+        )
+        embeddings_128d = embeddings_128d[keep]
+        embeddings_3d = embeddings_3d[keep]
+        new_battle_ids = [b for b, k in zip(new_battle_ids, keep) if k]
 
     # 7. Store (no cluster assignment — would need full re-clustering)
     for i, battle_id in enumerate(new_battle_ids):
