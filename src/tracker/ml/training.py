@@ -57,7 +57,14 @@ BROKEN_REDUCER_NAN_FRACTION = 0.25
 # give the speedup. Both env-overridable. num_workers respects the container's
 # low CPU priority (cpu_shares 256, nice +15) so training still yields to Plex.
 DATALOADER_NUM_WORKERS = int(os.environ.get("TCN_DATALOADER_WORKERS", "4"))
-DATALOADER_BATCH_SIZE = int(os.environ.get("TCN_BATCH_SIZE", str(BATCH_SIZE)))
+# Default 512, not BATCH_SIZE (64). On the Arc A770 the bottleneck is per-launch
+# XPU dispatch latency, not compute or data loading: batch 64 → ~4,485 tiny
+# launches/epoch and ~80 min/epoch with the XPU computing in brief bursts
+# (~10% CCS). Batch 512 amortizes the dispatch overhead → ~14 min/epoch (~6×)
+# measured 06-11, with the XPU far better utilized. Env-overridable for other
+# hardware. (Larger batch slightly slows per-epoch convergence but each epoch is
+# ~6× cheaper; val accuracy tracks the same within a couple epochs.)
+DATALOADER_BATCH_SIZE = int(os.environ.get("TCN_BATCH_SIZE", "512"))
 
 
 def _detect_device() -> torch.device:
