@@ -51,6 +51,14 @@ MAX_EMBED_PER_RUN = int(os.environ.get("EMBED_MAX_PER_RUN", "5000"))
 # rows are treated as genuinely degenerate inputs and skipped individually.
 BROKEN_REDUCER_NAN_FRACTION = 0.25
 
+# DataLoader parallelism for TCN training. num_workers>0 overlaps host-side
+# collate with XPU compute (the A770 was ~98% idle starved by num_workers=0).
+# Batch size stays at BATCH_SIZE to preserve training dynamics; workers alone
+# give the speedup. Both env-overridable. num_workers respects the container's
+# low CPU priority (cpu_shares 256, nice +15) so training still yields to Plex.
+DATALOADER_NUM_WORKERS = int(os.environ.get("TCN_DATALOADER_WORKERS", "4"))
+DATALOADER_BATCH_SIZE = int(os.environ.get("TCN_BATCH_SIZE", str(BATCH_SIZE)))
+
 
 def _detect_device() -> torch.device:
     """Detect the best available device: XPU → CUDA → CPU."""
@@ -96,26 +104,28 @@ class TCNTrainer:
         train_indices = list(range(n_train))
         val_indices = list(range(n_train, n))
 
-        self.train_loader = DataLoader(
-            Subset(dataset, train_indices),
-            batch_size=BATCH_SIZE,
-            shuffle=True,
+        # The dataset is fully in-memory (numpy in _samples, no DB I/O in
+        # __getitem__), so DataLoader workers parallelize the CPU-side collate/
+        # padding and keep the XPU fed. With num_workers=0 the A770 sat ~98%
+        # idle (CCS ~1.5%) while a single host thread loaded batches → ~94
+        # min/epoch on 358K games. Workers don't change the data or batch order
+        # (the sampler lives in the main process), so training math is identical.
+        # persistent_workers avoids re-forking the worker pool every epoch.
+        loader_kwargs = dict(
+            batch_size=DATALOADER_BATCH_SIZE,
             collate_fn=collate_fn,
-            num_workers=0,
+            num_workers=DATALOADER_NUM_WORKERS,
+            persistent_workers=DATALOADER_NUM_WORKERS > 0,
+            prefetch_factor=4 if DATALOADER_NUM_WORKERS > 0 else None,
+        )
+        self.train_loader = DataLoader(
+            Subset(dataset, train_indices), shuffle=True, **loader_kwargs,
         )
         self.val_loader = DataLoader(
-            Subset(dataset, val_indices),
-            batch_size=BATCH_SIZE,
-            shuffle=False,
-            collate_fn=collate_fn,
-            num_workers=0,
+            Subset(dataset, val_indices), shuffle=False, **loader_kwargs,
         )
         self.full_loader = DataLoader(
-            dataset,
-            batch_size=BATCH_SIZE,
-            shuffle=False,
-            collate_fn=collate_fn,
-            num_workers=0,
+            dataset, shuffle=False, **loader_kwargs,
         )
 
         self.criterion = nn.BCEWithLogitsLoss()
