@@ -1,5 +1,6 @@
 """Formatted terminal output for all analytics views."""
 
+import os
 import shutil
 
 from sqlalchemy.orm import Session
@@ -9,8 +10,11 @@ from tracker import analytics
 
 def print_overall_stats(session: Session) -> None:
     """Print comprehensive stats report."""
-    # All-time from API
-    api_stats = analytics.get_all_time_api_stats(session)
+    # All-time from API (filtered to the main account — alt fetches add
+    # other tags' snapshots to the same table)
+    api_stats = analytics.get_all_time_api_stats(
+        session, player_tag=os.environ.get("CR_PLAYER_TAG"),
+    )
     if api_stats:
         print()
         print("=" * 70)

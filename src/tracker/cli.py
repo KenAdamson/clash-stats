@@ -20,7 +20,8 @@ _DATABASE_URL = os.environ.get("DATABASE_URL")
 
 
 def fetch_and_store(
-    api_key: str, player_tag: str, session, api_url: str = DEFAULT_API_URL
+    api_key: str, player_tag: str, session, api_url: str = DEFAULT_API_URL,
+    corpus: str = "personal",
 ) -> int:
     """Fetch latest battles and store new ones.
 
@@ -29,6 +30,9 @@ def fetch_and_store(
         player_tag: Player tag (without '#').
         session: SQLAlchemy session.
         api_url: API base URL.
+        corpus: Provenance label for stored battles. The dashboard and personal
+            analytics filter on 'personal', so secondary accounts (alts) must
+            use a distinct label to keep main-account stats clean.
 
     Returns:
         Number of new battles stored, or -1 on error.
@@ -43,7 +47,7 @@ def fetch_and_store(
         print(f"  ✓ Profile: {player.get('name')} | {player.get('trophies'):,} trophies")
         print(f"  ✓ All-time: {player.get('wins'):,}W / {player.get('losses'):,}L / {player.get('threeCrownWins'):,} 3-crowns")
 
-        diff = analytics.get_snapshot_diff(session)
+        diff = analytics.get_snapshot_diff(session, player_tag=player.get("tag"))
         if diff:
             parts = []
             if diff["trophies"]:
@@ -63,15 +67,18 @@ def fetch_and_store(
         battles = api.get_battle_log(player_tag)
         new_count = 0
         for battle in battles:
-            battle_id, is_new = analytics.store_battle(session, battle, player.get("tag"))
+            battle_id, is_new = analytics.store_battle(
+                session, battle, player.get("tag"), corpus=corpus,
+            )
             if is_new:
                 new_count += 1
 
         print(f"  ✓ Fetched {len(battles)} battles, {new_count} NEW")
         print(f"  ✓ Total tracked: {analytics.get_total_battles(session):,} battles")
 
-        # Tilt detection after every fetch
-        if new_count > 0:
+        # Tilt detection after every fetch (personal only — it reads
+        # corpus='personal' battles, so alt fetches have nothing to add)
+        if new_count > 0 and corpus == "personal":
             from tracker.ml.tilt_detector import detect_tilt, print_tilt_warning
             tilt_status = detect_tilt(session)
             print_tilt_warning(tilt_status)
@@ -133,6 +140,11 @@ Environment variables:
                         help="Fetch replay data from RoyaleAPI for recent battles")
     parser.add_argument("--personal-combined", action="store_true",
                         help="Fetch battles + replays for personal tag in one pass")
+    parser.add_argument("--corpus-label", default="personal", metavar="LABEL",
+                        help="Provenance label for battles stored by --fetch/"
+                             "--personal-combined (default: personal). Use a "
+                             "distinct label (e.g. 'alt') for secondary accounts "
+                             "so main-account analytics stay clean")
     parser.add_argument("--corpus-update", action="store_true",
                         help="Refresh top-ladder player tags for training corpus")
     parser.add_argument("--corpus-scrape", action="store_true",
@@ -268,7 +280,10 @@ Environment variables:
                 print("Error: --api-key and --player-tag required for fetching")
                 print("       Or set CR_API_KEY and CR_PLAYER_TAG environment variables")
                 return 1
-            fetch_and_store(api_key, player_tag.replace("#", ""), session, api_url=api_url)
+            fetch_and_store(
+                api_key, player_tag.replace("#", ""), session, api_url=api_url,
+                corpus=args.corpus_label,
+            )
             from tracker.metrics import SCRAPE_RUNS, flush_metrics
             SCRAPE_RUNS.labels(scrape_type="battles", outcome="success").inc()
             flush_metrics("fetch")
@@ -360,7 +375,10 @@ Environment variables:
                 print("       Or set CR_API_KEY and CR_PLAYER_TAG environment variables")
                 return 1
             tag_clean = player_tag.replace("#", "")
-            new_battles = fetch_and_store(api_key, tag_clean, session, api_url=api_url)
+            new_battles = fetch_and_store(
+                api_key, tag_clean, session, api_url=api_url,
+                corpus=args.corpus_label,
+            )
             from tracker.metrics import SCRAPE_RUNS, flush_metrics
             if new_battles >= 0:
                 SCRAPE_RUNS.labels(scrape_type="battles", outcome="success").inc()

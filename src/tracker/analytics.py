@@ -99,6 +99,15 @@ def battle_exists(session: Session, battle_id: str) -> bool:
     return session.execute(stmt).first() is not None
 
 
+def _normalize_tag(tag: str) -> str:
+    """Normalize a player tag to the '#'-prefixed form the API returns.
+
+    Snapshots store tags exactly as the API provides them ('#ABC123'), while
+    CLI/env values often omit the '#'.
+    """
+    return tag if tag.startswith("#") else f"#{tag}"
+
+
 def store_player_snapshot(session: Session, player: dict) -> None:
     """Store a player profile snapshot.
 
@@ -292,9 +301,18 @@ def get_overall_stats(session: Session, ladder_only: bool = False, min_trophies:
     return row._asdict()
 
 
-def get_all_time_api_stats(session: Session) -> dict:
-    """Get latest snapshot from API (all-time stats)."""
+def get_all_time_api_stats(session: Session, player_tag: Optional[str] = None) -> dict:
+    """Get latest snapshot from API (all-time stats).
+
+    Args:
+        session: SQLAlchemy session.
+        player_tag: Filter to this tag (with or without '#'). Without it, the
+            most recent snapshot of ANY tracked account is returned — wrong
+            whenever more than one account (e.g. main + alt) is fetched.
+    """
     stmt = select(PlayerSnapshot).order_by(PlayerSnapshot.id.desc()).limit(1)
+    if player_tag:
+        stmt = stmt.where(PlayerSnapshot.player_tag == _normalize_tag(player_tag))
     snapshot = session.scalars(stmt).first()
     if not snapshot:
         return {}
@@ -901,13 +919,21 @@ def get_nemesis_detail(session: Session, opponent_tag: str) -> dict:
     }
 
 
-def get_snapshot_diff(session: Session) -> Optional[dict]:
+def get_snapshot_diff(session: Session, player_tag: Optional[str] = None) -> Optional[dict]:
     """Compare the two most recent player snapshots.
+
+    Args:
+        session: SQLAlchemy session.
+        player_tag: Filter to this tag (with or without '#'). Required for a
+            meaningful diff when more than one account is fetched — without it
+            an interleaved main/alt snapshot pair diffs across accounts.
 
     Returns:
         Dict with field-level diffs, or None if fewer than 2 snapshots.
     """
     stmt = select(PlayerSnapshot).order_by(PlayerSnapshot.id.desc()).limit(2)
+    if player_tag:
+        stmt = stmt.where(PlayerSnapshot.player_tag == _normalize_tag(player_tag))
     rows = session.scalars(stmt).all()
     if len(rows) < 2:
         return None

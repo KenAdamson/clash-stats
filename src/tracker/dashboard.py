@@ -210,8 +210,11 @@ def create_app(db_path: str | None = None) -> Flask:
         try:
             lo = _ladder_only()
             stats = analytics.get_overall_stats(session, ladder_only=lo, min_trophies=tf)
-            api_stats = analytics.get_all_time_api_stats(session)
-            diff = analytics.get_snapshot_diff(session)
+            # Filter snapshots to the main account — alt fetches interleave
+            # other tags' snapshots in the same table.
+            _main_tag = os.environ.get("CR_PLAYER_TAG")
+            api_stats = analytics.get_all_time_api_stats(session, player_tag=_main_tag)
+            diff = analytics.get_snapshot_diff(session, player_tag=_main_tag)
             result = {
                 "tracked": stats,
                 "api_stats": api_stats,

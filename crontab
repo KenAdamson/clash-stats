@@ -4,6 +4,9 @@ PATH=/usr/local/bin:/usr/bin:/bin
 # Every 2 min — aggressive to ensure no replay data is lost
 # Lockfile prevents overlap; personal data is highest priority
 */2 * * * * root /app/personal_combined.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
+# Alt account (CR_ALT_TAG): battles + replays, corpus label 'alt'.
+# Every 5 min offset from corpus_replays' 2-59/5; no-op when unset.
+1-59/5 * * * * root /app/alt_combined.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Publish stats JSON to GitHub every 5 minutes
 */5 * * * * root /app/publish_wrapper.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Corpus battles: every minute, via the official CR API (IP-whitelisted,

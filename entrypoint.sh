@@ -99,6 +99,27 @@ clash-stats --personal-combined --player-tag "${CR_PLAYER_TAG}" ${DB_FLAG}
 EOF
 chmod +x /app/personal_combined.sh
 
+# Alt-account combined wrapper: same battles+replays pass as personal_combined
+# but for CR_ALT_TAG, with corpus label 'alt' so alt games never pollute
+# main-account analytics (dashboard/tilt/trophy-history all filter on
+# corpus='personal'). No-ops cleanly when CR_ALT_TAG is unset — the cron line
+# is unconditional, the wrapper decides. CR_PLAYER_TAG is deliberately NOT
+# exported (cli falls back to it; --player-tag is explicit here).
+cat > /app/alt_combined.sh << EOF
+#!/bin/sh
+[ -z "${CR_ALT_TAG}" ] && exit 0
+exec flock -n ${LOCKDIR}/alt_combined.lock sh -c '
+cd /app
+export CR_API_KEY="${CR_API_KEY}"
+[ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
+[ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
+${SCRAPER_ENV_EXPORTS}
+export PYTHONUNBUFFERED=1
+clash-stats --personal-combined --player-tag "${CR_ALT_TAG}" --corpus-label alt ${DB_FLAG}
+' || echo "alt_combined: previous run still active, skipping"
+EOF
+chmod +x /app/alt_combined.sh
+
 # Build corpus wrapper scripts for crond
 cat > /app/corpus_update.sh << EOF
 #!/bin/sh
