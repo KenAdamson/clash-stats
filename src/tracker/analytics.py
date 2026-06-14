@@ -21,11 +21,18 @@ SHOWDOWN_FRIENDLY_MODE = "Showdown_Friendly"
 
 
 def _card_variant(card: dict) -> str:
-    """Classify a card as base, evo, or hero from API data."""
-    evo_level = card.get("evolutionLevel", 0)
-    max_evo = card.get("maxEvolutionLevel", 0)
-    if evo_level and evo_level > 0:
-        return "hero" if max_evo and max_evo > 1 else "evo"
+    """Classify a card's FIELDED form as base, evo, or hero from API data.
+
+    The API encodes the fielded form in ``evolutionLevel``, not in a separate
+    hero flag: 0=base, 1=evolved, 2=hero, 3=hero+evolved. The old logic keyed
+    off ``maxEvolutionLevel`` (hero-CAPABLE), which mislabeled evolved
+    hero-capable cards (e.g. an evolved Musketeer, evolutionLevel=1) as 'hero'.
+    """
+    evo_level = card.get("evolutionLevel", 0) or 0
+    if evo_level >= 2:
+        return "hero"
+    if evo_level == 1:
+        return "evo"
     return "base"
 
 

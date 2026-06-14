@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import ForeignKey, Index, JSON, String, func
+from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -126,12 +127,36 @@ class DeckCard(Base):
     card_max_level: Mapped[Optional[int]]
     card_elixir: Mapped[Optional[int]]
     is_player_deck: Mapped[Optional[int]]
+    # evolution_level encodes the card's fielded form, NOT a stat tier:
+    #   0 = base, 1 = evolved, 2 = hero, 3 = hero+evolved (vanishingly rare).
+    # (Discovered 2026-06-13 from a known hero-wizard game: hero status is
+    # smuggled into this field rather than exposed separately by the API.)
     evolution_level: Mapped[int] = mapped_column(default=0)
-    star_level: Mapped[int] = mapped_column(default=0)
+    star_level: Mapped[int] = mapped_column(default=0)  # cosmetic Star Points, 0-3
     card_variant: Mapped[str] = mapped_column(String, default="base")  # base, evo, hero
 
     # Relationship
     battle: Mapped["Battle"] = relationship(back_populates="deck_cards")
+
+    @hybrid_property
+    def is_evo(self) -> bool:
+        """True if this card was fielded in its evolved form (incl. hero+evo)."""
+        return self.evolution_level in (1, 3)
+
+    @is_evo.inplace.expression
+    @classmethod
+    def _is_evo_expr(cls):
+        return cls.evolution_level.in_((1, 3))
+
+    @hybrid_property
+    def is_hero(self) -> bool:
+        """True if this card was fielded as a hero (incl. hero+evo)."""
+        return self.evolution_level in (2, 3)
+
+    @is_hero.inplace.expression
+    @classmethod
+    def _is_hero_expr(cls):
+        return cls.evolution_level.in_((2, 3))
 
 
 class PlayerCorpus(Base):
