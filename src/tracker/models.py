@@ -13,6 +13,12 @@ class Base(DeclarativeBase):
     pass
 
 
+# Unified in-game card-level cap. The CR API reports card_level on a rarity-
+# normalized scale; the displayed (in-game) level adds a per-rarity offset
+# encoded in card_max_level: displayed = card_level + (CAP - card_max_level).
+DISPLAYED_LEVEL_CAP = 16
+
+
 class PlayerSnapshot(Base):
     """Player profile snapshot captured at each fetch interval."""
 
@@ -157,6 +163,27 @@ class DeckCard(Base):
     @classmethod
     def _is_hero_expr(cls):
         return cls.evolution_level.in_((2, 3))
+
+    @hybrid_property
+    def displayed_level(self) -> Optional[int]:
+        """In-game card level the player actually sees.
+
+        ``card_level`` stores the CR API's RARITY-NORMALIZED level, not the
+        displayed number. The offset to the unified in-game scale (cap 16) is
+        encoded in ``card_max_level`` — common +0 (max 16), rare +2 (max 14),
+        epic +5 (max 11), legendary +8 (max 8), champion +10 (max 6):
+        ``displayed = card_level + (16 - card_max_level)``. Verified against
+        ground truth (rare Fireball api-8 → 10, epic Bowler api-7 → 12).
+        Returns None if either input is unknown.
+        """
+        if self.card_level is None or self.card_max_level is None:
+            return None
+        return self.card_level + (DISPLAYED_LEVEL_CAP - self.card_max_level)
+
+    @displayed_level.inplace.expression
+    @classmethod
+    def _displayed_level_expr(cls):
+        return cls.card_level + (DISPLAYED_LEVEL_CAP - cls.card_max_level)
 
 
 class PlayerCorpus(Base):

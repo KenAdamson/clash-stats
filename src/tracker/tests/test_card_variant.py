@@ -50,6 +50,24 @@ def test_deckcard_hybrid_python(evo_level, is_evo, is_hero):
 
 # --- is_evo / is_hero hybrid (SQL expression context) ----------------------
 
+@pytest.mark.parametrize("level, max_level, expected", [
+    (8, 14, 10),   # rare Fireball (offset +2) — ground truth
+    (7, 11, 12),   # epic Bowler (offset +5) — ground truth
+    (10, 16, 10),  # common Cannon (offset 0)
+    (6, 16, 6),    # common Knight
+    (8, 8, 16),    # maxed legendary (offset +8) -> cap
+    (6, 6, 16),    # maxed champion (offset +10) -> cap
+])
+def test_displayed_level(level, max_level, expected):
+    c = DeckCard(card_name="X", card_level=level, card_max_level=max_level)
+    assert c.displayed_level == expected
+
+
+def test_displayed_level_none_when_unknown():
+    assert DeckCard(card_name="X", card_level=None, card_max_level=14).displayed_level is None
+    assert DeckCard(card_name="X", card_level=8, card_max_level=None).displayed_level is None
+
+
 def test_deckcard_hybrid_sql_expression(session):
     """The hybrid must also work as a SQL predicate, not just in Python."""
     from sqlalchemy import select, func
