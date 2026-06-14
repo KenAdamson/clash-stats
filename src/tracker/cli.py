@@ -248,6 +248,10 @@ Environment variables:
                         help="Detect broken synergy pairs (kebab-case, e.g. miner:graveyard)")
     parser.add_argument("--min-trophies", type=int, metavar="N",
                         help="Minimum opponent trophies (used with --matchup-dive)")
+    # Derived dimensions
+    parser.add_argument("--refresh-dims", action="store_true",
+                        help="Rebuild clan_dim (from CR clan API) and player_dim "
+                             "(aggregated from battles)")
 
     parser.add_argument("--api-key", type=str, help="CR API key")
     parser.add_argument("--player-tag", type=str, help="Player tag (without #)")
@@ -935,6 +939,18 @@ Environment variables:
                 else:
                     reporting.print_broken_cycle(results)
 
+        if args.refresh_dims:
+            if not api_key:
+                print("Error: --api-key required for --refresh-dims (clan API)")
+                print("       Or set CR_API_KEY environment variable")
+                return 1
+            from tracker.dimensions import refresh_dims
+            api = ClashRoyaleAPI(api_key, base_url=api_url)
+            result = refresh_dims(session, api)
+            print(f"  ✓ Dimensions refreshed: {result['harvested']} clan identities "
+                  f"harvested, {result['resolved']} clans enriched, "
+                  f"{result['players']} players")
+
         # Default: show help + db status
         has_action = any([
             args.fetch, args.stats, args.deck_stats, args.crowns,
@@ -956,6 +972,7 @@ Environment variables:
             args.promote_model, args.list_models,
             args.manifold, args.train_activity_model,
             args.matchup_dive, args.broken_cycle, args.mark_stale_replays,
+            args.refresh_dims,
         ])
         if not has_action:
             parser.print_help()

@@ -164,6 +164,21 @@ class ClashRoyaleAPI:
         )
         return self._request(f"/players/{encoded_tag}/battlelog")
 
+    def get_clan(self, clan_tag: str) -> dict:
+        """Get clan profile including memberList.
+
+        Args:
+            clan_tag: Clan tag with or without '#' prefix.
+
+        Returns:
+            Clan dict from the API. ``memberList`` is a list of
+            ``{name, tag, trophies, expLevel, role, ...}``.
+        """
+        encoded_tag = urllib.parse.quote(
+            f"#{clan_tag}" if not clan_tag.startswith("#") else clan_tag
+        )
+        return self._request(f"/clans/{encoded_tag}")
+
     def get_top_players(self, location_id: str = "global", limit: int = 200) -> list:
         """Get top-ranked Path of Legend players.
 

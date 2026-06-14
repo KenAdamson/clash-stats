@@ -23,6 +23,11 @@ PATH=/usr/local/bin:/usr/bin:/bin
 0 6 * * 1 root /app/corpus_update.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Refresh simulation results daily at 2am UTC
 0 2 * * * root /app/sim_refresh.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
+# Rebuild derived dimensions (clan_dim + player_dim) daily at 3:30am UTC.
+# DISABLED by default — the refresh TRUNCATES+rebuilds both tables, so enable
+# it only after migration 006 has run and `clash-stats --refresh-dims` has been
+# verified manually against the live DB.
+#30 3 * * * root /app/refresh_dims.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 
 # --- ML training ---
 # Incremental WP inference: process new games every 5 min (offset from corpus)

@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import ForeignKey, Index, JSON, String, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, JSON, String, func
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -182,6 +182,96 @@ class CorpusHourlyStat(Base):
 
     hour: Mapped[int] = mapped_column(primary_key=True)
     battle_count: Mapped[int] = mapped_column(default=0)
+
+
+class ClanDim(Base):
+    """Derived clan dimension, split into a cheap IDENTITY half and an
+    API-enriched MEASURES half.
+
+    IDENTITY (clan_tag, clan_name, first/last_seen, n_battles_seen,
+    on_our_accounts) is harvested for FREE from battle ``raw_json`` at no API
+    cost — :func:`tracker.dimensions.harvest_clan_dim` upserts a row for every
+    clan ever seen as an opponent (~490K). MEASURES (member/trophy aggregates)
+    require a ``/clans/%23TAG`` call and are filled lazily by
+    :func:`tracker.dimensions.resolve_clan_dim`, which drains the backlog in
+    priority-ordered batches (our own accounts' clans first). ``resolved_at`` is
+    NULL until a clan's measures have been fetched. All derived, no source of
+    truth. Migration 006 created it; 007 added the identity/resolution columns.
+    """
+
+    __tablename__ = "clan_dim"
+    __table_args__ = (
+        Index("idx_clan_dim_resolved_at", "resolved_at"),
+        Index("idx_clan_dim_on_our_accounts", "on_our_accounts"),
+    )
+
+    clan_tag: Mapped[str] = mapped_column(String, primary_key=True)
+    clan_name: Mapped[Optional[str]]
+
+    # --- IDENTITY (harvested free from battles, no API) ---
+    first_seen: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    last_seen: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    n_battles_seen: Mapped[Optional[int]]      # battles we've seen this clan in
+    on_our_accounts: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )  # ever an opponent's clan on personal/alt — resolver priority
+
+    # --- MEASURES (API-enriched, NULL until resolved) ---
+    member_count: Mapped[Optional[int]]
+    max_trophies: Mapped[Optional[int]]
+    avg_trophies: Mapped[Optional[int]]
+    median_trophies: Mapped[Optional[int]]
+    n_9k: Mapped[Optional[int]]   # members at >= 9000 trophies
+    n_11k: Mapped[Optional[int]]  # members at >= 11000 trophies
+    n_12k: Mapped[Optional[int]]  # members at >= 12000 trophies
+    top_member_name: Mapped[Optional[str]]
+    top_member_tag: Mapped[Optional[str]]
+    top_member_trophies: Mapped[Optional[int]]
+
+    # --- RESOLUTION tracking ---
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True)
+    )  # NULL = measures never fetched
+    resolve_attempts: Mapped[int] = mapped_column(default=0)
+    refreshed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=func.now()
+    )  # last time this row (identity or measures) was touched
+
+
+class PlayerDim(Base):
+    """Derived opponent/player dimension — one row per opponent seen in battles.
+
+    Aggregated from the ``battles`` table (opponent_tag/name/raw_json) by
+    :func:`tracker.dimensions.refresh_player_dim`, enriched with ``clan_tag``
+    pulled from each opponent's battle ``raw_json``. Like :class:`ClanDim`, it
+    is fully derived data — repopulatable at any time, never a source of truth.
+    """
+
+    __tablename__ = "player_dim"
+    __table_args__ = (
+        Index("idx_player_dim_clan_tag", "clan_tag"),
+        Index("idx_player_dim_last_seen", "last_seen"),
+        Index("idx_player_dim_alt_suspect", "is_alt_suspect"),
+    )
+
+    player_tag: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[Optional[str]]
+    latest_trophies: Mapped[Optional[int]]
+    exp_level: Mapped[Optional[int]]
+    # Nullable soft-FK to clan_dim.clan_tag. Not a hard FK: a player's clan may
+    # not be present in clan_dim (clan_dim only covers clans we've refreshed),
+    # and we never want a missing clan to block a player upsert.
+    clan_tag: Mapped[Optional[str]]
+    first_seen: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    last_seen: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    games: Mapped[int] = mapped_column(default=0)
+    wins: Mapped[int] = mapped_column(default=0)
+    losses: Mapped[int] = mapped_column(default=0)
+    last_deck_hash: Mapped[Optional[str]]
+    is_alt_suspect: Mapped[bool] = mapped_column(Boolean, default=False)
+    refreshed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=func.now()
+    )
 
 
 class ReplayEvent(Base):

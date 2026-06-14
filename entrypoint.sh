@@ -159,6 +159,25 @@ clash-stats --sim-full --player-tag "${CR_PLAYER_TAG}" ${DB_FLAG}
 EOF
 chmod +x /app/sim_refresh.sh
 
+# Derived dimensions: rebuild clan_dim (CR clan API) + player_dim (from battles).
+# Both tables are fully derived/repopulatable — the refresh TRUNCATES and
+# rebuilds. flock prevents overlap. NOTE: the matching crontab line is left
+# COMMENTED OUT (see crontab) because the rebuild is destructive-by-design;
+# enable it deliberately once the migration has run and a manual
+# `clash-stats --refresh-dims` has been verified against the live DB.
+cat > /app/refresh_dims.sh << EOF
+#!/bin/sh
+exec flock -n ${LOCKDIR}/refresh_dims.lock sh -c '
+cd /app
+export CR_API_KEY="${CR_API_KEY}"
+[ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
+[ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
+export PYTHONUNBUFFERED=1
+clash-stats --refresh-dims ${DB_FLAG}
+' || echo "refresh_dims: previous run still active, skipping"
+EOF
+chmod +x /app/refresh_dims.sh
+
 # (The corpus_replays.sh wrapper is defined further below — the legacy
 # Playwright-based version that lived here was dead code, overwritten by the
 # HTTP-path version at write time.)
