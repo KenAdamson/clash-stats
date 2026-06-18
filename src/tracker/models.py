@@ -296,6 +296,35 @@ class PlayerDim(Base):
     losses: Mapped[int] = mapped_column(default=0)
     last_deck_hash: Mapped[Optional[str]]
     is_alt_suspect: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # --- Smurf pillar 2/3: levels-implied-trophy gap (funded-smurf detector) ---
+    # deck_top_level = the player's max displayed card level (from their latest
+    # deck). implied_trophy_gap = where a deck of that top-level NORMALLY lives
+    # (level_trophy_ref.median_trophy) minus latest_trophies. A large POSITIVE
+    # gap means their card investment belongs far above their placement — the
+    # pay-to-win / funded-smurf fingerprint (orthogonal to clan-shelter and
+    # skill). ~0 for a level-appropriate account.
+    deck_top_level: Mapped[Optional[int]]
+    implied_trophy_gap: Mapped[Optional[int]] = mapped_column(index=True)
+    refreshed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=func.now()
+    )
+
+
+class LevelTrophyRef(Base):
+    """Empirical reference: where a deck of a given top displayed-level normally
+    sits on the trophy ladder. Derived from the whole battles corpus by
+    :func:`tracker.dimensions.refresh_level_trophy_ref` (median + p10 of
+    opponent_starting_trophies grouped by deck-top displayed level). Used to
+    compute ``PlayerDim.implied_trophy_gap``. Fully derived/refreshable.
+    """
+
+    __tablename__ = "level_trophy_ref"
+
+    deck_top_level: Mapped[int] = mapped_column(primary_key=True)
+    median_trophy: Mapped[Optional[int]]
+    p10_trophy: Mapped[Optional[int]]
+    n_samples: Mapped[Optional[int]]
     refreshed_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), default=func.now()
     )

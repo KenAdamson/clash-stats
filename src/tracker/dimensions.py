@@ -23,7 +23,7 @@ from sqlalchemy import case, func, select, text
 from sqlalchemy.orm import Session
 
 from tracker.api import APIError, ClashRoyaleAPI
-from tracker.models import Battle, ClanDim, PlayerDim
+from tracker.models import Battle, ClanDim, LevelTrophyRef, PlayerDim
 
 logger = logging.getLogger(__name__)
 
@@ -219,25 +219,91 @@ def _opponent_clan_tags(session: Session) -> dict[str, Optional[str]]:
     return {r.opponent_tag: r.clan_tag for r in rows}
 
 
+def refresh_level_trophy_ref(session: Session) -> int:
+    """Recompute the empirical level→trophy reference from the whole corpus.
+
+    For each deck-top displayed level, the median (and p10) of
+    ``opponent_starting_trophies`` across all PvP battles — i.e. where decks of
+    that top-level normally sit on the ladder. Drives ``implied_trophy_gap``.
+    PostgreSQL only (percentile_cont + displayed-level arithmetic); SQLite
+    (tests) is a no-op.
+
+    Returns:
+        Number of reference rows written.
+    """
+    if session.bind is not None and session.bind.dialect.name == "sqlite":
+        return 0
+    session.execute(text("DELETE FROM level_trophy_ref"))
+    session.execute(text(
+        """
+        INSERT INTO level_trophy_ref
+            (deck_top_level, median_trophy, p10_trophy, n_samples, refreshed_at)
+        SELECT lvl,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY tr)::int,
+               percentile_cont(0.1) WITHIN GROUP (ORDER BY tr)::int,
+               COUNT(*), now()
+        FROM (
+            SELECT b.battle_id, b.opponent_starting_trophies AS tr,
+                   MAX(dc.card_level + (16 - dc.card_max_level)) AS lvl
+            FROM battles b
+            JOIN deck_cards dc ON dc.battle_id = b.battle_id AND dc.is_player_deck = 0
+            WHERE b.battle_type = 'PvP'
+              AND b.opponent_starting_trophies BETWEEN 1 AND 13000
+            GROUP BY b.battle_id, b.opponent_starting_trophies
+        ) per
+        WHERE lvl IS NOT NULL
+        GROUP BY lvl
+        """
+    ))
+    session.commit()
+    n = session.execute(text("SELECT COUNT(*) FROM level_trophy_ref")).scalar() or 0
+    logger.info("refresh_level_trophy_ref: %d levels in reference", n)
+    return n
+
+
+def _opponent_deck_top_levels(
+    session: Session, corpuses: Optional[tuple[str, ...]],
+) -> dict[str, int]:
+    """Map opponent_tag -> max displayed card level they've fielded.
+
+    displayed = card_level + (16 - card_max_level). PostgreSQL only; SQLite
+    returns empty.
+    """
+    if session.bind is not None and session.bind.dialect.name == "sqlite":
+        return {}
+    sql = (
+        "SELECT b.opponent_tag, MAX(dc.card_level + (16 - dc.card_max_level)) AS lvl "
+        "FROM battles b JOIN deck_cards dc "
+        "  ON dc.battle_id = b.battle_id AND dc.is_player_deck = 0 "
+        "WHERE b.opponent_tag IS NOT NULL"
+    )
+    params: dict = {}
+    if corpuses is not None:
+        sql += " AND b.corpus = ANY(:corpuses)"
+        params["corpuses"] = list(corpuses)
+    sql += " GROUP BY b.opponent_tag"
+    return {r.opponent_tag: r.lvl for r in session.execute(text(sql), params) if r.lvl is not None}
+
+
 def refresh_player_dim(
     session: Session,
-    corpus: Optional[str] = "personal",
+    corpuses: Optional[tuple[str, ...]] = ("personal", "alt"),
     alt_min_games: int = 3,
 ) -> int:
     """Repopulate ``player_dim`` by aggregating the ``battles`` table.
 
     Each opponent (``opponent_tag``) becomes one player_dim row. Win/loss are
-    from the *opponent's* perspective (inverted from ``Battle.result``, which is
-    stored from the main player's view). Enriched with the opponent's latest
-    clan tag from battle ``raw_json``.
+    from the *opponent's* perspective (inverted from ``Battle.result``). Enriched
+    with the opponent's latest clan tag, their deck-top displayed level, and the
+    **implied_trophy_gap** (funded-smurf signal): where their card levels imply
+    they belong (``level_trophy_ref``) minus their actual trophies.
 
-    Scoped to ``corpus='personal'`` by default — the full corpus has ~1.2M
-    distinct opponents, which is a much heavier (and rarely needed) rebuild.
-    Pass ``corpus=None`` to aggregate across all battles.
+    Scoped to our own accounts (``('personal','alt')``) by default — the full
+    corpus has ~1.2M distinct opponents (heavier). Pass ``None`` for all battles.
 
     Args:
         session: SQLAlchemy session.
-        corpus: Restrict to battles with this corpus label, or None for all.
+        corpuses: Battle corpus labels to aggregate, or None for all.
         alt_min_games: Minimum games before the alt-suspect heuristic applies.
 
     Returns:
@@ -261,12 +327,12 @@ def refresh_player_dim(
         .where(Battle.opponent_tag.isnot(None))
         .group_by(Battle.opponent_tag)
     )
-    if corpus is not None:
-        stmt = stmt.where(Battle.corpus == corpus)
+    if corpuses is not None:
+        stmt = stmt.where(Battle.corpus.in_(corpuses))
 
     agg_rows = session.execute(stmt).all()
-    logger.info("refresh_player_dim: aggregating %d distinct opponents (corpus=%s)",
-                len(agg_rows), corpus)
+    logger.info("refresh_player_dim: aggregating %d distinct opponents (corpuses=%s)",
+                len(agg_rows), corpuses)
 
     # latest_deck_hash: the opponent's deck in their most recent battle.
     deck_stmt = (
@@ -274,13 +340,18 @@ def refresh_player_dim(
         .where(Battle.opponent_tag.isnot(None))
         .order_by(Battle.opponent_tag, Battle.battle_time.desc())
     )
-    if corpus is not None:
-        deck_stmt = deck_stmt.where(Battle.corpus == corpus)
+    if corpuses is not None:
+        deck_stmt = deck_stmt.where(Battle.corpus.in_(corpuses))
     last_deck: dict[str, Optional[str]] = {}
     for tag, deck_hash in session.execute(deck_stmt):
         last_deck.setdefault(tag, deck_hash)
 
     clan_map = _opponent_clan_tags(session)
+    deck_top = _opponent_deck_top_levels(session, corpuses)
+    # level -> median trophy reference for the implied-trophy gap
+    ref = {lvl: med for lvl, med in session.execute(
+        select(LevelTrophyRef.deck_top_level, LevelTrophyRef.median_trophy)
+    )}
 
     # Full rebuild — derived data.
     session.query(PlayerDim).delete()
@@ -296,6 +367,13 @@ def refresh_player_dim(
         is_alt_suspect = bool(
             r.games >= alt_min_games and (r.name is None or r.name.strip() == "")
         )
+        # Funded-smurf signal: where their card levels imply they belong minus
+        # where they actually are. Large positive = cards belong far above
+        # placement. NULL if we lack their deck level or a reference for it.
+        dtl = deck_top.get(r.player_tag)
+        gap = None
+        if dtl is not None and r.latest_trophies is not None and ref.get(dtl) is not None:
+            gap = ref[dtl] - r.latest_trophies
         session.add(PlayerDim(
             player_tag=r.player_tag,
             name=r.name,
@@ -309,6 +387,8 @@ def refresh_player_dim(
             losses=r.losses or 0,
             last_deck_hash=last_deck.get(r.player_tag),
             is_alt_suspect=is_alt_suspect,
+            deck_top_level=dtl,
+            implied_trophy_gap=gap,
             refreshed_at=now,
         ))
         written += 1
@@ -339,5 +419,7 @@ def refresh_dims(
     """
     harvested = harvest_clan_dim(session)
     resolved = resolve_clan_dim(session, api, batch=resolve_batch)
+    levels = refresh_level_trophy_ref(session)   # must precede player_dim (feeds the gap)
     players = refresh_player_dim(session)
-    return {"harvested": harvested, "resolved": resolved, "players": players}
+    return {"harvested": harvested, "resolved": resolved,
+            "level_ref": levels, "players": players}
