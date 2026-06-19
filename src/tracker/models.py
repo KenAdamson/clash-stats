@@ -330,6 +330,31 @@ class LevelTrophyRef(Base):
     )
 
 
+class PlayerKing(Base):
+    """Persistent cache of player king (experience) level + best trophies.
+
+    King level is NOT in the battle log — only ``/players/{tag}`` exposes it —
+    so it's resolved by API in priority batches (:func:`tracker.dimensions.
+    resolve_player_king`) and cached here. Kept in its own table (not on
+    player_dim) because player_dim is rebuilt every refresh, while king levels
+    are stable and expensive to re-fetch. King level disambiguates the smurf
+    species: a LOW king level with cards far over the bracket = PAID whale
+    (impossible F2P); a HIGH king level at low trophies = MATURE account
+    tanking; best_trophies >> current also flags deliberate tanking.
+    """
+
+    __tablename__ = "player_king"
+
+    player_tag: Mapped[str] = mapped_column(String, primary_key=True)
+    king_level: Mapped[Optional[int]]
+    best_trophies: Mapped[Optional[int]]
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    resolve_attempts: Mapped[int] = mapped_column(default=0)
+    refreshed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=func.now()
+    )
+
+
 class ReplayEvent(Base):
     """Individual card placement event from a battle replay."""
 

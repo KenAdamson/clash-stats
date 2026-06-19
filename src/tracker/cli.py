@@ -949,7 +949,8 @@ Environment variables:
             result = refresh_dims(session, api)
             print(f"  ✓ Dimensions refreshed: {result['harvested']} clan identities "
                   f"harvested, {result['resolved']} clans enriched, "
-                  f"{result['level_ref']} level-ref rows, {result['players']} players")
+                  f"{result['level_ref']} level-ref rows, {result['players']} players, "
+                  f"{result['kings']} king levels resolved")
 
         # Default: show help + db status
         has_action = any([

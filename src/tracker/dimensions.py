@@ -23,7 +23,7 @@ from sqlalchemy import case, func, select, text
 from sqlalchemy.orm import Session
 
 from tracker.api import APIError, ClashRoyaleAPI
-from tracker.models import Battle, ClanDim, LevelTrophyRef, PlayerDim
+from tracker.models import Battle, ClanDim, LevelTrophyRef, PlayerDim, PlayerKing
 
 logger = logging.getLogger(__name__)
 
@@ -261,6 +261,72 @@ def refresh_level_trophy_ref(session: Session) -> int:
     return n
 
 
+def resolve_player_king(
+    session: Session,
+    api: ClashRoyaleAPI,
+    batch: int = _RESOLVE_BATCH,
+    max_age_days: int = _RESOLVE_MAX_AGE_DAYS,
+    max_attempts: int = _RESOLVE_MAX_ATTEMPTS,
+) -> int:
+    """Resolve king (experience) level for a priority batch of player_dim players.
+
+    King level isn't in the battle log, so fetch ``/players/{tag}`` and cache
+    king_level + best_trophies in ``player_king``. Prioritized by
+    implied_trophy_gap DESC (confirm the suspected funded-smurfs first), then
+    recency; skips players already resolved (within max_age) or repeatedly
+    failed. PostgreSQL only; SQLite (tests) is a no-op.
+
+    Returns:
+        Number of players successfully resolved this run.
+    """
+    if session.bind is not None and session.bind.dialect.name == "sqlite":
+        return 0
+    candidates = session.execute(text(
+        """
+        SELECT pd.player_tag
+        FROM player_dim pd
+        LEFT JOIN player_king pk ON pk.player_tag = pd.player_tag
+        WHERE pd.player_tag IS NOT NULL
+          AND COALESCE(pk.resolve_attempts, 0) < :max_attempts
+          AND (pk.resolved_at IS NULL
+               OR pk.resolved_at < now() - make_interval(days => :max_age_days))
+        ORDER BY pd.implied_trophy_gap DESC NULLS LAST,
+                 pd.last_seen DESC NULLS LAST
+        LIMIT :batch
+        """
+    ), {"max_attempts": max_attempts, "max_age_days": max_age_days, "batch": batch}
+    ).scalars().all()
+
+    logger.info("resolve_player_king: %d players selected", len(candidates))
+    resolved = 0
+    for tag in candidates:
+        try:
+            p = api.get_player(tag)
+        except APIError as e:
+            logger.warning("resolve_player_king: %s failed: %s", tag, e)
+            session.execute(text(
+                "INSERT INTO player_king (player_tag, resolve_attempts, refreshed_at) "
+                "VALUES (:t, 1, now()) ON CONFLICT (player_tag) DO UPDATE SET "
+                "resolve_attempts = player_king.resolve_attempts + 1, refreshed_at = now()"
+            ), {"t": tag})
+            continue
+        session.execute(text(
+            """
+            INSERT INTO player_king
+                (player_tag, king_level, best_trophies, resolved_at, resolve_attempts, refreshed_at)
+            VALUES (:t, :kl, :bt, now(), 1, now())
+            ON CONFLICT (player_tag) DO UPDATE SET
+                king_level = :kl, best_trophies = :bt, resolved_at = now(),
+                resolve_attempts = player_king.resolve_attempts + 1, refreshed_at = now()
+            """
+        ), {"t": tag, "kl": p.get("expLevel"), "bt": p.get("bestTrophies")})
+        resolved += 1
+
+    session.commit()
+    logger.info("resolve_player_king: resolved %d players", resolved)
+    return resolved
+
+
 def _opponent_deck_top_levels(
     session: Session, corpuses: Optional[tuple[str, ...]],
 ) -> dict[str, int]:
@@ -352,6 +418,10 @@ def refresh_player_dim(
     ref = {lvl: med for lvl, med in session.execute(
         select(LevelTrophyRef.deck_top_level, LevelTrophyRef.median_trophy)
     )}
+    # king (experience) level from the persistent cache (survives rebuilds)
+    king_map = {tag: kl for tag, kl in session.execute(
+        select(PlayerKing.player_tag, PlayerKing.king_level)
+    )}
 
     # Full rebuild — derived data.
     session.query(PlayerDim).delete()
@@ -378,7 +448,7 @@ def refresh_player_dim(
             player_tag=r.player_tag,
             name=r.name,
             latest_trophies=r.latest_trophies,
-            exp_level=None,  # not exposed in battlelog opponent objects
+            exp_level=king_map.get(r.player_tag),  # king level from player_king cache
             clan_tag=clan_map.get(r.player_tag),
             first_seen=r.first_seen,
             last_seen=r.last_seen,
@@ -421,5 +491,15 @@ def refresh_dims(
     resolved = resolve_clan_dim(session, api, batch=resolve_batch)
     levels = refresh_level_trophy_ref(session)   # must precede player_dim (feeds the gap)
     players = refresh_player_dim(session)
-    return {"harvested": harvested, "resolved": resolved,
-            "level_ref": levels, "players": players}
+    # King level resolves AFTER player_dim (candidate selection reads it,
+    # prioritized by the gap), then we reflect the freshly-resolved kings back
+    # into player_dim so this run isn't a cycle behind.
+    kings = resolve_player_king(session, api, batch=resolve_batch)
+    if session.bind is not None and session.bind.dialect.name != "sqlite":
+        session.execute(text(
+            "UPDATE player_dim SET exp_level = pk.king_level "
+            "FROM player_king pk WHERE pk.player_tag = player_dim.player_tag"
+        ))
+        session.commit()
+    return {"harvested": harvested, "resolved": resolved, "level_ref": levels,
+            "players": players, "kings": kings}
