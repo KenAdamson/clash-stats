@@ -252,6 +252,9 @@ Environment variables:
     parser.add_argument("--refresh-dims", action="store_true",
                         help="Rebuild clan_dim (from CR clan API) and player_dim "
                              "(aggregated from battles)")
+    parser.add_argument("--pilot-match", type=str, metavar="TAG",
+                        help="Rank the pilots whose deck-invariant behavioral "
+                             "fingerprint is closest to TAG (smurf pillar 3)")
 
     parser.add_argument("--api-key", type=str, help="CR API key")
     parser.add_argument("--player-tag", type=str, help="Player tag (without #)")
@@ -950,7 +953,21 @@ Environment variables:
             print(f"  ✓ Dimensions refreshed: {result['harvested']} clan identities "
                   f"harvested, {result['resolved']} clans enriched, "
                   f"{result['level_ref']} level-ref rows, {result['players']} players, "
-                  f"{result['kings']} king levels resolved")
+                  f"{result['kings']} king levels resolved, "
+                  f"{result.get('fingerprints', 0)} pilot fingerprints, "
+                  f"{result.get('behavioral_matches', 0)} behavioral matches")
+
+        if args.pilot_match:
+            from tracker.ml.pilot_fingerprint import nearest_pilots
+            tag = analytics._normalize_tag(args.pilot_match)
+            neighbors = nearest_pilots(session, tag)
+            if not neighbors:
+                print(f"No fingerprint for {tag} (needs replay data / refresh-dims first)")
+            else:
+                print(f"Pilots behaviorally closest to {tag}:")
+                for rank, n in enumerate(neighbors, 1):
+                    troph = f"{n['trophies']:,}" if n['trophies'] is not None else "?"
+                    print(f"  #{rank:<3}{n['player_tag']:<12} d={n['distance']:.3f}  {troph} trophies")
 
         # Default: show help + db status
         has_action = any([
@@ -973,7 +990,7 @@ Environment variables:
             args.promote_model, args.list_models,
             args.manifold, args.train_activity_model,
             args.matchup_dive, args.broken_cycle, args.mark_stale_replays,
-            args.refresh_dims,
+            args.refresh_dims, args.pilot_match,
         ])
         if not has_action:
             parser.print_help()

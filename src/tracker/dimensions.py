@@ -501,5 +501,14 @@ def refresh_dims(
             "FROM player_king pk WHERE pk.player_tag = player_dim.player_tag"
         ))
         session.commit()
+    # Pillar 3 (behavioral): chip the fingerprint backlog, then score the match
+    # gap onto the freshly-rebuilt player_dim. Imported lazily so a numpy-less
+    # environment (or tests) doesn't pay for it unless the cron runs.
+    from tracker.ml.pilot_fingerprint import (
+        compute_behavioral_match, refresh_pilot_fingerprints,
+    )
+    fingerprints = refresh_pilot_fingerprints(session, batch=resolve_batch)
+    matched = compute_behavioral_match(session)
     return {"harvested": harvested, "resolved": resolved, "level_ref": levels,
-            "players": players, "kings": kings}
+            "players": players, "kings": kings,
+            "fingerprints": fingerprints, "behavioral_matches": matched}

@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, JSON, String, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, JSON, String, func
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -306,6 +306,48 @@ class PlayerDim(Base):
     # skill). ~0 for a level-appropriate account.
     deck_top_level: Mapped[Optional[int]]
     implied_trophy_gap: Mapped[Optional[int]] = mapped_column(index=True)
+
+    # --- Smurf pillar 3: behavioral (pilot-fingerprint) skill match ---
+    # Computed by tracker.ml.pilot_fingerprint.compute_behavioral_match from the
+    # deck-invariant fingerprint (see PilotFingerprint). behavioral_neighbor_trophy
+    # = median trophies of this account's k nearest pilots in fingerprint space;
+    # behavioral_gap = that minus latest_trophies. A large POSITIVE gap = "plays
+    # like a much-higher-trophy pilot" = the SKILL-smurf fingerprint (orthogonal
+    # to clan-shelter and the funded/level gap — the user's own alt is this case).
+    behavioral_neighbor_trophy: Mapped[Optional[int]]
+    behavioral_gap: Mapped[Optional[int]] = mapped_column(index=True)
+    refreshed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=func.now()
+    )
+
+
+class PilotFingerprint(Base):
+    """Deck-INVARIANT behavioral fingerprint of a pilot (smurf pillar 3).
+
+    Six timing/economy/discipline features extracted from a player's replay
+    placements (``replay_events``), normalized so they capture the PILOT not the
+    deck: tempo is divided by per-card elixir (banking discipline), spatial
+    features (lane/aggression) are excluded because they encode deck ROLE.
+    Validated 2026-06-22: the user's main and alt — zero shared cards, ~9000
+    trophy gap — land as #2/405 nearest neighbors here (self-consistency AUC
+    0.83). The match score is computed with plain z-Euclidean; do NOT whiten
+    (Mahalanobis decorrelates away the correlated timing signal that IS the
+    fingerprint). Fully derived/refreshable; one row per pilot with enough
+    replay'd games, filled incrementally by
+    :func:`tracker.ml.pilot_fingerprint.refresh_pilot_fingerprints`.
+    """
+
+    __tablename__ = "pilot_fingerprint"
+
+    player_tag: Mapped[str] = mapped_column(String, primary_key=True)
+    elixir_pace: Mapped[Optional[float]] = mapped_column(Float)
+    throughput: Mapped[Optional[float]] = mapped_column(Float)
+    reaction: Mapped[Optional[float]] = mapped_column(Float)
+    pace_consistency: Mapped[Optional[float]] = mapped_column(Float)
+    def_reaction: Mapped[Optional[float]] = mapped_column(Float)
+    fast_react_frac: Mapped[Optional[float]] = mapped_column(Float)
+    n_games: Mapped[int] = mapped_column(default=0)
+    latest_trophies: Mapped[Optional[int]]
     refreshed_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), default=func.now()
     )
