@@ -17,26 +17,6 @@ LOCKDIR=/tmp/locks
 rm -rf "$LOCKDIR"
 mkdir -p "$LOCKDIR"
 
-# SSH setup for git push to GitHub
-mkdir -p /root/.ssh
-chmod 700 /root/.ssh
-# Key is mounted read-only — copy so we can set permissions
-if [ -f /root/.ssh/id_ed25519 ]; then
-    cp /root/.ssh/id_ed25519 /root/.ssh/id_ed25519_tmp
-    mv /root/.ssh/id_ed25519_tmp /root/.ssh/deploy_key
-    chmod 600 /root/.ssh/deploy_key
-    cat > /root/.ssh/config << SSHEOF
-Host github.com
-    IdentityFile /root/.ssh/deploy_key
-    StrictHostKeyChecking accept-new
-SSHEOF
-fi
-ssh-keyscan -t ed25519 github.com >> /root/.ssh/known_hosts 2>/dev/null || true
-git config --global user.email "cr-tracker@workhorse"
-git config --global user.name "cr-tracker"
-# .git is mounted at /app/.git — tell git it's safe
-git config --global --add safe.directory /app
-
 # Cron runs jobs in a CLEAN environment — container env vars (set by compose)
 # are NOT visible to cron-spawned jobs. Anything a job needs must be baked into
 # its wrapper at startup. CR_API_KEY etc. are baked inline below; the RoyaleAPI
@@ -69,19 +49,6 @@ clash-stats --fetch ${DB_FLAG}
 ' || echo "fetch: previous run still active, skipping"
 EOF
 chmod +x /app/fetch.sh
-
-# Build publish wrapper with baked-in env vars for crond
-cat > /app/publish_wrapper.sh << EOF
-#!/bin/sh
-exec flock -n ${LOCKDIR}/publish.lock sh -c '
-cd /app
-export STATS_REPO_URL="${STATS_REPO_URL}"
-export STATS_BRANCH="${STATS_BRANCH:-stats}"
-export STATS_REMOTE="${STATS_REMOTE:-origin}"
-/app/publish_stats.sh
-' || echo "publish: previous run still active, skipping"
-EOF
-chmod +x /app/publish_wrapper.sh
 
 # Build personal combined wrapper: fetch battles + replays
 cat > /app/personal_combined.sh << EOF
@@ -341,14 +308,12 @@ clash-stats --train-activity-model ${DB_FLAG}
 EOF
 chmod +x /app/train_activity.sh
 
-PUSH_DEST="${STATS_REPO_URL:-origin}/${STATS_BRANCH:-stats}"
 echo "=== cr-tracker starting ==="
 echo "  Player tag: #${CR_PLAYER_TAG}"
 echo "  API:        ${CR_API_URL:-https://api.clashroyale.com/v1}"
 echo "  Personal:   every 2 min combined (battles + replays, atomic)"
 echo "  Database:   ${DATABASE_URL}"
 echo "  Dashboard:  http://0.0.0.0:8078"
-echo "  Stats push: every 5 min → ${PUSH_DEST}"
 echo "  Corpus:     every 1 min combined (battles + replays, 50 players, 12 tabs)"
 echo "  Discovery:  daily 3am opponent network + weekly Mon 7am regional leaderboards"
 echo "  Metrics:    http://0.0.0.0:8001/metrics (Prometheus)"

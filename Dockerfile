@@ -50,7 +50,6 @@ COPY crontab /etc/cron.d/cr-tracker
 RUN chmod 0644 /etc/cron.d/cr-tracker
 
 COPY entrypoint.sh /app/entrypoint.sh
-COPY publish_stats.sh /app/publish_stats.sh
 
 VOLUME ["/app/data"]
 

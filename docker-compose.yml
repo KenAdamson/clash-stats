@@ -58,8 +58,6 @@ services:
       - DASHBOARD_DATABASE_URL=postgresql://clash_stats:${DB_PASSWORD}@192.168.7.62/clash_stats
     volumes:
       - ./data:/app/data
-      - ./.git:/app/.git:rw
-      - ~/.ssh/id_ed25519:/root/.ssh/id_ed25519:ro
       # ml_models lives on the ml-data ZFS dataset; data/ml_models is a symlink
       # pointing here, so the container needs the same absolute path visible.
       - /mnt/mirror/ml_models:/mnt/mirror/ml_models:rw
