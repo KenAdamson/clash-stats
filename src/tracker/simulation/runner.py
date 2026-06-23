@@ -63,17 +63,32 @@ def _detect_sub_archetypes_parallel(
     """Run detect_sub_archetypes across win conditions in parallel processes.
 
     Each win condition is independent, so we fan them across a fork-based
-    process pool. Workers inherit corpus_data via copy-on-write (no pickling).
-    Capped at 6 workers: the wall time is bounded by the single longest
-    archetype (clustering within one archetype is sequential), so more workers
-    add little speed but multiply copy-on-write memory pressure. Falls back to
-    sequential on any pool failure.
+    process pool. Workers inherit corpus_data via copy-on-write (no pickling),
+    but each worker's clustering allocates several GiB that is NOT shared, so
+    peak memory scales with worker count. Defaults to 2 workers (memory-safe;
+    6 OOM-thrashed a 62 GiB host); tune with SIM_MAX_WORKERS. Wall time is
+    bounded by the single longest archetype anyway, so few workers cost little.
+    Falls back to sequential on any pool failure.
     """
     import multiprocessing as mp
     from concurrent.futures import ProcessPoolExecutor, as_completed
 
     global _SUBARCH_SIM_DATA
-    max_workers = min(len(win_conditions), 6, max(2, (os.cpu_count() or 4) - 2))
+    # Each worker runs HDBSCAN/UMAP clustering, which allocates large arrays that
+    # are NOT copy-on-write-shared (and Python refcount writes defeat COW on the
+    # inherited corpus_data anyway). So peak memory scales ~linearly with worker
+    # count: 6 workers was ~36 GiB and OOM-thrashed the host. Default to a
+    # memory-safe 2; allow SIM_MAX_WORKERS to tune up on a box with headroom.
+    _cpu_cap = min(len(win_conditions), 6, max(2, (os.cpu_count() or 4) - 2))
+    _env = os.environ.get("SIM_MAX_WORKERS")
+    if _env:
+        try:
+            max_workers = max(1, min(int(_env), len(win_conditions)))
+        except ValueError:
+            logger.warning("Invalid SIM_MAX_WORKERS=%r; falling back to default.", _env)
+            max_workers = min(_cpu_cap, 2)
+    else:
+        max_workers = min(_cpu_cap, 2)
     sub_archetypes: dict = {}
     try:
         ctx = mp.get_context("fork")
