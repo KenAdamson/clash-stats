@@ -5,16 +5,24 @@ player_corpus table for batch replay scraping.
 """
 
 import logging
-from datetime import datetime
+import os
+import pickle
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.orm import Session
 
-from tracker.api import ClashRoyaleAPI
+from tracker.api import APIError, ClashRoyaleAPI
 from tracker.models import Battle, PlayerCorpus
 
 logger = logging.getLogger(__name__)
+
+# Players below this Trophy-Road floor (but above the alt range) are no longer
+# relevant to a 12k+ main and just dilute scrape budget — corpus_hygiene prunes
+# them and discovery stops adding them. Raise as the main climbs.
+RELEVANT_TROPHY_FLOOR = 12000
+ALT_TROPHY_FLOOR = 5000
 
 
 def update_top_ladder(
@@ -208,7 +216,7 @@ def mark_player_scraped(
 
 def discover_from_opponents(
     session: Session,
-    min_trophies: int = 7000,
+    min_trophies: int = RELEVANT_TROPHY_FLOOR,
     max_players: int = 200,
 ) -> int:
     """Mine opponent tags from existing corpus battles and add to corpus.
@@ -225,12 +233,16 @@ def discover_from_opponents(
     Returns:
         Number of new players added.
     """
-    # Find opponent tags not already in the corpus
-    existing_tags = set(
-        row[0] for row in session.execute(
-            select(PlayerCorpus.player_tag)
+    # Map existing tags -> (active, source). Lets us REACTIVATE a player that
+    # corpus_hygiene previously parked as 'dormant'/'dead' but who is now
+    # reappearing as an opponent (i.e. they're playing again) — self-healing.
+    # Bots are never revived.
+    existing = {
+        row[0]: (row[1], row[2])
+        for row in session.execute(
+            select(PlayerCorpus.player_tag, PlayerCorpus.active, PlayerCorpus.source)
         ).all()
-    )
+    }
 
     # Get opponent tags from corpus battles, with their names and trophy data
     rows = session.execute(
@@ -248,13 +260,27 @@ def discover_from_opponents(
     ).all()
 
     added = 0
+    reactivated = 0
     for row in rows:
         if added >= max_players:
             break
 
         tag = row.opponent_tag
-        if not tag or tag in existing_tags:
+        if not tag:
             continue
+        if tag in existing:
+            act, src = existing[tag]
+            # Revive a parked real player ONLY if they're reappearing at/above
+            # the relevant tier (climbers come back; sub-tier and bots don't).
+            if (act == 0 and src in ("dormant", "dead", "below_tier")
+                    and (row.max_trophies or 0) >= min_trophies):
+                session.execute(
+                    update(PlayerCorpus)
+                    .where(PlayerCorpus.player_tag == tag)
+                    .values(active=1, source="network")
+                )
+                reactivated += 1
+            continue  # already tracked (active / bot / just-revived) — don't re-add
 
         # Trophy filter (0 means unknown — include those too since
         # Path of Legend uses a different rating scale)
@@ -277,10 +303,155 @@ def discover_from_opponents(
         select(func.count()).select_from(PlayerCorpus).where(PlayerCorpus.active == 1)
     ) or 0
     logger.info(
-        "Network discovery: %d new players from opponent tags (%d total active).",
-        added, total_corpus,
+        "Network discovery: %d new, %d reactivated from opponent tags (%d total active).",
+        added, reactivated, total_corpus,
     )
     return added
+
+
+def corpus_hygiene(
+    session: Session,
+    api: ClashRoyaleAPI,
+    dormant_days: int = 14,
+    min_trophy: int = RELEVANT_TROPHY_FLOOR,
+    bot_eff_max: float = 0.3,
+    bot_min_battles: int = 10000,
+    cache_path: str = "/app/data/corpus_enrichment.pkl",
+) -> dict:
+    """Periodic corpus tidy — wired to ``--prune-corpus`` (weekly cron).
+
+    Keeps the tracking list lean so the FIFO scraper re-polls the survivors
+    more often (higher captured-games-per-player density). Three reversible
+    passes; ``source='priority'`` is never touched:
+
+    1. **Enrich** new active players with battleCount/bestTrophies/clan from
+       ``/players`` (cached — only never-seen tags cost an API call).
+    2. **Bots**: deactivate accounts that grind without progressing — high
+       battleCount, low ``best/battleCount`` efficiency, *and* clanless (the
+       clanless gate spares legit clanned grinders). ``source='bot'`` is
+       permanent (never re-discovered).
+    3. **Dormant**: deactivate accounts with no captured game in
+       ``dormant_days``. ``source='dormant'`` — :func:`discover_from_opponents`
+       revives them automatically if they start playing again.
+
+    Returns counts: ``enriched``, ``bots``, ``dormant``, ``active``.
+    """
+    cache: dict = {}
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, "rb") as f:
+                cache = pickle.load(f)
+        except Exception:
+            cache = {}
+
+    active = [r[0] for r in session.execute(
+        select(PlayerCorpus.player_tag).where(PlayerCorpus.active == 1)
+    )]
+
+    # 1. enrich never-seen active players
+    enriched = 0
+    for tag in active:
+        if tag in cache:
+            continue
+        try:
+            p = api.get_player(tag)
+            cache[tag] = {
+                "bc": p.get("battleCount", 0),
+                "best": p.get("bestTrophies", 0),
+                "clan": (p.get("clan") or {}).get("tag"),
+            }
+        except (APIError, Exception):
+            cache[tag] = None
+        enriched += 1
+    try:
+        with open(cache_path, "wb") as f:
+            pickle.dump(cache, f)
+    except Exception:
+        logger.warning("corpus_hygiene: could not persist enrichment cache")
+
+    # 2. bot prune (clanless + high-volume + low progression efficiency)
+    def _is_bot(tag: str) -> bool:
+        v = cache.get(tag)
+        if not v or not v.get("bc"):
+            return False
+        return (v["bc"] >= bot_min_battles
+                and (v["best"] / v["bc"]) <= bot_eff_max
+                and v["clan"] is None)
+
+    bots = [t for t in active if _is_bot(t)]
+    bot_n = 0
+    for i in range(0, len(bots), 500):
+        res = session.execute(
+            update(PlayerCorpus)
+            .where(PlayerCorpus.player_tag.in_(bots[i:i + 500]))
+            .where(PlayerCorpus.source != "priority")
+            .values(active=0, source="bot")
+        )
+        bot_n += res.rowcount or 0
+    if bots:
+        session.commit()
+
+    # 3. dormant prune (latest captured game older than the cutoff)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=dormant_days)
+    dormant = [r[0] for r in session.execute(text("""
+        SELECT pc.player_tag
+        FROM player_corpus pc
+        JOIN (
+            SELECT player_tag, max(battle_time) AS last_game
+            FROM battles WHERE corpus = 'top_ladder'
+            GROUP BY player_tag
+        ) la ON la.player_tag = pc.player_tag
+        WHERE pc.active = 1 AND pc.source <> 'priority' AND la.last_game < :cutoff
+    """), {"cutoff": cutoff})]
+    dorm_n = 0
+    for i in range(0, len(dormant), 500):
+        res = session.execute(
+            update(PlayerCorpus)
+            .where(PlayerCorpus.player_tag.in_(dormant[i:i + 500]))
+            .values(active=0, source="dormant")
+        )
+        dorm_n += res.rowcount or 0
+    if dormant:
+        session.commit()
+
+    # 4. trophy-tier prune: drop sub-tier players (median Trophy-Road standing in
+    # [ALT_TROPHY_FLOOR, min_trophy)) — no longer relevant to a min_trophy+ main.
+    # Uses median over PvP games only (ranked ratings are seasonally reset).
+    # Self-heals: a climber reappears as a >=min_trophy opponent and discovery
+    # reactivates them.
+    tier_n = 0
+    if min_trophy and min_trophy > 0:
+        below = [r[0] for r in session.execute(text("""
+            SELECT pc.player_tag
+            FROM player_corpus pc
+            JOIN (
+                SELECT player_tag,
+                       percentile_cont(0.5) within group (order by player_starting_trophies) tr
+                FROM battles
+                WHERE corpus = 'top_ladder' AND battle_type = 'PvP'
+                  AND player_starting_trophies > 0
+                GROUP BY player_tag
+            ) pt ON pt.player_tag = pc.player_tag
+            WHERE pc.active = 1 AND pc.source <> 'priority'
+              AND pt.tr >= :lo AND pt.tr < :hi
+        """), {"lo": ALT_TROPHY_FLOOR, "hi": min_trophy})]
+        for i in range(0, len(below), 500):
+            res = session.execute(
+                update(PlayerCorpus)
+                .where(PlayerCorpus.player_tag.in_(below[i:i + 500]))
+                .values(active=0, source="below_tier")
+            )
+            tier_n += res.rowcount or 0
+        if below:
+            session.commit()
+
+    remaining = session.scalar(
+        select(func.count()).select_from(PlayerCorpus).where(PlayerCorpus.active == 1)
+    ) or 0
+    logger.info("corpus_hygiene: enriched %d, -%d bots, -%d dormant, -%d sub-tier, %d active remain",
+                enriched, bot_n, dorm_n, tier_n, remaining)
+    return {"enriched": enriched, "bots": bot_n, "dormant": dorm_n,
+            "below_tier": tier_n, "active": remaining}
 
 
 def discover_nemeses(

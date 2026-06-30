@@ -145,6 +145,21 @@ clash-stats --refresh-dims ${DB_FLAG}
 EOF
 chmod +x /app/refresh_dims.sh
 
+# Weekly corpus hygiene: enrich + deactivate bots and dormant accounts so the
+# FIFO scraper re-polls the live core more often (higher games/player density).
+cat > /app/prune_corpus.sh << EOF
+#!/bin/sh
+exec flock -n ${LOCKDIR}/prune_corpus.lock sh -c '
+cd /app
+export CR_API_KEY="${CR_API_KEY}"
+[ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
+[ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
+export PYTHONUNBUFFERED=1
+clash-stats --prune-corpus ${DB_FLAG}
+' || echo "prune_corpus: previous run still active, skipping"
+EOF
+chmod +x /app/prune_corpus.sh
+
 # (The corpus_replays.sh wrapper is defined further below — the legacy
 # Playwright-based version that lived here was dead code, overwritten by the
 # HTTP-path version at write time.)

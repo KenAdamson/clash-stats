@@ -163,6 +163,12 @@ Environment variables:
                         help="Add opponents you've lost to into the corpus")
     parser.add_argument("--corpus-combined", action="store_true",
                         help="Combined battle+replay scrape (chains CR API and RoyaleAPI per player)")
+    parser.add_argument("--prune-corpus", action="store_true",
+                        help="Corpus hygiene: enrich + deactivate bots and dormant accounts (weekly)")
+    parser.add_argument("--dormant-days", type=int, default=14,
+                        help="Days since last captured game before an account is pruned as dormant")
+    parser.add_argument("--min-trophy", type=int, default=12000,
+                        help="Prune corpus players below this Trophy-Road floor (sub-competitive tier)")
     parser.add_argument("--sim-matchups", action="store_true",
                         help="Run Monte Carlo matchup analysis (ADR-002)")
     parser.add_argument("--sim-interactions", action="store_true",
@@ -957,6 +963,18 @@ Environment variables:
                   f"{result.get('fingerprints', 0)} pilot fingerprints, "
                   f"{result.get('behavioral_matches', 0)} behavioral matches")
 
+        if args.prune_corpus:
+            if not api_key:
+                print("Error: --api-key required for --prune-corpus")
+                return 1
+            from tracker.corpus import corpus_hygiene
+            api = ClashRoyaleAPI(api_key, base_url=api_url)
+            r = corpus_hygiene(session, api, dormant_days=args.dormant_days,
+                               min_trophy=args.min_trophy)
+            print(f"  ✓ Corpus hygiene: enriched {r['enriched']}, "
+                  f"-{r['bots']} bots, -{r['dormant']} dormant, "
+                  f"-{r['below_tier']} sub-tier → {r['active']} active")
+
         if args.pilot_match:
             from tracker.ml.pilot_fingerprint import nearest_pilots
             tag = analytics._normalize_tag(args.pilot_match)
@@ -990,7 +1008,7 @@ Environment variables:
             args.promote_model, args.list_models,
             args.manifold, args.train_activity_model,
             args.matchup_dive, args.broken_cycle, args.mark_stale_replays,
-            args.refresh_dims, args.pilot_match,
+            args.refresh_dims, args.pilot_match, args.prune_corpus,
         ])
         if not has_action:
             parser.print_help()

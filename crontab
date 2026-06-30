@@ -27,6 +27,11 @@ PATH=/usr/local/bin:/usr/bin:/bin
 # rebuild player_dim. Non-destructive (harvest upserts, resolve updates) —
 # verified live 2026-06-14.
 30 3 * * * root /app/refresh_dims.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
+# Weekly corpus hygiene (Sunday 5am UTC): enrich new players, deactivate bots
+# (clanless + grind-without-progression) and dormant accounts so the scraper
+# re-polls the live core more often. Reversible; dormant accounts self-heal via
+# network discovery when they play again.
+0 5 * * 0 root /app/prune_corpus.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 
 # --- ML training ---
 # Incremental WP inference: process new games every 5 min (offset from corpus)
