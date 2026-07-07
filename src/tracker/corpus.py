@@ -24,6 +24,15 @@ logger = logging.getLogger(__name__)
 RELEVANT_TROPHY_FLOOR = 12000
 ALT_TROPHY_FLOOR = 5000
 
+# Progression badges every account accrues passively; anything else that isn't
+# a Mastery* badge is an event/mode badge (seasonal events, 2v2, Draft, ...).
+# Fleet bots grind one mode forever and never touch events — see the
+# badge-sheet fingerprint calibration (2026-07-06).
+_CORE_BADGES = frozenset({
+    "YearsPlayed", "BattleWins", "ClanWarWins", "ClanDonations",
+    "CollectionLevel", "EmoteCollection", "BannerCollection", "ClanWarsVeteran",
+})
+
 
 def update_top_ladder(
     session: Session,
@@ -316,6 +325,10 @@ def corpus_hygiene(
     min_trophy: int = RELEVANT_TROPHY_FLOOR,
     bot_eff_max: float = 0.3,
     bot_min_battles: int = 10000,
+    badge_bot_eff_max: float = 0.85,
+    badge_bot_min_battles: int = 5000,
+    badge_bot_max_badges: int = 30,
+    badge_backfill_max: int = 5000,
     cache_path: str = "/app/data/corpus_enrichment.pkl",
 ) -> dict:
     """Periodic corpus tidy — wired to ``--prune-corpus`` (weekly cron).
@@ -330,6 +343,16 @@ def corpus_hygiene(
        battleCount, low ``best/battleCount`` efficiency, *and* clanless (the
        clanless gate spares legit clanned grinders). ``source='bot'`` is
        permanent (never re-discovered).
+
+       A second, badge-corroborated pass covers the efficiency gray zone
+       (``bot_eff_max`` < eff <= ``badge_bot_eff_max``) where grinding humans
+       and bots are indistinguishable by efficiency alone: a clanless
+       gray-zone account is a bot if its badge sheet is skeletal — <=
+       ``badge_bot_max_badges`` badges, or no YearsPlayed badge with <=2
+       event badges. Calibration (2026-07-06, n=60/59): hits 40% of
+       known-fleet accounts (the young-generation subtype) at 0-2% human
+       false-positive rate; humans inevitably accrue event badges and age
+       into YearsPlayed.
     3. **Dormant**: deactivate accounts with no captured game in
        ``dormant_days``. ``source='dormant'`` — :func:`discover_from_opponents`
        revives them automatically if they start playing again.
@@ -348,20 +371,37 @@ def corpus_hygiene(
         select(PlayerCorpus.player_tag).where(PlayerCorpus.active == 1)
     )]
 
-    # 1. enrich never-seen active players
+    # 1. enrich active players: never-seen tags, plus pre-badge-era entries
+    # that lack badge fields (self-healing backfill, capped per run so a large
+    # legacy cache amortizes over several weekly runs instead of one marathon).
+    # Dead entries (None = profile fetch failed permanently) are not retried.
     enriched = 0
+    backfilled = 0
     for tag in active:
-        if tag in cache:
+        v = cache.get(tag)
+        if tag in cache and (v is None or "n_badges" in v):
             continue
+        if tag in cache:
+            if backfilled >= badge_backfill_max:
+                continue
+            backfilled += 1
         try:
             p = api.get_player(tag)
+            badge_names = [b.get("name", "") for b in (p.get("badges") or [])]
             cache[tag] = {
                 "bc": p.get("battleCount", 0),
                 "best": p.get("bestTrophies", 0),
                 "clan": (p.get("clan") or {}).get("tag"),
+                "n_badges": len(badge_names),
+                "has_years_played": "YearsPlayed" in badge_names,
+                "n_event_badges": sum(
+                    1 for n in badge_names
+                    if not n.startswith("Mastery") and n not in _CORE_BADGES
+                ),
             }
         except (APIError, Exception):
-            cache[tag] = None
+            # keep a stale-but-real entry over clobbering it with None
+            cache.setdefault(tag, None)
         enriched += 1
     try:
         with open(cache_path, "wb") as f:
@@ -378,7 +418,23 @@ def corpus_hygiene(
                 and (v["best"] / v["bc"]) <= bot_eff_max
                 and v["clan"] is None)
 
-    bots = [t for t in active if _is_bot(t)]
+    # 2b. badge-corroborated pass for the efficiency gray zone: skeletal badge
+    # sheets condemn accounts whose efficiency alone can't (see docstring).
+    # Entries enriched before badge fields existed lack "n_badges" — skipped
+    # until their next re-enrichment.
+    def _is_badge_bot(tag: str) -> bool:
+        v = cache.get(tag)
+        if not v or not v.get("bc") or "n_badges" not in v:
+            return False
+        if v["clan"] is not None or v["bc"] < badge_bot_min_battles:
+            return False
+        eff = v["best"] / v["bc"]
+        if not (bot_eff_max < eff <= badge_bot_eff_max):
+            return False
+        return (v["n_badges"] <= badge_bot_max_badges
+                or (not v["has_years_played"] and v["n_event_badges"] <= 2))
+
+    bots = [t for t in active if _is_bot(t) or _is_badge_bot(t)]
     bot_n = 0
     for i in range(0, len(bots), 500):
         res = session.execute(
