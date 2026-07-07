@@ -6,6 +6,9 @@ then scores corpus players so the scrape queue processes likely-active players f
 
 import logging
 import math
+import os
+import pickle
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -30,6 +33,14 @@ def _cyclical_encode(value: float, period: float) -> tuple[float, float]:
 def _build_player_profiles(session: Session) -> dict[str, dict]:
     """Build per-player activity profiles from battle history.
 
+    The two battle-table aggregates below scan the full battles table
+    (~55s combined) and were 92% of steady-state DB time when recomputed on
+    every scrape cycle (~2.5 min). Activity histograms drift on a scale of
+    days, so the heavy part is cached with a TTL
+    (``ACTIVITY_PROFILE_CACHE_TTL``, default 1800s); the cheap, freshness-
+    sensitive ``player_corpus`` merge (last_scraped) always runs live.
+    Delete ``data/activity_profiles_cache.pkl`` to force a rebuild.
+
     Returns:
         Dict mapping player_tag -> {
             'hourly_counts': dict[int, int],  # hour_utc -> battle count
@@ -41,6 +52,65 @@ def _build_player_profiles(session: Session) -> dict[str, dict]:
             'first_battle_time': datetime | None,
         }
     """
+    cached = _load_profile_cache()
+    if cached is not None:
+        profiles = cached
+    else:
+        profiles = _build_heavy_profiles(session)
+        _save_profile_cache(profiles)
+
+    # Get last_scraped and trophy info from player_corpus (cheap, always live)
+    corpus_rows = session.execute(
+        select(
+            PlayerCorpus.player_tag,
+            PlayerCorpus.last_scraped,
+            PlayerCorpus.trophy_range_low,
+            PlayerCorpus.trophy_range_high,
+        ).where(PlayerCorpus.active == 1)
+    ).all()
+
+    for row in corpus_rows:
+        tag = row[0]
+        if tag in profiles:
+            profiles[tag]['last_scraped'] = row[1]
+            low = row[2] or 0
+            high = row[3] or 0
+            profiles[tag]['trophy_mid'] = (low + high) / 2.0 if (low or high) else None
+
+    return profiles
+
+
+_PROFILE_CACHE_PATH = Path("data/activity_profiles_cache.pkl")
+
+
+def _profile_cache_ttl() -> int:
+    return int(os.environ.get("ACTIVITY_PROFILE_CACHE_TTL", "1800"))
+
+
+def _load_profile_cache() -> Optional[dict]:
+    """Return cached heavy profiles if fresh, else None."""
+    try:
+        if time.time() - _PROFILE_CACHE_PATH.stat().st_mtime < _profile_cache_ttl():
+            with open(_PROFILE_CACHE_PATH, "rb") as f:
+                return pickle.load(f)
+    except (OSError, pickle.UnpicklingError, EOFError):
+        pass
+    return None
+
+
+def _save_profile_cache(profiles: dict) -> None:
+    try:
+        _PROFILE_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _PROFILE_CACHE_PATH.with_suffix(".tmp")
+        with open(tmp, "wb") as f:
+            pickle.dump(profiles, f)
+        tmp.replace(_PROFILE_CACHE_PATH)
+    except OSError:
+        logger.warning("Could not persist activity profile cache")
+
+
+def _build_heavy_profiles(session: Session) -> dict[str, dict]:
+    """The full-table aggregates: hourly/dow histograms + first/last battle."""
     # Get per-player hourly + dow histograms from battle_time.
     # battle_time is a DATETIME column — EXTRACT() works on both PostgreSQL and SQLite.
     # ISODOW: 1=Monday ... 7=Sunday (ISO 8601).
@@ -116,23 +186,11 @@ def _build_player_profiles(session: Session) -> dict[str, dict]:
                     first_bt = first_bt.replace(tzinfo=timezone.utc)
                 profiles[tag]['first_battle_time'] = first_bt
 
-    # Get last_scraped and trophy info from player_corpus
-    corpus_rows = session.execute(
-        select(
-            PlayerCorpus.player_tag,
-            PlayerCorpus.last_scraped,
-            PlayerCorpus.trophy_range_low,
-            PlayerCorpus.trophy_range_high,
-        ).where(PlayerCorpus.active == 1)
-    ).all()
-
-    for row in corpus_rows:
-        tag = row[0]
-        if tag in profiles:
-            profiles[tag]['last_scraped'] = row[1]
-            low = row[2] or 0
-            high = row[3] or 0
-            profiles[tag]['trophy_mid'] = (low + high) / 2.0 if (low or high) else None
+    # last_scraped / trophy_mid are merged live by _build_player_profiles;
+    # default them here so cached profiles always carry the keys.
+    for p in profiles.values():
+        p.setdefault('last_scraped', None)
+        p.setdefault('trophy_mid', None)
 
     return profiles
 

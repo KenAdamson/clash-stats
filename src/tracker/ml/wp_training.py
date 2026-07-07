@@ -31,6 +31,32 @@ logger = logging.getLogger(__name__)
 
 WP_MODEL_VERSION = "wp-v1"
 
+# Watermark for incremental WP inference: highest replay_events.id already
+# examined. Keyed on event-row ARRIVAL (autoincrement id), not battle_time —
+# replays land hours/days after their battle, so a time-based watermark would
+# skip late arrivals. Overlap re-examines a tail slice each run to absorb
+# out-of-order commits near the previous max; the game_wp_summary anti-join
+# makes reprocessing idempotent. Delete the file to force one full-scan run.
+WP_WATERMARK_PATH = Path("data/wp_infer_watermark.txt")
+WP_WATERMARK_OVERLAP = 50_000
+
+
+def _read_wp_watermark(path: Path = WP_WATERMARK_PATH) -> Optional[int]:
+    """Return the stored watermark id, or None for a full-scan run."""
+    try:
+        return int(path.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _write_wp_watermark(value: int, path: Path = WP_WATERMARK_PATH) -> None:
+    """Persist the watermark; failure is non-fatal (next run rescans more)."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(value))
+    except OSError:
+        logger.warning("Could not persist WP inference watermark to %s", path)
+
 
 def _resolve_wp_path(session: Session, model_dir: Path) -> Optional[Path]:
     """Resolve the production WP model path.
@@ -604,25 +630,63 @@ def infer_wp_incremental(session: Session, model_dir: Optional[Path] = None) -> 
     if not wp_path:
         return -1
 
-    # Find games with replay events but no WP summary
-    missing = session.execute(
-        sa_text("""
-            SELECT b.battle_id
-            FROM battles b
-            JOIN (
-                SELECT battle_id FROM replay_events
-                WHERE card_name != '_invalid'
-                GROUP BY battle_id HAVING COUNT(*) >= :min_events
-            ) re_counts ON re_counts.battle_id = b.battle_id
-            LEFT JOIN game_wp_summary gws ON gws.battle_id = b.battle_id
-            WHERE b.battle_type = 'PvP' AND b.result IN ('win', 'loss')
-              AND gws.battle_id IS NULL
-            ORDER BY b.battle_time
-        """),
-        {"min_events": MIN_EVENTS},
-    ).scalars().all()
+    # Find games with replay events but no WP summary. With a watermark this
+    # only examines battles whose replay events arrived since the last run
+    # (id-range scan on the replay_events PK); without one (first run, or
+    # after deleting the watermark file) it falls back to the full aggregate.
+    watermark = _read_wp_watermark()
+    new_watermark = session.execute(
+        sa_text("SELECT COALESCE(MAX(id), 0) FROM replay_events")
+    ).scalar() or 0
+
+    if watermark is not None:
+        # LATERAL keeps the event-count check as per-battle index probes;
+        # an IN-subquery form here regresses to a merge join over the whole
+        # replay_events table (measured: 68s vs 0.6s on live data).
+        missing = session.execute(
+            sa_text("""
+                WITH new_battles AS (
+                    SELECT DISTINCT battle_id FROM replay_events
+                    WHERE id > :wm
+                )
+                SELECT b.battle_id
+                FROM new_battles nb
+                JOIN battles b ON b.battle_id = nb.battle_id
+                LEFT JOIN game_wp_summary gws ON gws.battle_id = b.battle_id
+                CROSS JOIN LATERAL (
+                    SELECT COUNT(*) AS c FROM replay_events re
+                    WHERE re.battle_id = nb.battle_id
+                      AND re.card_name != '_invalid'
+                ) rc
+                WHERE b.battle_type = 'PvP' AND b.result IN ('win', 'loss')
+                  AND gws.battle_id IS NULL
+                  AND rc.c >= :min_events
+                ORDER BY b.battle_time
+            """),
+            {"min_events": MIN_EVENTS,
+             "wm": max(0, watermark - WP_WATERMARK_OVERLAP)},
+        ).scalars().all()
+    else:
+        logger.info("No WP watermark — running full delta scan once")
+        missing = session.execute(
+            sa_text("""
+                SELECT b.battle_id
+                FROM battles b
+                JOIN (
+                    SELECT battle_id FROM replay_events
+                    WHERE card_name != '_invalid'
+                    GROUP BY battle_id HAVING COUNT(*) >= :min_events
+                ) re_counts ON re_counts.battle_id = b.battle_id
+                LEFT JOIN game_wp_summary gws ON gws.battle_id = b.battle_id
+                WHERE b.battle_type = 'PvP' AND b.result IN ('win', 'loss')
+                  AND gws.battle_id IS NULL
+                ORDER BY b.battle_time
+            """),
+            {"min_events": MIN_EVENTS},
+        ).scalars().all()
 
     if not missing:
+        _write_wp_watermark(new_watermark)
         return 0
 
     device = _detect_device()
@@ -651,6 +715,7 @@ def infer_wp_incremental(session: Session, model_dir: Optional[Path] = None) -> 
     missing_set = set(missing)
     dataset = SequenceDataset(session, vocab, battle_ids=missing)
     if not dataset:
+        _write_wp_watermark(new_watermark)
         return 0
 
     battle_ids = list(missing)[:len(dataset)]
@@ -666,6 +731,9 @@ def infer_wp_incremental(session: Session, model_dir: Optional[Path] = None) -> 
     processed = trainer.run_inference(
         session, dataset, battle_ids, vocab, calibrator=calibrator,
     )
+    # Advance the watermark only after inference committed — a crash before
+    # this point just means the next run re-examines the same id range.
+    _write_wp_watermark(new_watermark)
     logger.info("Incremental WP inference: %d new games processed", processed)
     return processed
 

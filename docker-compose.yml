@@ -18,10 +18,10 @@ services:
       - POSTGRES_PASSWORD=${DB_PASSWORD}
     command: >
       -c shared_buffers=4GB
-      -c work_mem=128MB
+      -c work_mem=64MB
       -c maintenance_work_mem=2GB
       -c effective_cache_size=32GB
-      -c shared_preload_libraries=vchord.so
+      -c shared_preload_libraries=vchord.so,pg_stat_statements
     networks:
       - media-network
     healthcheck:
