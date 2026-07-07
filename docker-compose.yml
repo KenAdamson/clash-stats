@@ -153,6 +153,9 @@ services:
     build: docker/samv2
     container_name: cr-samv2
     restart: "no"
+    environment:
+      # large (validated) or small (1.74x faster, pending real-game validation)
+      - SAMV2_MODEL_SIZE=${SAMV2_MODEL_SIZE:-large}
     devices:
       - /dev/dri:/dev/dri
     group_add:

@@ -11,6 +11,7 @@ Supports concurrent tracking via a predictor pool.
 """
 
 import asyncio
+import contextlib
 import logging
 import os
 import queue
@@ -24,9 +25,14 @@ os.environ["IPEX_OPTIMIZE_TRANSFORMERS"] = "0"
 import numpy as np
 import torch
 
-# Disable IPEX's BF16 fast math path
-if hasattr(torch, "xpu"):
-    torch.xpu.set_fp32_math_mode(torch.xpu.FP32MathMode.FP32)
+# Disable the BF16 fast math path. set_fp32_math_mode is IPEX-injected and
+# absent on native torch XPU builds, where BF16 auto-promotion doesn't happen.
+def _force_fp32_math() -> None:
+    xpu = getattr(torch, "xpu", None)
+    if xpu is not None and hasattr(xpu, "set_fp32_math_mode"):
+        xpu.set_fp32_math_mode(xpu.FP32MathMode.FP32)
+
+_force_fp32_math()
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -110,18 +116,33 @@ async def load_model():
         device = torch.device("cpu")
         logger.info("Using CPU")
 
+    # Hiera-Small is 1.74x faster than Large on this XPU (190 vs 330 ms/frame,
+    # measured 2026-07-02 on the native torch-xpu stack — the old "Small ==
+    # Large on XPU" finding only held on the overhead-bound IPEX stack).
+    # Large stays the default until Small is validated on real game footage.
+    model_size = os.environ.get("SAMV2_MODEL_SIZE", "large").lower()
+    model_cfg, ckpt = {
+        "large": ("configs/sam2.1/sam2.1_hiera_l.yaml",
+                  "/app/checkpoints/sam2.1_hiera_large.pt"),
+        "small": ("configs/sam2.1/sam2.1_hiera_s.yaml",
+                  "/app/checkpoints/sam2.1_hiera_small.pt"),
+    }[model_size]
+
     try:
         from sam2.build_sam import build_sam2_video_predictor
 
         for i in range(POOL_SIZE):
             pred = build_sam2_video_predictor(
-                "configs/sam2.1/sam2.1_hiera_l.yaml",
-                ckpt_path="/app/checkpoints/sam2.1_hiera_large.pt",
+                model_cfg,
+                ckpt_path=ckpt,
                 device=device,
             )
             pred = pred.float()
             predictor_pool.put(pred)
-            logger.info("Loaded predictor %d/%d (float32)", i + 1, POOL_SIZE)
+            logger.info(
+                "Loaded predictor %d/%d (%s, float32 weights)",
+                i + 1, POOL_SIZE, model_size,
+            )
 
         logger.info(
             "SAMv2 predictor pool ready: %d instances on %s",
@@ -156,18 +177,27 @@ def _do_tracking(predictor, req: TrackRequest) -> TrackResponse:
 
     t0 = time.monotonic()
 
-    if hasattr(torch, "xpu"):
-        torch.xpu.set_fp32_math_mode(torch.xpu.FP32MathMode.FP32)
-
-    with torch.inference_mode():
+    # bf16 autocast: ~1.3x on XPU (XMX), identical tracking accuracy (verified
+    # 2026-07-02: err 1.4px both dtypes on synthetic ground truth).
+    autocast_ctx = (
+        torch.autocast("xpu", dtype=torch.bfloat16)
+        if device is not None and device.type == "xpu"
+        else contextlib.nullcontext()
+    )
+    with torch.inference_mode(), autocast_ctx:
+        # offload_video_to_cpu stays TRUE: keeping the window on-GPU would be
+        # ~60ms/frame faster, but it requires a single ~1GB allocation that
+        # fails under this host's Level Zero small-BAR ceiling — and the
+        # failed alloc poisons the driver context (even conv2d then dies with
+        # UR_RESULT_ERROR_OUT_OF_HOST_MEMORY; same family as the TCN
+        # batch-1024 ceiling). async_loading_frames must also stay OFF: its
+        # decode thread issues XPU uploads concurrently with compute, and
+        # concurrent XPU streams contend badly on this card (same reason
+        # parallel predictor sessions are 3x slower).
         state = predictor.init_state(
             video_path=str(frame_dir),
             offload_video_to_cpu=True,
         )
-        for key in state.get("cached_features", {}):
-            feat = state["cached_features"][key]
-            if isinstance(feat, torch.Tensor) and feat.dtype == torch.bfloat16:
-                state["cached_features"][key] = feat.float()
 
         # Register each prompt at its spawn frame
         for prompt in req.prompts:
@@ -226,21 +256,29 @@ def _do_tracking(predictor, req: TrackRequest) -> TrackResponse:
                 if frame_idx < spawn_frame_idx.get(obj_id, 0):
                     continue
 
-                mask_np = mask.cpu().numpy().squeeze()
-
-                ys, xs = np.where(mask_np > 0.5)
-                if len(xs) == 0:
+                # Postprocess on-GPU: the old path shipped the full-res logits
+                # to CPU (12MB D2H/frame) and ran numpy sigmoid over 3M pixels
+                # (~52ms/frame); this reduces to bbox+confidence on the GPU and
+                # transfers 5 floats (~11ms/frame).
+                mask_t = mask.squeeze()
+                pos = mask_t > 0.5
+                idx = pos.nonzero()
+                if idx.shape[0] == 0:
                     continue
 
-                mask_probs = 1.0 / (1.0 + np.exp(-mask_np))
-                confidence = float(mask_probs[mask_probs > 0.5].mean()) if (mask_probs > 0.5).any() else 0.0
+                stats = torch.stack([
+                    idx[:, 1].min().float(), idx[:, 0].min().float(),
+                    idx[:, 1].max().float(), idx[:, 0].max().float(),
+                    torch.sigmoid(mask_t[pos]).mean().float(),
+                ]).cpu()
+                confidence = float(stats[4])
                 if confidence < req.confidence_threshold:
                     continue
 
-                x1 = float(xs.min()) / img_w
-                y1 = float(ys.min()) / img_h
-                x2 = float(xs.max()) / img_w
-                y2 = float(ys.max()) / img_h
+                x1 = float(stats[0]) / img_w
+                y1 = float(stats[1]) / img_h
+                x2 = float(stats[2]) / img_w
+                y2 = float(stats[3]) / img_h
 
                 bbox_area = (x2 - x1) * (y2 - y1)
                 if bbox_area > 0.15:
@@ -259,6 +297,12 @@ def _do_tracking(predictor, req: TrackRequest) -> TrackResponse:
                     card_name=prompt.card_name if prompt else "unknown",
                     team=prompt.team if prompt else "unknown",
                 ))
+
+    # Release the ~1GB per-request video tensor back to the driver so the
+    # next request's single big allocation can't hit the small-BAR ceiling.
+    del state
+    if hasattr(torch, "xpu"):
+        torch.xpu.empty_cache()
 
     elapsed = time.monotonic() - t0
     logger.info(
