@@ -160,6 +160,21 @@ clash-stats --prune-corpus ${DB_FLAG}
 EOF
 chmod +x /app/prune_corpus.sh
 
+# Rising-star sampler: re-run the top-of-band seed WITHOUT --reseed-archive so
+# newly-risen players get added to the active corpus while existing tracked
+# players stay (dormancy hygiene handles attrition). Keeps the corpus tracking
+# the current top-5%-of-band cohort as players climb through the bands.
+cat > /app/reseed_risers.sh << EOF
+#!/bin/sh
+exec flock -n ${LOCKDIR}/reseed_risers.lock sh -c '
+cd /app
+[ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
+export PYTHONUNBUFFERED=1
+clash-stats --reseed-top-of-band ${DB_FLAG}
+' || echo "reseed_risers: previous run still active, skipping"
+EOF
+chmod +x /app/reseed_risers.sh
+
 # (The corpus_replays.sh wrapper is defined further below — the legacy
 # Playwright-based version that lived here was dead code, overwritten by the
 # HTTP-path version at write time.)

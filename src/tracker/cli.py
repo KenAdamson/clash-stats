@@ -163,6 +163,10 @@ Environment variables:
                         help="Add opponents you've lost to into the corpus")
     parser.add_argument("--corpus-combined", action="store_true",
                         help="Combined battle+replay scrape (chains CR API and RoyaleAPI per player)")
+    parser.add_argument("--reseed-top-of-band", action="store_true",
+                        help="Seed corpus with top 5%% (by trophies) of each high ladder band")
+    parser.add_argument("--reseed-archive", action="store_true",
+                        help="With --reseed-top-of-band: deactivate non-seed active players (one-time reset; omit for periodic rising-star add)")
     parser.add_argument("--prune-corpus", action="store_true",
                         help="Corpus hygiene: enrich + deactivate bots and dormant accounts (weekly)")
     parser.add_argument("--dormant-days", type=int, default=14,
@@ -963,6 +967,12 @@ Environment variables:
                   f"{result.get('fingerprints', 0)} pilot fingerprints, "
                   f"{result.get('behavioral_matches', 0)} behavioral matches")
 
+        if args.reseed_top_of_band:
+            from tracker.corpus import reseed_top_of_band
+            r = reseed_top_of_band(session, archive=args.reseed_archive)
+            print(f"  ✓ Re-seed top-of-band: seed={r['seed']}, "
+                  f"activated={r['activated']}, archived={r['archived']}")
+
         if args.prune_corpus:
             if not api_key:
                 print("Error: --api-key required for --prune-corpus")
@@ -1009,6 +1019,7 @@ Environment variables:
             args.manifold, args.train_activity_model,
             args.matchup_dive, args.broken_cycle, args.mark_stale_replays,
             args.refresh_dims, args.pilot_match, args.prune_corpus,
+            args.reseed_top_of_band,
         ])
         if not has_action:
             parser.print_help()

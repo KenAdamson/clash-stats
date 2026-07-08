@@ -34,6 +34,132 @@ _CORE_BADGES = frozenset({
 })
 
 
+# Top-of-band re-seed (2026-07-08): corpus = top 5% (by trophies) of each
+# high ladder band, PvP-only. Rationale: bots park at each gate FLOOR, so the
+# top slice of each band is structurally bot-free and tracks the genuinely
+# skilled/climbing players; ladder (PvP) games have RoyaleAPI replays (ranked
+# does not) → high replay density. Opponents stay in-tier (trophy matchmaking)
+# so discovery converges rather than explodes.
+BAND_EDGES = (12000, 12500, 13000, 13500, 14000)
+TOP_OF_BAND_PCT = 0.05
+TOP_OF_BAND_RECENCY_DAYS = 14
+
+
+def select_top_of_band_tags(
+    session: Session,
+    pct: float = TOP_OF_BAND_PCT,
+    recency_days: int = TOP_OF_BAND_RECENCY_DAYS,
+) -> list[str]:
+    """Tags in the top ``pct`` by current trophies within each ladder band.
+
+    Uses each player's most recent PvP trophy observation from EITHER side of
+    a battle (so opponents we've only seen are eligible), within the recency
+    window. Returns the union across bands. Reused by the one-time re-seed and
+    the periodic rising-star sampler.
+    """
+    rows = session.execute(
+        text("""
+            WITH obs AS (
+                SELECT player_tag AS tag, player_starting_trophies AS tr,
+                       battle_time bt
+                FROM battles
+                WHERE battle_type='PvP'
+                  AND player_starting_trophies BETWEEN :lo AND :hi
+                  AND battle_time > now() - (:days || ' days')::interval
+                UNION ALL
+                SELECT opponent_tag, opponent_starting_trophies, battle_time
+                FROM battles
+                WHERE battle_type='PvP'
+                  AND opponent_starting_trophies BETWEEN :lo AND :hi
+                  AND opponent_tag IS NOT NULL
+                  AND battle_time > now() - (:days || ' days')::interval
+            ),
+            latest AS (
+                SELECT DISTINCT ON (tag) tag, tr, width_bucket(tr, :edges) band
+                FROM obs ORDER BY tag, bt DESC
+            ),
+            thresh AS (
+                SELECT band, percentile_cont(1 - :pct)
+                       WITHIN GROUP (ORDER BY tr) p
+                FROM latest GROUP BY band
+            )
+            SELECT l.tag FROM latest l JOIN thresh t ON l.band = t.band
+            WHERE l.tr >= t.p
+        """),
+        {
+            "lo": BAND_EDGES[0], "hi": BAND_EDGES[-1] - 1,
+            "days": str(recency_days), "pct": pct,
+            "edges": list(BAND_EDGES[1:-1]),
+        },
+    ).scalars().all()
+    return list(rows)
+
+
+def reseed_top_of_band(
+    session: Session,
+    pct: float = TOP_OF_BAND_PCT,
+    recency_days: int = TOP_OF_BAND_RECENCY_DAYS,
+    archive: bool = True,
+    protected_sources: tuple = ("nemesis", "priority", "watchlist"),
+) -> dict:
+    """Re-seed the active corpus to the top-of-band players.
+
+    Idempotent: upserts the seed as active ``source='top_ladder'``; when
+    ``archive`` is True, deactivates every currently-active player NOT in the
+    seed and NOT in ``protected_sources`` (source→'archived', reversible via
+    the pre-run snapshot; historical battles/replays untouched). Discovery
+    then re-grows the in-tier opponent set organically.
+    """
+    seed = set(select_top_of_band_tags(session, pct, recency_days))
+    if not seed:
+        return {"seed": 0, "activated": 0, "archived": 0}
+
+    # Archive FIRST (deactivate every active player except protected sources),
+    # THEN activate the seed — so stale players carrying any source, including
+    # a prior 'top_ladder', are correctly dropped unless they're in the fresh
+    # seed. Seed players re-activate in the next step regardless of prior state.
+    archived = 0
+    if archive:
+        res = session.execute(
+            update(PlayerCorpus)
+            .where(PlayerCorpus.active == 1)
+            .where(PlayerCorpus.source.notin_(protected_sources))
+            .values(active=0, source="archived")
+        )
+        archived = res.rowcount or 0
+        session.commit()
+
+    seed_list = list(seed)
+    activated = 0
+    for i in range(0, len(seed_list), 500):
+        chunk = seed_list[i:i + 500]
+        existing = {
+            r[0] for r in session.execute(
+                select(PlayerCorpus.player_tag)
+                .where(PlayerCorpus.player_tag.in_(chunk))
+            )
+        }
+        for tag in chunk:
+            if tag in existing:
+                session.execute(
+                    update(PlayerCorpus)
+                    .where(PlayerCorpus.player_tag == tag)
+                    .values(active=1, source="top_ladder")
+                )
+            else:
+                session.add(PlayerCorpus(
+                    player_tag=tag, source="top_ladder", active=1,
+                ))
+            activated += 1
+    session.commit()
+
+    logger.info(
+        "reseed_top_of_band: seed=%d activated=%d archived=%d",
+        len(seed), activated, archived,
+    )
+    return {"seed": len(seed), "activated": activated, "archived": archived}
+
+
 def update_top_ladder(
     session: Session,
     api: ClashRoyaleAPI,

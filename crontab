@@ -32,6 +32,9 @@ PATH=/usr/local/bin:/usr/bin:/bin
 # re-polls the live core more often. Reversible; dormant accounts self-heal via
 # network discovery when they play again.
 0 5 * * 0 root /app/prune_corpus.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
+# Rising-star sampler (Wed + Sun 8am UTC): add newly-risen top-5%-of-band
+# players to the tracked corpus (no archive; dormancy hygiene prunes attrition).
+0 8 * * 0,3 root /app/reseed_risers.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 
 # --- ML training ---
 # Incremental WP inference: process new games every 5 min (offset from corpus)
