@@ -120,6 +120,27 @@ def add_manual_player(
     return True
 
 
+def _log_polling_batch(scored: list[str], floor: list[str]) -> None:
+    """Append batch composition to a JSONL for scored-vs-floor yield A/B.
+
+    The 20% FIFO-floor slots inside every scored batch are a built-in
+    control group: joining these memberships against battles ingested in
+    the run window measures the model's real hit-rate lift, immune to
+    catch-up/transition effects. Measurement infrastructure only.
+    """
+    import json
+    from datetime import datetime, timezone
+    try:
+        with open("data/polling_batches.jsonl", "a") as f:
+            f.write(json.dumps({
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "scored": scored,
+                "floor": floor,
+            }) + "\n")
+    except OSError:
+        pass
+
+
 def get_corpus_players(
     session: Session,
     active_only: bool = True,
@@ -135,9 +156,15 @@ def get_corpus_players(
         active_only: Only return active players.
         source: Filter by source type.
         limit: Maximum players to return.
-        prioritize_active: If True and an activity model exists, sort by
-            P(has_new_battles) descending instead of FIFO. Priority/nemesis
-            players are still boosted to the top.
+        prioritize_active: If True and an activity model exists, select by
+            P(has_new_battles): score the FULL candidate pool, then take the
+            batch as ~80% top-scored + ~20% oldest-FIFO (exploration floor).
+            Scoring must happen BEFORE the limit — the original post-limit
+            reorder shuffled a batch whose membership FIFO had already fixed,
+            so the model influenced nothing (root of the polling-efficiency
+            gap found 2026-07-07). The FIFO floor guarantees every player is
+            still visited eventually, so a bad model can slow the queue but
+            never starve it. Priority-source players always lead the batch.
         model_dir: Directory containing trained ML models.
 
     Returns:
@@ -155,48 +182,55 @@ def get_corpus_players(
         PlayerCorpus.last_scraped.is_(None).desc(),
         PlayerCorpus.last_scraped.asc(),
     )
-    if limit:
+    if limit and not prioritize_active:
         stmt = stmt.limit(limit)
 
     players = list(session.scalars(stmt).all())
 
-    # ML-based reordering if requested and model exists
+    # Score-then-limit selection when requested and a model exists
     if prioritize_active and players:
         try:
             from tracker.ml.activity_model import score_corpus_players
             _mdir = model_dir or "data/ml_models"
-            logger.info("Activity model: scoring %d players...", len(players))
             scores = score_corpus_players(session, model_dir=_mdir)
             if scores is not None:
                 score_map = dict(scores)
 
-                # Partition: priority/nemesis players stay at the top
-                priority = [p for p in players if p.source in ("priority", "nemesis")]
-                rest = [p for p in players if p.source not in ("priority", "nemesis")]
-
-                # Sort non-priority players by activity score descending
-                rest.sort(
-                    key=lambda p: score_map.get(p.player_tag, 0.0),
+                priority = [p for p in players if p.source == "priority"]
+                rest = [p for p in players if p.source != "priority"]
+                by_score = sorted(
+                    rest, key=lambda p: score_map.get(p.player_tag, 0.0),
                     reverse=True,
                 )
 
-                players = priority + rest
-
-                # Log score distribution
-                if rest:
-                    rest_scores = [score_map.get(p.player_tag, 0.0) for p in rest]
-                    top_n = min(500, len(rest_scores))
-                    bot_n = min(500, len(rest_scores))
+                if limit and len(players) > limit:
+                    n_explore = max(1, int(limit * 0.2))
+                    n_scored = max(0, limit - len(priority) - n_explore)
+                    batch = list(priority) + by_score[:n_scored]
+                    chosen = {p.player_tag for p in batch}
+                    # exploration floor: oldest-FIFO among the not-yet-chosen
+                    # (`rest` still carries the SQL FIFO ordering)
+                    explore = [p for p in rest if p.player_tag not in chosen]
+                    batch += explore[:n_explore]
+                    players = batch[:limit]
                     logger.info(
-                        "Activity model: scored %d players — "
-                        "top %d have P(active) > %.2f, "
-                        "bottom %d < %.2f",
-                        len(rest_scores),
-                        top_n, rest_scores[top_n - 1] if top_n <= len(rest_scores) else 0.0,
-                        bot_n, rest_scores[-bot_n] if bot_n <= len(rest_scores) else 0.0,
+                        "Activity model: score-then-limit %d candidates -> "
+                        "%d batch (%d priority + %d scored + %d FIFO floor)",
+                        len(rest) + len(priority), len(players),
+                        len(priority), n_scored, min(n_explore, len(explore)),
                     )
+                    _log_polling_batch(
+                        scored=[p.player_tag for p in by_score[:n_scored]],
+                        floor=[p.player_tag for p in explore[:n_explore]],
+                    )
+                else:
+                    players = priority + by_score
         except Exception as e:
             logger.warning("Activity model scoring failed, using FIFO: %s", e)
+            if limit:
+                players = players[:limit]
+    elif prioritize_active and limit:
+        players = players[:limit]
 
     return players
 
@@ -335,7 +369,7 @@ def corpus_hygiene(
 
     Keeps the tracking list lean so the FIFO scraper re-polls the survivors
     more often (higher captured-games-per-player density). Three reversible
-    passes; ``source='priority'`` is never touched:
+    passes; ``source='priority'`` and ``source='watchlist'`` are never touched:
 
     1. **Enrich** new active players with battleCount/bestTrophies/clan from
        ``/players`` (cached — only never-seen tags cost an API call).
@@ -440,7 +474,7 @@ def corpus_hygiene(
         res = session.execute(
             update(PlayerCorpus)
             .where(PlayerCorpus.player_tag.in_(bots[i:i + 500]))
-            .where(PlayerCorpus.source != "priority")
+            .where(PlayerCorpus.source.notin_(("priority", "watchlist")))
             .values(active=0, source="bot")
         )
         bot_n += res.rowcount or 0
@@ -457,7 +491,7 @@ def corpus_hygiene(
             FROM battles WHERE corpus = 'top_ladder'
             GROUP BY player_tag
         ) la ON la.player_tag = pc.player_tag
-        WHERE pc.active = 1 AND pc.source <> 'priority' AND la.last_game < :cutoff
+        WHERE pc.active = 1 AND pc.source NOT IN ('priority', 'watchlist') AND la.last_game < :cutoff
     """), {"cutoff": cutoff})]
     dorm_n = 0
     for i in range(0, len(dormant), 500):
@@ -488,7 +522,7 @@ def corpus_hygiene(
                   AND player_starting_trophies > 0
                 GROUP BY player_tag
             ) pt ON pt.player_tag = pc.player_tag
-            WHERE pc.active = 1 AND pc.source <> 'priority'
+            WHERE pc.active = 1 AND pc.source NOT IN ('priority', 'watchlist')
               AND pt.tr >= :lo AND pt.tr < :hi
         """), {"lo": ALT_TROPHY_FLOOR, "hi": min_trophy})]
         for i in range(0, len(below), 500):

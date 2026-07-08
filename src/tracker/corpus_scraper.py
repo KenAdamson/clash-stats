@@ -96,6 +96,67 @@ def mark_stale_replays(session: Session, max_age_days: int = STALE_REPLAY_DAYS) 
         return 0
 
 
+def players_with_replay_inventory(
+    session: Session,
+    limit: int = 8,
+    window_hours: int = 14,
+) -> list:
+    """Active corpus players holding the most unfetched FRESH battles.
+
+    Ground-truth replay-job selection: the battles job has already ingested
+    everything, so the players worth visiting are exactly those with
+    ``replay_fetched=0`` battles young enough for RoyaleAPI to still serve.
+    The window must be SHORT (default 14h): RoyaleAPI only caches replays
+    near battle-time, so older unfetched stock is dead inventory — ranking
+    by a wide window aims the tap at unfetchable backlog (measured 07-08:
+    top "holders" with 40-66 stale-unfetched yielded 1-2 replays/visit
+    while being re-selected every run; 94/hr vs 234/hr under fresh-biased
+    breadth). Dead stock ages to replay_fetched=2 via mark_stale_replays.
+    Ordered by fresh-inventory size so each visit recovers the most.
+
+    Returns:
+        PlayerCorpus rows, largest unfetched inventory first.
+    """
+    from datetime import datetime, timedelta, timezone
+    from sqlalchemy import text as sa_text
+    from tracker.models import PlayerCorpus
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+    rows = session.execute(
+        sa_text("""
+            SELECT b.player_tag, COUNT(*) AS unfetched
+            FROM battles b
+            JOIN player_corpus pc
+              ON pc.player_tag = b.player_tag AND pc.active = 1
+            WHERE b.corpus = 'top_ladder'
+              AND b.battle_type = 'PvP'
+              AND b.replay_fetched = 0
+              AND b.battle_time > :cutoff
+            GROUP BY b.player_tag
+            ORDER BY COUNT(*) DESC
+            LIMIT :limit
+        """),
+        {"cutoff": cutoff, "limit": limit},
+    ).all()
+    if not rows:
+        return []
+    inventory = {tag: n for tag, n in rows}
+    players = (
+        session.query(PlayerCorpus)
+        .filter(PlayerCorpus.player_tag.in_(list(inventory)))
+        .all()
+    )
+    players.sort(key=lambda p: inventory.get(p.player_tag, 0), reverse=True)
+    logger.info(
+        "Replay inventory selection: %d players, %d unfetched battles "
+        "(top: %s with %d)",
+        len(players), sum(inventory.values()),
+        players[0].player_tag if players else "-",
+        inventory.get(players[0].player_tag, 0) if players else 0,
+    )
+    return players
+
+
 def scrape_corpus_battles(
     session: Session,
     api: ClashRoyaleAPI,
@@ -123,6 +184,14 @@ def scrape_corpus_battles(
     ) or 0
     CORPUS_PLAYERS_ACTIVE.set(total_active)
 
+    # FIFO breadth (reverted from score-then-limit 2026-07-08). At fixed poll
+    # throughput, sweeping all players in last-scraped order harvests each
+    # player's ACCUMULATED battle window (~25 cap) once per full cycle, which
+    # beats re-polling a narrow high-scored set that has only banked 2-4
+    # battles since its last visit. The activity model is also trained on a
+    # rotted population (25% deactivated, 31% dead 7d+) with a recency-free
+    # label, so it prioritizes churned/bot patterns. Re-enable prioritize_
+    # active only after the corpus re-seed + model retrain on a clean set.
     players = get_corpus_players(session, active_only=True, limit=limit)
     logger.info("Scraping battles for %d corpus players.", len(players))
 
@@ -473,9 +542,20 @@ async def scrape_corpus_combined(
     ) or 0
     CORPUS_PLAYERS_ACTIVE.set(total_active)
 
-    players = get_corpus_players(
-        session, active_only=True, limit=limit, prioritize_active=True,
-    )
+    # Inventory-driven selection: replays exist to be fetched for battles we
+    # already ingested, so pick the players holding the most unfetched recent
+    # battles — ground truth, no prediction needed. This is also the
+    # starvation floor: selection is driven by the exact thing being fetched,
+    # so a cohort of yield-less players (e.g. a battle-less priority
+    # watchlist, root cause of the 06-30 replay collapse) can never occupy
+    # the batch. 40h cutoff stays inside RoyaleAPI's ~2-day replay window.
+    players = players_with_replay_inventory(session, limit=limit)
+    if not players:
+        # Fully caught up (or no recent battles at all) — fall back to the
+        # legacy FIFO pick so the job still refreshes somebody.
+        players = get_corpus_players(
+            session, active_only=True, limit=limit, prioritize_active=True,
+        )
     if not players:
         logger.info("No active corpus players.")
         return {
