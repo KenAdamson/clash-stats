@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Callable, Optional
 from urllib.parse import urlencode
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from tracker.metrics import (
@@ -159,6 +160,10 @@ _TEAM_TAGS_RE = re.compile(r'data-team-tags="(?P<team>[^"]*)"')
 _OPP_TAGS_RE = re.compile(r'data-opponent-tags="(?P<opp>[^"]*)"')
 _TEAM_CROWNS_RE = re.compile(r'data-team-crowns="(?P<tc>[^"]*)"')
 _OPP_CROWNS_RE = re.compile(r'data-opponent-crowns="(?P<oc>[^"]*)"')
+# data-index on the replay button is the battle's UNIX timestamp — lets us
+# reconstruct the canonical CR-API battle_id (SHA256 of battleTime+tags+crowns)
+# so RoyaleAPI-only replays ingest dedup-safe against future CR-API polls.
+_INDEX_IN_BUTTON_RE = re.compile(r'data-index="(?P<idx>\d+)"')
 
 # Pagination: extract data-index values for scroll API cursor
 _DATA_INDEX_RE = re.compile(r'data-index="(\d+)"')
@@ -559,6 +564,7 @@ def _extract_replay_links_from_html(html: str) -> list[dict]:
         opp_m = _OPP_TAGS_RE.search(elem)
         tc_m = _TEAM_CROWNS_RE.search(elem)
         oc_m = _OPP_CROWNS_RE.search(elem)
+        idx_m = _INDEX_IN_BUTTON_RE.search(elem)
 
         if not team_m:
             continue
@@ -569,9 +575,35 @@ def _extract_replay_links_from_html(html: str) -> list[dict]:
             "opponent_tags": opp_m.group("opp") if opp_m else "",
             "team_crowns": int(tc_m.group("tc")) if tc_m and tc_m.group("tc") else 0,
             "opponent_crowns": int(oc_m.group("oc")) if oc_m and oc_m.group("oc") else 0,
+            "battle_unix": int(idx_m.group("idx")) if idx_m else None,
         })
 
     return links
+
+
+def _canonical_battle_id_for_link(link: dict) -> Optional[tuple]:
+    """Reconstruct (battle_id, battleTime_str) for a RoyaleAPI replay link.
+
+    Uses the button's data-index (UNIX battle time) to build the exact same
+    SHA-256 key CR-API ingestion would (verified: 12/40 sampled links matched
+    existing DB battle_ids). Returns None if the timestamp is missing.
+    """
+    from datetime import datetime, timezone
+    from tracker.analytics import generate_battle_id
+
+    if not link.get("battle_unix"):
+        return None
+    bt = datetime.fromtimestamp(
+        link["battle_unix"], timezone.utc
+    ).strftime("%Y%m%dT%H%M%S.000Z")
+    bid = generate_battle_id({
+        "battleTime": bt,
+        "team": [{"tag": "#" + link["team_tags"].lstrip("#"),
+                  "crowns": link["team_crowns"]}],
+        "opponent": [{"tag": "#" + link["opponent_tags"].lstrip("#"),
+                      "crowns": link["opponent_crowns"]}],
+    })
+    return bid, bt
 
 
 def _extract_last_data_index(html: str) -> Optional[str]:
@@ -705,21 +737,10 @@ def _fetch_replays_http_impl(
     """
     tag_clean = player_tag.lstrip("#")
 
-    unfetched = (
-        db_session.query(Battle)
-        .filter(
-            Battle.replay_fetched == 0,
-            Battle.battle_type.in_(["PvP", "pathOfLegend", "riverRacePvP"]),
-            Battle.player_tag == f"#{tag_clean}",
-        )
-        .order_by(Battle.battle_time.desc())
-        .limit(limit)
-        .all()
-    )
-
-    if not unfetched:
-        return 0
-
+    # Link-driven: we fetch whatever replays RoyaleAPI lists for this player,
+    # regardless of what battles we've ingested — so no pre-query of stored
+    # battles here (a player with zero stored PvP games is exactly the case
+    # this path exists to capture).
     if not Path(state_path).exists():
         logger.warning("No session file at %s — cannot fetch replays", state_path)
         return 0
@@ -754,17 +775,6 @@ def _fetch_replays_http_impl(
         if parsed:
             with _renewed_lock:
                 _renewed.update(parsed)
-
-    # Build unmatched set for early pagination exit
-    unmatched = set()
-    for b in unfetched:
-        key = (
-            (b.player_tag or "").lstrip("#"),
-            (b.opponent_tag or "").lstrip("#"),
-            b.player_crowns,
-            b.opponent_crowns,
-        )
-        unmatched.add(key)
 
     # Phase 1: Collect replay links from battle pages
     # Page 1: GET /player/{tag}/battles
@@ -810,23 +820,10 @@ def _fetch_replays_http_impl(
         links = _extract_replay_links_from_html(html)
         all_links.extend(links)
 
-        for link in links:
-            key = (
-                link["team_tags"].lstrip("#"),
-                link["opponent_tags"].lstrip("#"),
-                link["team_crowns"],
-                link["opponent_crowns"],
-            )
-            unmatched.discard(key)
-
         logger.info(
-            "Page %d: %d replay links for %s (total: %d, %d unmatched)",
-            page_num + 1, len(links), tag_clean, len(all_links), len(unmatched),
+            "Page %d: %d replay links for %s (total: %d)",
+            page_num + 1, len(links), tag_clean, len(all_links),
         )
-
-        if not unmatched:
-            logger.info("All unfetched battles matched — stopping pagination for %s", tag_clean)
-            break
 
         next_cursor = _extract_last_data_index(html)
         if not next_cursor or next_cursor == scroll_cursor:
@@ -839,76 +836,101 @@ def _fetch_replays_http_impl(
         logger.info("No replay links found for %s", tag_clean)
         return 0
 
-    # Phase 2: Fetch individual replays concurrently
-    # Results are (battle_id, parsed_data | "empty" | None)
-    parsed_results: list[tuple[str, Optional[dict]]] = []
+    # Phase 2: link-driven fetch. Fetch a replay for every link RoyaleAPI
+    # offers, reconstructing the canonical battle_id from its data-index
+    # timestamp and ingesting a minimal battle row if we don't have it. This
+    # decouples replay capture from CR-API coverage — top-ladder players play
+    # PvP infrequently, so their ladder games roll out of the CR API's last-25
+    # window before we poll them, but RoyaleAPI kept the replays. Skips links
+    # whose battle already has replay events.
+    targets: list[dict] = []  # {battle_id, battle_time_str, link}
+    seen_ids: set = set()
+    for link in all_links:
+        cid = _canonical_battle_id_for_link(link)
+        if not cid:
+            stats["no_link"] += 1  # link lacked a timestamp; can't dedup-safely
+            continue
+        bid, bt = cid
+        if bid in seen_ids:
+            continue
+        seen_ids.add(bid)
+        targets.append({"battle_id": bid, "battle_time": bt, "link": link})
 
-    _thread_started = set()  # track which threads have done their startup jitter
+    already = set()
+    if seen_ids:
+        already = {
+            r[0] for r in db_session.execute(
+                text("SELECT battle_id FROM battles "
+                     "WHERE battle_id = ANY(:ids) AND replay_fetched = 1"),
+                {"ids": list(seen_ids)},
+            )
+        }
+    targets = [t for t in targets if t["battle_id"] not in already]
+    if limit:
+        targets = targets[:limit]
 
-    def _process_one(battle: Battle) -> tuple[str, Optional[dict]]:
-        """Fetch and parse one replay. Returns (battle_id, parsed_data)."""
-        # Startup jitter: first request per thread gets a random delay
-        # to spread threads across different Cloudflare rate limit buckets
-        tid = id(battle)  # unique per call
+    parsed_results: list[tuple[dict, Optional[dict]]] = []
+    _thread_started = set()
+
+    def _process_one(target: dict) -> tuple[dict, Optional[dict]]:
+        """Fetch and parse one replay. Returns (target, parsed_data)."""
         import threading
         thread_id = threading.current_thread().ident
         if thread_id not in _thread_started:
             _thread_started.add(thread_id)
             time.sleep(random.uniform(0, STARTUP_JITTER))
 
-        link = _match_battle_to_link(battle, all_links)
-        if not link:
-            stats["no_link"] += 1
-            return battle.battle_id, None
-
-        url = _build_replay_url(link)
+        bid = target["battle_id"]
+        url = _build_replay_url(target["link"])
         time.sleep(REPLAY_DELAY * random.uniform(0.5, 1.5))
 
         try:
             status, html = _fetch_replay_with_retry(
-                url, cookie_header, battle.battle_id, on_cookies=_capture_cookies,
+                url, cookie_header, bid, on_cookies=_capture_cookies,
             )
         except Exception as e:
-            logger.warning("Error fetching replay %s: %s", battle.battle_id[:12], e)
+            logger.warning("Error fetching replay %s: %s", bid[:12], e)
             stats["failed"] += 1
             REPLAYS_FAILED.labels(error_type="http_error").inc()
-            return battle.battle_id, None
+            return target, None
 
         if status == 403:
             stats["failed"] += 1
             REPLAYS_FAILED.labels(error_type="http_403").inc()
-            return battle.battle_id, None
-
+            return target, None
         if status != 200 or not html:
             stats["failed"] += 1
             REPLAYS_FAILED.labels(error_type="http_error").inc()
-            return battle.battle_id, None
+            return target, None
 
         try:
             data = parse_replay_html(html)
         except Exception as e:
-            logger.warning("Parse error for %s: %s", battle.battle_id[:12], e)
+            logger.warning("Parse error for %s: %s", bid[:12], e)
             stats["failed"] += 1
-            return battle.battle_id, None
+            return target, None
 
         if data.get("events"):
             stats["fetched"] += 1
             REPLAYS_FETCHED.labels(source="http").inc()
-            return battle.battle_id, data
-        else:
-            stats["empty"] += 1
-            return battle.battle_id, {"empty": True}
+            return target, data
+        stats["empty"] += 1
+        return target, {"empty": True}
 
-    # Run replay fetches in thread pool
     with ThreadPoolExecutor(max_workers=MAX_CONCURRENT) as pool:
-        futures = {pool.submit(_process_one, b): b for b in unfetched}
+        futures = {pool.submit(_process_one, t): t for t in targets}
         for future in as_completed(futures):
             parsed_results.append(future.result())
 
-    # Store results in main thread (SQLAlchemy sessions aren't thread-safe)
-    for bid, data in parsed_results:
+    # Store in main thread (SQLAlchemy sessions aren't thread-safe): ensure a
+    # battle row exists (minimal, from the link) before attaching replay data.
+    ingested = 0
+    for target, data in parsed_results:
         if data is None:
             continue
+        if _ensure_link_battle(db_session, target, tag_clean):
+            ingested += 1
+        bid = target["battle_id"]
         if data.get("empty"):
             db_session.execute(
                 Battle.__table__.update()
@@ -920,16 +942,51 @@ def _fetch_replays_http_impl(
 
     db_session.commit()
 
-    # Persist any renewed session cookies so the login window slides forward.
     with _renewed_lock:
         _persist_session_cookies(state_path, dict(_renewed))
 
     logger.info(
-        "HTTP replay fetch for %s: %d fetched, %d empty, %d no_link, %d failed (of %d)",
-        tag_clean, stats["fetched"], stats["empty"], stats["no_link"],
-        stats["failed"], len(unfetched),
+        "HTTP replay fetch for %s: %d fetched, %d empty, %d ingested-new, "
+        "%d failed (of %d links)",
+        tag_clean, stats["fetched"], stats["empty"], ingested,
+        stats["failed"], len(targets),
     )
     return stats["fetched"]
+
+
+def _ensure_link_battle(db_session: Session, target: dict, tag_clean: str) -> bool:
+    """Insert a minimal battle row for a RoyaleAPI link if we lack it.
+
+    Carries the fields the link provides (tags, crowns, battle_time, result);
+    deck_cards/trophies are absent — the replay EVENTS are the ML payload, and
+    a later CR-API poll dedups on the identical battle_id. Returns True if a
+    new row was inserted.
+    """
+    from datetime import datetime, timezone
+    bid = target["battle_id"]
+    if db_session.execute(
+        text("SELECT 1 FROM battles WHERE battle_id = :b"), {"b": bid}
+    ).fetchone():
+        return False
+    link = target["link"]
+    tc, oc = link["team_crowns"], link["opponent_crowns"]
+    result = "win" if tc > oc else "loss" if tc < oc else "draw"
+    bt = datetime.strptime(target["battle_time"], "%Y%m%dT%H%M%S.000Z").replace(
+        tzinfo=timezone.utc
+    )
+    db_session.execute(Battle.__table__.insert().values(
+        battle_id=bid,
+        player_tag="#" + link["team_tags"].lstrip("#"),
+        opponent_tag="#" + link["opponent_tags"].lstrip("#"),
+        battle_time=bt,
+        battle_type="PvP",
+        player_crowns=tc,
+        opponent_crowns=oc,
+        result=result,
+        corpus="top_ladder",
+        replay_fetched=0,  # set to 1 by the caller's store path
+    ))
+    return True
 
 
 def run_fetch_replays_http(

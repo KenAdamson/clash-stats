@@ -542,20 +542,15 @@ async def scrape_corpus_combined(
     ) or 0
     CORPUS_PLAYERS_ACTIVE.set(total_active)
 
-    # Inventory-driven selection: replays exist to be fetched for battles we
-    # already ingested, so pick the players holding the most unfetched recent
-    # battles — ground truth, no prediction needed. This is also the
-    # starvation floor: selection is driven by the exact thing being fetched,
-    # so a cohort of yield-less players (e.g. a battle-less priority
-    # watchlist, root cause of the 06-30 replay collapse) can never occupy
-    # the batch. 40h cutoff stays inside RoyaleAPI's ~2-day replay window.
-    players = players_with_replay_inventory(session, limit=limit)
-    if not players:
-        # Fully caught up (or no recent battles at all) — fall back to the
-        # legacy FIFO pick so the job still refreshes somebody.
-        players = get_corpus_players(
-            session, active_only=True, limit=limit, prioritize_active=True,
-        )
+    # FIFO rotation over the corpus (least-recently-scraped first). The replay
+    # fetch is now link-driven — it captures whatever replays RoyaleAPI lists
+    # for a player, ingesting battles we lack — so selection no longer needs
+    # pre-existing inventory (inventory-based selection actually SKIPPED the
+    # players we most need: top-ladder accounts play PvP infrequently, so their
+    # ladder games roll out of the CR-API 25-window before we poll them, but
+    # RoyaleAPI kept the replays). Each visit refreshes battles + grabs the
+    # player's fresh RoyaleAPI replays; mark_player_scraped rotates them back.
+    players = get_corpus_players(session, active_only=True, limit=limit)
     if not players:
         logger.info("No active corpus players.")
         return {
