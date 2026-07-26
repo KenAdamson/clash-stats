@@ -137,35 +137,38 @@ def detect_sub_archetypes(
     import time
     _t0 = time.perf_counter()
 
-    # Collect decks containing the win condition from all archetypes
+    # Collect unique decks containing the win condition. archetype_decks is
+    # pre-aggregated by exact composition (one entry per unique deck with its
+    # win/loss counts), so no per-battle dedup pass is needed here.
     decks_with_wc = []
-    for archetype, deck_list in sim_data.archetype_decks.items():
-        for d in deck_list:
-            if win_condition in d["card_names"]:
-                support = frozenset(c for c in d["card_names"] if c != win_condition)
+    matched_battles = 0
+    for deck_map in sim_data.archetype_decks.values():
+        for deck_tuple, (wins, losses, elixir) in deck_map.items():
+            if win_condition in deck_tuple:
+                count = wins + losses
+                support = frozenset(c for c in deck_tuple if c != win_condition)
                 decks_with_wc.append({
                     "support": support,
-                    "full_deck": tuple(d["card_names"]),
-                    "result": d["result"],
-                    "elixir": d["elixir"],
+                    "full_deck": deck_tuple,
+                    "wins": wins,
+                    "count": count,
+                    "elixir": elixir,
                 })
+                matched_battles += count
     _t_collect = time.perf_counter() - _t0
 
-    if len(decks_with_wc) < min_cluster_size:
+    if matched_battles < min_cluster_size:
         return []
 
     logger.info(
-        "Clustering %d %s decks into sub-archetypes.",
-        len(decks_with_wc), win_condition,
+        "Clustering %d unique %s decks (%d battles) into sub-archetypes.",
+        len(decks_with_wc), win_condition, matched_battles,
     )
 
-    # Group by exact deck composition
+    # Already unique per composition; order by battle frequency (descending) to
+    # preserve the previous group-size ordering.
     _t1 = time.perf_counter()
-    deck_groups: dict[tuple, list[dict]] = defaultdict(list)
-    for d in decks_with_wc:
-        deck_groups[d["full_deck"]].append(d)
-
-    sorted_groups = sorted(deck_groups.items(), key=lambda x: -len(x[1]))
+    sorted_groups = sorted(decks_with_wc, key=lambda d: -d["count"])
     _t_dedup = time.perf_counter() - _t1
     _n_unique = len(sorted_groups)
 
@@ -194,8 +197,9 @@ def detect_sub_archetypes(
     min_shared = max(1, math.ceil(14 * similarity_threshold / (1 + similarity_threshold)))
     clusters: list[dict] = []
     card_to_clusters: dict[str, set] = defaultdict(set)
-    for deck_tuple, group in sorted_groups:
-        support = frozenset(c for c in deck_tuple if c != win_condition)
+    for d in sorted_groups:
+        support = d["support"]
+        deck_tuple = d["full_deck"]
 
         # Tally shared-card counts against candidate clusters via the index.
         cand_counts: dict[int, int] = defaultdict(int)
@@ -217,18 +221,18 @@ def detect_sub_archetypes(
 
         if best_idx >= 0 and best_sim >= similarity_threshold:
             cluster = clusters[best_idx]
-            cluster["decks"].extend(group)
+            cluster["members"].append(d)
             new_cards = support - cluster["support_union"]
             cluster["support_union"] |= support
-            cluster["deck_variants"][deck_tuple] += len(group)
+            cluster["deck_variants"][deck_tuple] += d["count"]
             for c in new_cards:
                 card_to_clusters[c].add(best_idx)
         else:
             new_idx = len(clusters)
             clusters.append({
-                "decks": list(group),
+                "members": [d],
                 "support_union": set(support),
-                "deck_variants": Counter({deck_tuple: len(group)}),
+                "deck_variants": Counter({deck_tuple: d["count"]}),
             })
             for c in support:
                 card_to_clusters[c].add(new_idx)
@@ -238,17 +242,19 @@ def detect_sub_archetypes(
     _t3 = time.perf_counter()
     results = []
     for cluster in clusters:
-        if len(cluster["decks"]) < min_cluster_size:
+        total = sum(m["count"] for m in cluster["members"])
+        if total < min_cluster_size:
             continue
 
-        wins = sum(1 for d in cluster["decks"] if d["result"] == "win")
-        total = len(cluster["decks"])
-        avg_elixir = sum(d["elixir"] for d in cluster["decks"]) / total
+        wins = sum(m["wins"] for m in cluster["members"])
+        # elixir is constant per composition, so weight each unique deck's elixir
+        # by how many battles it represents to reproduce the per-battle average.
+        avg_elixir = sum(m["elixir"] * m["count"] for m in cluster["members"]) / total
 
         card_freq: Counter = Counter()
-        for d in cluster["decks"]:
-            for c in d["support"]:
-                card_freq[c] += 1
+        for m in cluster["members"]:
+            for c in m["support"]:
+                card_freq[c] += m["count"]
 
         signature = [
             card for card, count in card_freq.most_common()
@@ -272,7 +278,7 @@ def detect_sub_archetypes(
         "%s profile: collect=%.1fs dedup=%.1fs cluster=%.1fs agg=%.1fs "
         "| %d matched, %d unique compositions, %d clusters",
         win_condition, _t_collect, _t_dedup, _t_cluster, _t_agg,
-        len(decks_with_wc), _n_unique, _n_clusters,
+        matched_battles, _n_unique, _n_clusters,
     )
     return results
 

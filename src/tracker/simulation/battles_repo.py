@@ -9,6 +9,7 @@ the full battles table (1.3M rows × 2KB JSON = ~2.6GB per scan).
 """
 
 import logging
+import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from typing import Optional
@@ -41,7 +42,11 @@ class SimulationData:
     # Per-archetype win/loss + deck collection (for matchup posteriors + sub-archetypes)
     archetype_wins: dict[str, int] = field(default_factory=lambda: defaultdict(int))
     archetype_losses: dict[str, int] = field(default_factory=lambda: defaultdict(int))
-    archetype_decks: dict[str, list] = field(default_factory=lambda: defaultdict(list))
+    # archetype -> {sorted card-name tuple -> [wins, losses, elixir]}. Aggregated
+    # by exact deck composition rather than one entry per battle, so memory scales
+    # with deck DIVERSITY (saturates) not battle COUNT (unbounded). Elixir is a
+    # deterministic function of the card set, so it's stored once per composition.
+    archetype_decks: dict[str, dict] = field(default_factory=lambda: defaultdict(dict))
 
 
 def compute_simulation_data(
@@ -166,8 +171,11 @@ def _process_battle(
 ) -> None:
     """Aggregate one battle's data into SimulationData."""
     data.total_battles += 1
-    card_set = set(card_names)
-    sorted_cards = sorted(card_set)
+    # Intern card names: across millions of battles there are only ~120 distinct
+    # card names, but each DB row yields a fresh str object. Interning collapses
+    # tens of millions of duplicate strings to one object each (multi-GB saving).
+    card_set = {sys.intern(c) for c in card_names}
+    sorted_cards = tuple(sorted(card_set))
 
     # Card interaction stats
     for card in card_set:
@@ -191,9 +199,15 @@ def _process_battle(
     else:
         data.archetype_losses[archetype] += 1
 
-    # Store lightweight deck info for sub-archetype clustering
-    data.archetype_decks[archetype].append({
-        "card_names": sorted_cards,
-        "result": result,
-        "elixir": elixir_total,
-    })
+    # Aggregate by exact composition for sub-archetype clustering: one record per
+    # unique deck (keyed by the sorted card tuple) with running win/loss counts,
+    # instead of one dict per battle.
+    deck_map = data.archetype_decks[archetype]
+    rec = deck_map.get(sorted_cards)
+    if rec is None:
+        rec = [0, 0, elixir_total]  # [wins, losses, elixir]
+        deck_map[sorted_cards] = rec
+    if result == "win":
+        rec[0] += 1
+    else:
+        rec[1] += 1
