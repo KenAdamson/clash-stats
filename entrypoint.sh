@@ -359,27 +359,44 @@ clash-stats --embed-new ${DB_FLAG}
 EOF
 chmod +x /app/embed_new.sh
 
+# --- Shared GPU lock -------------------------------------------------------
+# Every XPU job used to hold only its OWN lock, so nothing serialized them
+# against each other and the A770 had no lock representing it. On 2026-07-26
+# the weekly tcn_train cron fired at 04:00 while a WP capacity run was at
+# epoch 25 and BOTH died 13s apart with UR_RESULT_ERROR_OUT_OF_HOST_MEMORY —
+# the card's small-BAR host-memory ceiling can't hold two training jobs.
+#
+# ${XPU_TRAIN_LOCK} is the outer lock every *training* job takes, in addition
+# to its own per-job lock (which still prevents self-overlap). Inference is
+# deliberately NOT gated: wp_infer_new grabs an XPU context ~18x/hour and
+# coexisted with a full training run for 25 epochs without trouble, and
+# blocking it behind a multi-day train would stall dashboard freshness.
+#
+# -n (non-blocking): a weekly retrain that collides simply skips and runs next
+# week, which is far cheaper than crashing a multi-day training run.
+XPU_TRAIN_LOCK=${LOCKDIR}/xpu_train.lock
+
 # TCN retraining
 cat > /app/tcn_train.sh << EOF
 #!/bin/sh
-exec flock -n ${LOCKDIR}/tcn_train.lock sh -c '
+exec flock -n ${XPU_TRAIN_LOCK} flock -n ${LOCKDIR}/tcn_train.lock sh -c '
 cd /app
 [ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
 clash-stats --train-tcn ${DB_FLAG}
-' || echo "tcn_train: previous run still active, skipping"
+' || echo "tcn_train: XPU busy or previous run still active, skipping"
 EOF
 chmod +x /app/tcn_train.sh
 
 # Activity model retraining
 cat > /app/train_activity.sh << EOF
 #!/bin/sh
-exec flock -n ${LOCKDIR}/train_activity.lock sh -c '
+exec flock -n ${XPU_TRAIN_LOCK} flock -n ${LOCKDIR}/train_activity.lock sh -c '
 cd /app
 [ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
 clash-stats --train-activity-model ${DB_FLAG}
-' || echo "train_activity: previous run still active, skipping"
+' || echo "train_activity: XPU busy or previous run still active, skipping"
 EOF
 chmod +x /app/train_activity.sh
 

@@ -993,6 +993,40 @@ def train_wp(
         model = WinProbabilityModel(vocab_size=vocab.size, feature_dim=feat_dim, dropout=DROPOUT,
                                     tcn_channels=_tcn_ch, card_embed_dim=_emb)
         _built_from_scratch = True
+
+        # WP_RESUME=<path>: warm-start the weights from an earlier run of the
+        # SAME architecture instead of starting cold. A long capacity run that
+        # dies to an external cause (GPU contention, host reboot) otherwise
+        # throws away days of training, since only the best weights are
+        # checkpointed. Optimizer/scheduler state is NOT in the checkpoint, so
+        # Adam and the LR schedule restart — this is a warm start, not an exact
+        # resume; pair it with a reduced WP_LR to avoid knocking the loaded
+        # weights out of the basin they already found.
+        _resume = os.environ.get("WP_RESUME", "").strip()
+        if _resume:
+            if not Path(_resume).exists():
+                raise FileNotFoundError(f"WP_RESUME checkpoint not found: {_resume}")
+            _ck = torch.load(_resume, map_location="cpu", weights_only=True)
+            _ck_tcn = _ck.get("tcn_channels")
+            _ck_emb = _ck.get("card_embed_dim", 16)
+            _want_tcn = _tcn_ch or model.tcn_channels
+            if list(_ck_tcn or model.tcn_channels) != list(_want_tcn) or _ck_emb != _emb:
+                raise ValueError(
+                    f"WP_RESUME architecture mismatch: checkpoint tcn={_ck_tcn} "
+                    f"embed={_ck_emb} vs requested tcn={_want_tcn} embed={_emb}"
+                )
+            if _ck.get("feature_dim") != feat_dim:
+                raise ValueError(
+                    f"WP_RESUME feature_dim mismatch: checkpoint "
+                    f"{_ck.get('feature_dim')} vs current {feat_dim}"
+                )
+            model.load_state_dict(_ck["model_state_dict"])
+            logger.info("WP_RESUME — warm-started from %s (epoch %s, val_loss %.4f, "
+                        "val_acc %.4f); optimizer/LR schedule restart",
+                        _resume, _ck.get("epoch"), _ck.get("val_loss", float("nan")),
+                        _ck.get("val_acc", float("nan")))
+            print(f"  → Warm start from {_resume} "
+                  f"(epoch {_ck.get('epoch')}, val_loss {_ck.get('val_loss'):.4f})")
     elif _head_inject:
         extra = feat_dim - BASE_FEAT
         src = None

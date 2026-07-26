@@ -4,6 +4,10 @@ __pycache__/
 .venv/
 .pytest_cache/
 .DS_Store
+# `data` is a SYMLINK to /home/kenadamson/clash-data (Postgres cluster, ML
+# checkpoints, multi-GB memmap shards). Git does not traverse symlinks, so
+# `data/*` style rules match nothing — ignore the link itself. Scripts that
+# need version control must live in a real directory inside the repo.
 data/
 .env
 # Any .env sidecar (.env.bak.*, .env.local, .env.anthropic, ...) may hold live
