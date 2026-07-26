@@ -10,7 +10,10 @@ Per-event features (18 hand-crafted):
   ability_used (1), elixir_cost (1), card_type one-hot (3), is_evo (1)
 """
 
+import os
+import sys
 import logging
+from collections import namedtuple
 from typing import Optional
 
 import numpy as np
@@ -21,6 +24,9 @@ from sqlalchemy.orm import Session
 
 from tracker.models import Battle, ReplayEvent, DeckCard
 from tracker.ml.card_metadata import CardVocabulary, kebab_to_title
+from tracker.ml.elixir_trace import per_event_elixir as _per_event_elixir
+from tracker.ml.spell_value import spell_connect_values as _spell_connect_values
+from tracker.ml.spell_value import spell_tower_values as _spell_tower_values
 
 logger = logging.getLogger(__name__)
 
@@ -46,8 +52,25 @@ GAME_TICK_MAX = 10000
 # Minimum events per game to include
 MIN_EVENTS = 4
 
+# Per-event feature vector width. BASE is the original placement/economy
+# vector; EXTRA (opt-in) appends 3 exact-elixir dims (own/opp/differential)
+# + 2 game-level opponent-skill dims (trophy_gap, opp efficiency)
+# + 1 spell-connect-value dim (elixir removed by a friendly spell)
+# + 1 spell-tower-value dim (chip on an opponent tower — rocket/mortar/X-Bow
+#   cycle win condition), both delivered causally at the spell's impact tick.
+#   See spell_value.py — closes the spell-target-quality blind spot.
+BASE_FEATURE_DIM = 17
+EXTRA_FEATURE_DIM = 7
+CORPUS_ENRICHMENT_PATH = "data/corpus_enrichment.pkl"
+
 # Card type to one-hot index
 CARD_TYPE_IDX = {"troop": 0, "spell": 1, "building": 2}
+
+# Lightweight replay-event record. Loading events as these interned namedtuples
+# instead of heavy SQLAlchemy ORM objects cuts per-event memory ~2.5x, letting the
+# in-memory dataset scale to the full PvP+ranked replay pool (~1.7M games).
+_RE = namedtuple("_RE", ["battle_id", "side", "game_tick", "card_name",
+                         "arena_x", "arena_y", "play_number", "ability_used"])
 
 
 def _game_phase_onehot(tick: int) -> list[float]:
@@ -81,6 +104,39 @@ def _card_type_onehot(card_type: str) -> list[float]:
     return vec
 
 
+def select_training_battles(session: Session, max_games: int | None = None) -> list:
+    """Select the full WP training battle set: (battle_id, result) rows.
+
+    PvP + pathOfLegend win/loss games with >= MIN_EVENTS replay events, ordered
+    by battle_time ascending (the time-ordered train/val split depends on this).
+    Shared by SequenceDataset's default path and the shard builder so the two
+    can never drift. max_games takes the most-recent N (mirrors WP_MAX_GAMES).
+    """
+    if max_games is None:
+        max_games = int(os.environ.get("WP_MAX_GAMES", "100000000"))
+    return session.execute(
+        text("""
+            SELECT battle_id, result FROM (
+                SELECT b.battle_id, b.result, b.battle_time
+                FROM battles b
+                JOIN (
+                    SELECT battle_id, COUNT(*) as event_count
+                    FROM replay_events
+                    WHERE card_name != '_invalid'
+                    GROUP BY battle_id
+                    HAVING COUNT(*) >= :min_events
+                ) re_counts ON re_counts.battle_id = b.battle_id
+                WHERE b.battle_type IN ('PvP', 'pathOfLegend')
+                  AND b.result IN ('win', 'loss')
+                ORDER BY b.battle_time DESC
+                LIMIT :max_games
+            ) sub
+            ORDER BY battle_time
+        """),
+        {"min_events": MIN_EVENTS, "max_games": max_games},
+    ).all()
+
+
 class SequenceDataset(Dataset):
     """Dataset of replay event sequences for TCN training.
 
@@ -97,8 +153,23 @@ class SequenceDataset(Dataset):
         session: Session,
         vocab: CardVocabulary,
         battle_ids: list[str] | None = None,
+        extra_features: bool = False,
+        battle_rows: list | None = None,
+        sample_sink=None,
     ):
+        # battle_rows: pre-fetched (battle_id, result) rows — bypasses the battle
+        #   selection query (the shard builder fetches once to preallocate, then
+        #   injects here so both sides agree on N and order).
+        # sample_sink: callable(battle_id, card_ids, features, label). When set,
+        #   built samples are handed to the sink instead of accumulating in RAM —
+        #   this is how the shard builder streams 1.7M games at constant memory.
         self.vocab = vocab
+        # extra_features (opt-in, default OFF so TCN/CVAE checkpoints trained on
+        # the base 17-dim vector are unaffected): append +5 board-truth dims —
+        # 3 exact-elixir (own/opp/differential, analytic from placements) and 2
+        # game-level opponent-skill constants (trophy_gap, opp efficiency).
+        self.extra_features = extra_features
+        self.feature_dim = BASE_FEATURE_DIM + (EXTRA_FEATURE_DIM if extra_features else 0)
 
         # Build evo set: cards that have ability_used=1 in replay_events
         evo_cards = set(
@@ -112,7 +183,10 @@ class SequenceDataset(Dataset):
         # Use a pre-aggregated JOIN instead of a correlated subquery — the correlated
         # version scans 13M replay_events rows for every battle (O(n*m)), whereas
         # the JOIN aggregates once then filters (O(m) + index lookup).
-        if battle_ids is not None:
+        self._sample_sink = sample_sink
+        if battle_rows is not None:
+            pass  # injected by the shard builder — use as-is
+        elif battle_ids is not None:
             # Scoped to specific battles (for incremental inference)
             battle_rows = session.execute(
                 text("""
@@ -125,7 +199,7 @@ class SequenceDataset(Dataset):
                         GROUP BY battle_id
                         HAVING COUNT(*) >= :min_events
                     ) re_counts ON re_counts.battle_id = b.battle_id
-                    WHERE b.battle_type = 'PvP'
+                    WHERE b.battle_type IN ('PvP', 'pathOfLegend')
                       AND b.result IN ('win', 'loss')
                       AND b.battle_id IN :bids
                     ORDER BY b.battle_time
@@ -133,23 +207,11 @@ class SequenceDataset(Dataset):
                 {"min_events": MIN_EVENTS, "bids": tuple(battle_ids)},
             ).all()
         else:
-            battle_rows = session.execute(
-                text("""
-                    SELECT b.battle_id, b.result
-                    FROM battles b
-                    JOIN (
-                        SELECT battle_id, COUNT(*) as event_count
-                        FROM replay_events
-                        WHERE card_name != '_invalid'
-                        GROUP BY battle_id
-                        HAVING COUNT(*) >= :min_events
-                    ) re_counts ON re_counts.battle_id = b.battle_id
-                    WHERE b.battle_type = 'PvP'
-                      AND b.result IN ('win', 'loss')
-                    ORDER BY b.battle_time
-                """),
-                {"min_events": MIN_EVENTS},
-            ).all()
+            # Train on BOTH ladder (PvP) and ranked (pathOfLegend) replays — PoL
+            # was historically excluded, discarding ~74% of the replay pool (and
+            # the ranked slice where high-tier play lives). Query shared with the
+            # shard builder via select_training_battles (WP_MAX_GAMES honored).
+            battle_rows = select_training_battles(session)
 
         logger.info("Loading %d games with replay data", len(battle_rows))
 
@@ -165,74 +227,89 @@ class SequenceDataset(Dataset):
         battle_ids = [r[0] for r in battle_rows]
         result_map = {r[0]: 1.0 if r[1] == "win" else 0.0 for r in battle_rows}
 
-        # Load events in chunks to avoid massive queries
-        chunk_size = 500
-        events_by_battle: dict[str, list] = {bid: [] for bid in battle_ids}
+        # Opponent-skill context (only when extra_features). trophy_gap is
+        # always available from battles; opponent efficiency (best/battleCount)
+        # comes from the corpus enrichment cache where the opponent is known.
+        self._ctx: dict[str, tuple] = {}  # battle_id -> (trophy_gap_norm, opp_eff_norm)
+        if self.extra_features and battle_ids:
+            import pickle
+            enrich = {}
+            if os.path.exists(CORPUS_ENRICHMENT_PATH):
+                try:
+                    with open(CORPUS_ENRICHMENT_PATH, "rb") as f:
+                        enrich = pickle.load(f)
+                except Exception:
+                    enrich = {}
+            for i in range(0, len(battle_ids), 500):
+                chunk = battle_ids[i:i + 500]
+                rows = session.execute(
+                    text("""
+                        SELECT battle_id, player_starting_trophies,
+                               opponent_starting_trophies, opponent_tag
+                        FROM battles WHERE battle_id IN :bids
+                    """),
+                    {"bids": tuple(chunk)},
+                ).all()
+                for bid, ptr, otr, otag in rows:
+                    gap = ((otr or 0) - (ptr or 0)) / 1000.0  # ~[-2, 2]
+                    v = enrich.get(otag) if otag else None
+                    eff = 0.0
+                    if v and v.get("bc") and v.get("best"):
+                        eff = min(v["best"] / v["bc"], 6.0) / 6.0  # 0..1
+                    self._ctx[bid] = (gap, eff)
 
+        # STREAMING build: load one chunk of battles' events, build their feature
+        # arrays immediately, then free the raw events before the next chunk. Each
+        # chunk's events are self-contained (queried by battle_id), and chunks are
+        # processed in battle_ids order, so sample order — and the time-ordered
+        # train/val split — is preserved. Peak memory = built samples (compact
+        # numpy) + ONE chunk of raw events, independent of total dataset size —
+        # this is what lets the dataset hold the full PvP+ranked pool (1.7M games)
+        # instead of OOMing on all-at-once event materialization.
+        chunk_size = 500
+        skipped = 0
         for i in range(0, len(battle_ids), chunk_size):
             chunk = battle_ids[i : i + chunk_size]
-            events = session.execute(
-                select(ReplayEvent)
-                .where(
-                    ReplayEvent.battle_id.in_(chunk),
-                    ReplayEvent.card_name != "_invalid",
-                )
-                .order_by(ReplayEvent.battle_id, ReplayEvent.game_tick)
-            ).scalars().all()
+            # Raw column select into lightweight namedtuples (not ORM objects),
+            # interning the repeated card_name/side strings.
+            rows = session.execute(
+                text("""
+                    SELECT battle_id, side, COALESCE(game_tick,0) game_tick, card_name,
+                           COALESCE(arena_x, 8750) arena_x, COALESCE(arena_y, 15750) arena_y,
+                           COALESCE(play_number, 0) play_number, COALESCE(ability_used, 0) ability_used
+                    FROM replay_events
+                    WHERE battle_id IN :bids AND card_name != '_invalid'
+                    ORDER BY battle_id, game_tick, id
+                """),
+                {"bids": tuple(chunk)},
+            ).all()
+            events_by_battle: dict[str, list] = {bid: [] for bid in chunk}
+            for r in rows:
+                events_by_battle[r[0]].append(_RE(
+                    r[0],
+                    sys.intern(r[1]) if r[1] else r[1],
+                    r[2],
+                    sys.intern(r[3]) if r[3] else r[3],
+                    r[4], r[5], r[6], r[7],
+                ))
+            del rows
 
-            for ev in events:
-                events_by_battle[ev.battle_id].append(ev)
+            for battle_id in chunk:
+                evts = events_by_battle[battle_id]
+                if len(evts) < MIN_EVENTS:
+                    skipped += 1
+                    continue
+                card_ids, features = self._build_sample(battle_id, evts)
+                if self._sample_sink is not None:
+                    self._sample_sink(battle_id, card_ids, features, result_map[battle_id])
+                else:
+                    self._samples.append((card_ids, features, result_map[battle_id]))
+                    self.battle_ids_in_order.append(battle_id)
+            del events_by_battle
 
-        # Build feature sequences
-        skipped = 0
-        for battle_id in battle_ids:
-            evts = events_by_battle[battle_id]
-            if len(evts) < MIN_EVENTS:
-                skipped += 1
-                continue
-
-            card_ids = np.zeros(len(evts), dtype=np.int64)
-            features = np.zeros((len(evts), 17), dtype=np.float32)
-
-            for j, ev in enumerate(evts):
-                title_name = kebab_to_title(ev.card_name)
-                card_ids[j] = self.vocab.encode(title_name)
-
-                # side: 1.0 for team, 0.0 for opponent
-                features[j, 0] = 1.0 if ev.side == "team" else 0.0
-
-                # game_tick normalized
-                features[j, 1] = min(ev.game_tick / GAME_TICK_MAX, 1.0)
-
-                # game_phase one-hot (4)
-                features[j, 2:6] = _game_phase_onehot(ev.game_tick)
-
-                # arena_x normalized [-1, 1]
-                features[j, 6] = (ev.arena_x - ARENA_X_MID) / ARENA_X_MID
-
-                # arena_y normalized [-1, 1]
-                features[j, 7] = (ev.arena_y - ARENA_Y_MID) / ARENA_Y_MID
-
-                # lane one-hot (3)
-                features[j, 8:11] = _lane_onehot(ev.arena_x)
-
-                # play_number capped and normalized
-                features[j, 11] = min(ev.play_number, PLAY_NUMBER_CAP) / PLAY_NUMBER_CAP
-
-                # ability_used
-                features[j, 12] = float(ev.ability_used)
-
-                # elixir_cost normalized (1-10 range)
-                elixir = self.vocab.elixir(title_name)
-                features[j, 13] = (elixir or 4) / 10.0
-
-                # card_type one-hot (3)
-                card_type = self.vocab.card_type(title_name)
-                features[j, 14:17] = _card_type_onehot(card_type)
-
-            label = result_map[battle_id]
-            self._samples.append((card_ids, features, label))
-            self.battle_ids_in_order.append(battle_id)
+            if (i // chunk_size) % 200 == 0 and i:
+                logger.info("SequenceDataset streaming build: %d/%d battles processed",
+                            i, len(battle_ids))
 
         logger.info(
             "SequenceDataset: %d games loaded, %d skipped, avg %.1f events/game",
@@ -240,6 +317,78 @@ class SequenceDataset(Dataset):
             skipped,
             np.mean([s[1].shape[0] for s in self._samples]) if self._samples else 0,
         )
+
+    def _build_sample(self, battle_id: str, evts: list) -> tuple[np.ndarray, np.ndarray]:
+        """Build (card_ids, features) arrays for one battle's events.
+
+        Extracted from __init__ so the streaming loader can build each chunk's
+        samples immediately and free the raw events. `evts` are _RE namedtuples
+        ordered by game_tick.
+        """
+        card_ids = np.zeros(len(evts), dtype=np.int64)
+        features = np.zeros((len(evts), self.feature_dim), dtype=np.float32)
+
+        for j, ev in enumerate(evts):
+            title_name = kebab_to_title(ev.card_name)
+            card_ids[j] = self.vocab.encode(title_name)
+
+            # side: 1.0 for team, 0.0 for opponent
+            features[j, 0] = 1.0 if ev.side == "team" else 0.0
+
+            # game_tick normalized
+            features[j, 1] = min(ev.game_tick / GAME_TICK_MAX, 1.0)
+
+            # game_phase one-hot (4)
+            features[j, 2:6] = _game_phase_onehot(ev.game_tick)
+
+            # arena_x normalized [-1, 1]
+            features[j, 6] = (ev.arena_x - ARENA_X_MID) / ARENA_X_MID
+
+            # arena_y normalized [-1, 1]
+            features[j, 7] = (ev.arena_y - ARENA_Y_MID) / ARENA_Y_MID
+
+            # lane one-hot (3)
+            features[j, 8:11] = _lane_onehot(ev.arena_x)
+
+            # play_number capped and normalized
+            features[j, 11] = min(ev.play_number, PLAY_NUMBER_CAP) / PLAY_NUMBER_CAP
+
+            # ability_used
+            features[j, 12] = float(ev.ability_used)
+
+            # elixir_cost normalized (1-10 range)
+            elixir = self.vocab.elixir(title_name)
+            features[j, 13] = (elixir or 4) / 10.0
+
+            # card_type one-hot (3)
+            card_type = self.vocab.card_type(title_name)
+            features[j, 14:17] = _card_type_onehot(card_type)
+
+        # Extra board-truth dims (opt-in): exact-elixir per event + the
+        # game-level opponent-skill constants broadcast to every tick.
+        if self.extra_features:
+            ev_tuples = [
+                (e.side, e.game_tick, self.vocab.elixir(kebab_to_title(e.card_name)) or 4)
+                for e in evts
+            ]
+            elx = _per_event_elixir(ev_tuples)
+            gap, eff = self._ctx.get(battle_id, (0.0, 0.0))
+            # spell-connect value per event (elixir removed by a friendly spell,
+            # delivered at the spell's impact tick — causal, see spell_value.py)
+            sev = [(e.side, e.game_tick, e.card_name, e.arena_x, e.arena_y) for e in evts]
+            scv = _spell_connect_values(sev)            # unit-kill value
+            stv = _spell_tower_values(sev)              # tower-chip value
+            for j in range(len(evts)):
+                own_b, opp_now, diff = elx[j]
+                features[j, 17] = own_b / 10.0          # own elixir in hand
+                features[j, 18] = opp_now / 10.0        # opp elixir in hand
+                features[j, 19] = diff / 10.0           # differential [-1,1]
+                features[j, 20] = gap                   # trophy_gap (norm)
+                features[j, 21] = eff                   # opp efficiency (norm)
+                features[j, 22] = scv[j] / 10.0         # spell-connect value (unit kills)
+                features[j, 23] = stv[j] / 10.0         # spell-tower value (tower chip)
+
+        return card_ids, features
 
     def __len__(self) -> int:
         return len(self._samples)
@@ -270,8 +419,11 @@ def collate_fn(
     max_len = int(lengths.max())
 
     batch_size = len(batch)
+    # Feature width is inferred from the data (base 17 or extra 22) so the same
+    # collate serves both the legacy and extra_features datasets.
+    feat_dim = features_list[0].shape[-1] if features_list else BASE_FEATURE_DIM
     padded_card_ids = torch.zeros(batch_size, max_len, dtype=torch.int64)
-    padded_features = torch.zeros(batch_size, max_len, 17, dtype=torch.float32)
+    padded_features = torch.zeros(batch_size, max_len, feat_dim, dtype=torch.float32)
 
     for i, (cids, feats) in enumerate(zip(card_ids_list, features_list)):
         seq_len = len(cids)

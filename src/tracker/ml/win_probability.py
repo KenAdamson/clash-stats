@@ -38,6 +38,7 @@ class WinProbabilityModel(nn.Module):
         vocab_size: int,
         card_embed_dim: int = 16,
         feature_dim: int = 17,
+        extra_feature_dim: int = 0,
         tcn_channels: list[int] | None = None,
         kernel_size: int = 3,
         dropout: float = 0.2,
@@ -45,6 +46,16 @@ class WinProbabilityModel(nn.Module):
         super().__init__()
         self.card_embedding = nn.Embedding(vocab_size, card_embed_dim, padding_idx=0)
         self.feature_dim = feature_dim
+        # Record the architecture shape so a checkpoint can be reconstructed at
+        # inference without hardcoding sizes (capacity experiments vary these).
+        self.card_embed_dim = card_embed_dim
+        self.tcn_channels = list(tcn_channels) if tcn_channels else [64, 64, 128, 128, 256, 256]
+        # Board-truth features injected at the HEAD rather than the encoder input.
+        # The encoder input width (and thus the pretrained TCN weights) stays at
+        # 16+feature_dim, so a frozen pretrained encoder transfers unchanged; the
+        # extra features are concatenated onto the TCN output before the head.
+        # extra_feature_dim=0 reproduces the original (encoder-input) behaviour.
+        self.extra_feature_dim = extra_feature_dim
 
         input_channels = card_embed_dim + feature_dim  # 16 + 17 = 33
 
@@ -55,10 +66,10 @@ class WinProbabilityModel(nn.Module):
             dropout=dropout,
         )
 
-        # Per-tick classification head: (batch, 256, seq_len) → (batch, 1, seq_len)
+        # Per-tick classification head: (batch, 256[+extra], seq_len) → (batch, 1, seq_len)
         out_ch = self.tcn.output_channels  # 256
         self.head = nn.Sequential(
-            nn.Conv1d(out_ch, 64, 1),
+            nn.Conv1d(out_ch + extra_feature_dim, 64, 1),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Conv1d(64, 1, 1),
@@ -81,10 +92,20 @@ class WinProbabilityModel(nn.Module):
             logits: (batch, seq_len) — raw logits per tick (apply sigmoid for P(win)).
         """
         card_emb = self.card_embedding(card_ids)
-        combined = torch.cat([card_emb, features], dim=2)
+        if self.extra_feature_dim > 0:
+            # Encoder sees only the base features; board-truth features are held
+            # out and injected at the head (see __init__).
+            base = features[:, :, :self.feature_dim]
+            extra = features[:, :, self.feature_dim:self.feature_dim + self.extra_feature_dim]
+        else:
+            base = features
+            extra = None
+        combined = torch.cat([card_emb, base], dim=2)
         combined = combined.transpose(1, 2)  # (batch, channels, seq_len)
 
         tcn_out = self.tcn(combined)  # (batch, 256, seq_len)
+        if extra is not None:
+            tcn_out = torch.cat([tcn_out, extra.transpose(1, 2)], dim=1)  # (batch, 256+extra, seq_len)
         logits = self.head(tcn_out).squeeze(1)  # (batch, seq_len)
 
         return logits
@@ -97,6 +118,7 @@ class WinProbabilityModel(nn.Module):
         device: torch.device,
         freeze_encoder: bool = True,
         dropout: float = 0.2,
+        extra_feature_dim: int = 0,
     ) -> "WinProbabilityModel":
         """Initialize from a trained ADR-003 TCN checkpoint.
 
@@ -116,9 +138,13 @@ class WinProbabilityModel(nn.Module):
         checkpoint = torch.load(tcn_checkpoint_path, map_location=device, weights_only=True)
         saved_vocab = checkpoint.get("vocab_size", vocab_size)
 
-        model = cls(vocab_size=saved_vocab, dropout=dropout)
+        model = cls(vocab_size=saved_vocab, dropout=dropout,
+                    extra_feature_dim=extra_feature_dim)
 
-        # Load matching weights from GameEmbeddingModel state dict
+        # Load matching weights from the source state dict. card_embedding + tcn
+        # match by shape and transfer; the head does NOT match when
+        # extra_feature_dim>0 (its input width grew by the injected features), so
+        # it stays freshly initialized and is the only thing trained.
         source_state = checkpoint["model_state_dict"]
         target_state = model.state_dict()
 
@@ -126,7 +152,14 @@ class WinProbabilityModel(nn.Module):
         for key in target_state:
             # Match card_embedding and tcn weights
             if key in source_state and target_state[key].shape == source_state[key].shape:
-                target_state[key] = source_state[key]
+                v = source_state[key]
+                # Older WP checkpoints (v1/v2/v3) carry a handful of NaN weights
+                # from pre-grad-clip training. The inference path sanitizes them;
+                # transferring them raw would poison a frozen encoder (NaN output).
+                # Only a few entries per large tensor, so nan->0 keeps norms finite.
+                if torch.is_tensor(v) and v.dtype.is_floating_point and not torch.isfinite(v).all():
+                    v = torch.nan_to_num(v, nan=0.0, posinf=0.0, neginf=0.0)
+                target_state[key] = v
                 transferred += 1
 
         model.load_state_dict(target_state)

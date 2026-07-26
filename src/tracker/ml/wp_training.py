@@ -5,7 +5,10 @@ BCE loss, optional transfer learning from ADR-003, Platt scaling
 calibration, and per-game WPA inference + storage.
 """
 
+import contextlib
 import logging
+import math
+import os
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -15,7 +18,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from torch.utils.data import DataLoader, Subset
 from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Session
@@ -30,6 +33,11 @@ from tracker.ml.wp_storage import WinProbability, GameWPSummary
 logger = logging.getLogger(__name__)
 
 WP_MODEL_VERSION = "wp-v1"
+
+# Opt into the +5 board-truth features (exact-elixir + opponent-skill). When
+# True, WP trains on the 22-dim vector and CANNOT transfer from the 17-dim
+# production/TCN encoders (input width differs) — it trains from scratch.
+WP_EXTRA_FEATURES = True
 
 # Watermark for incremental WP inference: highest replay_events.id already
 # examined. Keyed on event-row ARRIVAL (autoincrement id), not battle_time —
@@ -106,11 +114,33 @@ def _sanitize_state_dict(state_dict: dict) -> int:
 # Training hyperparameters
 BATCH_SIZE = 4096
 LEARNING_RATE = 5e-4
+# From-scratch (full-encoder) training is far more unstable than the frozen-
+# encoder transfer path: a lower peak LR + LR warmup lets Adam's second-moment
+# estimates settle before the full rate kicks in. Without warmup, a parameter
+# that sits at ~zero grad for many steps then receives a real grad yields a
+# giant update (lr·m/(√v+eps)) that overflows fp32 a few epochs in — this is
+# what NaN-corrupted the wp_v4 run at epoch 11 (guards catch a bad batch but
+# can't undo an already-corrupted weight).
+FROM_SCRATCH_LR = 3e-4
+WARMUP_EPOCHS = 3
+# Adam eps 1e-8 -> 1e-6: enlarges the denominator floor so a tiny second-moment
+# estimate can't blow the update up. Cheap insurance, safe for both paths.
+ADAM_EPS = 1e-6
 WEIGHT_DECAY = 1e-4
 EPOCHS = 50
 EARLY_STOPPING_PATIENCE = 10
 DROPOUT = 0.2
 VAL_FRACTION = 0.2
+
+
+def _arch_env():
+    """Capacity-experiment overrides: WP_TCN_CHANNELS (comma-separated ints, e.g.
+    '128,128,256,256,512,512') and WP_CARD_EMBED (int). Returns (tcn_channels or
+    None, card_embed_dim). Applies to the from-scratch path only."""
+    ch = os.environ.get("WP_TCN_CHANNELS")
+    tcn = [int(x) for x in ch.split(",")] if ch else None
+    emb = int(os.environ.get("WP_CARD_EMBED", "16"))
+    return tcn, emb
 
 
 def _detect_device() -> torch.device:
@@ -145,10 +175,25 @@ class WPTrainer:
         device: torch.device,
         model_dir: Path,
         class_weight: Optional[float] = None,
+        amp: bool = True,
+        batch_size: int = BATCH_SIZE,
+        learning_rate: float = LEARNING_RATE,
+        warmup_epochs: int = 0,
     ):
         self.model = model.to(device)
         self.device = device
         self.model_dir = model_dir
+        # batch_size defaults to BATCH_SIZE (fine for the frozen-encoder base
+        # model), but the from-scratch full-encoder train retains all TCN
+        # activations for backward and blows the A770 Level-Zero allocation
+        # ceiling at 4096 (OUT_OF_HOST_MEMORY, which poisons the context and
+        # surfaces as a NaN loss). Callers drop it to 512 for from-scratch.
+        self.batch_size = batch_size
+        # bf16 autocast is safe when transferring from a pretrained encoder
+        # (moderate logits) but a from-scratch random init produces extreme
+        # early logits that overflow bf16 -> NaN loss at epoch 1. Callers train
+        # from scratch in fp32.
+        self.amp = amp
 
         # Train/val split — last 20% as validation (ordered by battle_time)
         n = len(dataset)
@@ -158,39 +203,50 @@ class WPTrainer:
         train_indices = list(range(n_train))
         val_indices = list(range(n_train, n))
 
-        # Use LazyBatchLoader for lazy datasets, DataLoader for in-memory
+        # Loader dispatch: memmap shards (firehose) > lazy > in-memory DataLoader
         from tracker.ml.lazy_dataset import LazySequenceDataset, LazyBatchLoader
-        if isinstance(dataset, LazySequenceDataset):
+        from tracker.ml.wp_shard_cache import ShardDataset, ShardBatchLoader
+        if isinstance(dataset, ShardDataset):
+            # Vectorized gathers from memory-mapped shards — no per-batch Python
+            # padding, no collate bottleneck (the fix for CPU-bound, XPU-idle
+            # training at 1.7M games).
+            self.train_loader = ShardBatchLoader(
+                dataset, train_indices, batch_size=self.batch_size, shuffle=True)
+            self.val_loader = ShardBatchLoader(
+                dataset, val_indices, batch_size=self.batch_size, shuffle=False)
+            self.full_loader = ShardBatchLoader(
+                dataset, list(range(n)), batch_size=self.batch_size, shuffle=False)
+        elif isinstance(dataset, LazySequenceDataset):
             self.train_loader = LazyBatchLoader(
-                dataset, train_indices, batch_size=BATCH_SIZE,
+                dataset, train_indices, batch_size=self.batch_size,
                 shuffle=True, collate_fn=wp_collate_fn,
             )
             self.val_loader = LazyBatchLoader(
-                dataset, val_indices, batch_size=BATCH_SIZE,
+                dataset, val_indices, batch_size=self.batch_size,
                 shuffle=False, collate_fn=wp_collate_fn,
             )
             self.full_loader = LazyBatchLoader(
-                dataset, list(range(n)), batch_size=BATCH_SIZE,
+                dataset, list(range(n)), batch_size=self.batch_size,
                 shuffle=False, collate_fn=wp_collate_fn,
             )
         else:
             self.train_loader = DataLoader(
                 Subset(dataset, train_indices),
-                batch_size=BATCH_SIZE,
+                batch_size=self.batch_size,
                 shuffle=True,
                 collate_fn=wp_collate_fn,
                 num_workers=0,
             )
             self.val_loader = DataLoader(
                 Subset(dataset, val_indices),
-                batch_size=BATCH_SIZE,
+                batch_size=self.batch_size,
                 shuffle=False,
                 collate_fn=wp_collate_fn,
                 num_workers=0,
             )
             self.full_loader = DataLoader(
                 dataset,
-                batch_size=BATCH_SIZE,
+                batch_size=self.batch_size,
                 shuffle=False,
                 collate_fn=wp_collate_fn,
                 num_workers=0,
@@ -202,8 +258,20 @@ class WPTrainer:
 
         # Only optimize parameters that require gradients (frozen encoder excluded)
         trainable = [p for p in model.parameters() if p.requires_grad]
-        self.optimizer = AdamW(trainable, lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
-        self.scheduler = CosineAnnealingLR(self.optimizer, T_max=EPOCHS)
+        self.optimizer = AdamW(trainable, lr=learning_rate,
+                               weight_decay=WEIGHT_DECAY, eps=ADAM_EPS)
+        # Linear warmup for the first `warmup_epochs` (from-scratch stability),
+        # then cosine anneal over the remainder. warmup_epochs=0 -> plain cosine
+        # (unchanged transfer path).
+        if warmup_epochs > 0:
+            warm = LinearLR(self.optimizer, start_factor=0.1,
+                            total_iters=warmup_epochs)
+            cos = CosineAnnealingLR(self.optimizer,
+                                    T_max=max(1, EPOCHS - warmup_epochs))
+            self.scheduler = SequentialLR(self.optimizer, [warm, cos],
+                                          milestones=[warmup_epochs])
+        else:
+            self.scheduler = CosineAnnealingLR(self.optimizer, T_max=EPOCHS)
 
         n_trainable = sum(p.numel() for p in trainable)
         n_total = sum(p.numel() for p in model.parameters())
@@ -244,23 +312,42 @@ class WPTrainer:
                 mask = mask.to(self.device)
 
                 self.optimizer.zero_grad()
-                with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
+                _amp = (torch.autocast(device_type=self.device.type, dtype=torch.bfloat16)
+                        if self.amp else contextlib.nullcontext())
+                with _amp:
                     logits = self.model(card_ids, features, lengths)
                     loss_per_tick = self.criterion(logits, labels)
                     loss = (loss_per_tick * mask).sum() / mask.sum().clamp(min=1)
 
-                # Abort on NaN/Inf loss — gradients would NaN-poison the weights
-                # permanently (see commit 8c160e0). Better to die loudly here.
+                # Non-finite loss (occasional, e.g. a rare long-sequence batch
+                # overflowing the from-scratch TCN in fp32): the check is BEFORE
+                # backward, so the weights are still clean — SKIP this batch
+                # rather than aborting the whole run. A run-wide skip counter
+                # guards against a systematic problem (abort if it never trains).
                 if not torch.isfinite(loss):
-                    raise RuntimeError(
-                        f"Non-finite loss at epoch {epoch}: {loss.item()}. "
-                        "Aborting before backward to keep model state clean."
-                    )
+                    self._nan_skips = getattr(self, "_nan_skips", 0) + 1
+                    self._nan_run_skips = getattr(self, "_nan_run_skips", 0) + 1
+                    if self._nan_run_skips <= 5 or self._nan_run_skips % 50 == 0:
+                        logger.warning("Non-finite loss at epoch %d — skipping batch "
+                                       "(run skips: %d)", epoch, self._nan_run_skips)
+                    if self._nan_run_skips > 2000:
+                        raise RuntimeError(
+                            f"Too many non-finite batches ({self._nan_run_skips}) — "
+                            "training is not converging. Aborting."
+                        )
+                    continue
 
                 loss.backward()
                 # Clip gradients to prevent the runaway-update path that
-                # introduced NaN weights in v1/v2/v3 checkpoints.
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                # introduced NaN weights in v1/v2/v3 checkpoints. clip_grad_norm_
+                # returns the pre-clip total norm; if it's non-finite the grads
+                # would NaN-poison the weights (clip_coef becomes nan), so skip
+                # the step instead — keeps weights clean across a bad batch.
+                total_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                if not torch.isfinite(total_norm):
+                    self._nan_run_skips = getattr(self, "_nan_run_skips", 0) + 1
+                    self.optimizer.zero_grad()
+                    continue
                 self.optimizer.step()
 
                 train_loss += (loss_per_tick * mask).sum().item()
@@ -277,6 +364,40 @@ class WPTrainer:
                 "Epoch %d/%d [%.1fs] — train loss: %.4f | val loss: %.4f acc: %.3f",
                 epoch, EPOCHS, elapsed, train_loss, val_loss, val_acc,
             )
+
+            # Self-healing: if the epoch ended non-finite (val_loss NaN/Inf or
+            # any live weight non-finite), the model has been corrupted mid-run.
+            # Rather than burn the remaining epochs emitting NaN (what wasted
+            # wp_v4's epochs 11-20), roll back to the last clean checkpoint, drop
+            # the corrupted Adam moments, and permanently halve the LR to escape
+            # the instability. Capped at 3 recoveries before giving up.
+            weights_finite = all(
+                torch.isfinite(v).all() for v in self.model.state_dict().values()
+                if torch.is_tensor(v) and v.dtype.is_floating_point
+            )
+            if not math.isfinite(val_loss) or not weights_finite:
+                self._recoveries = getattr(self, "_recoveries", 0) + 1
+                if best_path.exists() and self._recoveries <= 3:
+                    logger.warning(
+                        "Epoch %d non-finite (val_loss=%s, weights_finite=%s) — "
+                        "rollback to best + halve LR (recovery %d/3)",
+                        epoch, val_loss, weights_finite, self._recoveries,
+                    )
+                    ckpt = torch.load(best_path, map_location=self.device,
+                                      weights_only=True)
+                    self.model.load_state_dict(ckpt["model_state_dict"])
+                    self.optimizer.state.clear()  # drop corrupted Adam m/v
+                    for sub in getattr(self.scheduler, "_schedulers", [self.scheduler]):
+                        sub.base_lrs = [b * 0.5 for b in sub.base_lrs]
+                    patience_counter += 1
+                    if patience_counter >= EARLY_STOPPING_PATIENCE:
+                        logger.info("Early stopping at epoch %d (post-recovery)", epoch)
+                        break
+                    continue
+                raise RuntimeError(
+                    f"Non-finite training state at epoch {epoch} "
+                    f"(recoveries={self._recoveries}, best exists={best_path.exists()})"
+                )
 
             # Early stopping
             if val_loss < best_val_loss:
@@ -297,6 +418,10 @@ class WPTrainer:
                 torch.save({
                     "model_state_dict": state_dict,
                     "vocab_size": self.model.card_embedding.num_embeddings,
+                    "feature_dim": self.model.feature_dim,
+                    "extra_feature_dim": getattr(self.model, "extra_feature_dim", 0),
+                    "tcn_channels": getattr(self.model, "tcn_channels", None),
+                    "card_embed_dim": getattr(self.model, "card_embed_dim", 16),
                     "epoch": epoch,
                     "val_loss": val_loss,
                     "val_acc": val_acc,
@@ -332,7 +457,9 @@ class WPTrainer:
                 labels = labels.to(self.device)
                 mask = mask.to(self.device)
 
-                with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
+                _amp = (torch.autocast(device_type=self.device.type, dtype=torch.bfloat16)
+                        if self.amp else contextlib.nullcontext())
+                with _amp:
                     logits = self.model(card_ids, features, lengths)
                     loss_per_tick = self.criterion(logits, labels)
                 total_loss += (loss_per_tick * mask).sum().item()
@@ -548,14 +675,19 @@ def infer_wp(session: Session, model_dir: Optional[Path] = None) -> None:
     if nan_fixed:
         logger.warning("Sanitized %d NaN weights in %s state_dict", nan_fixed, wp_path.name)
 
-    model = WinProbabilityModel(vocab_size=saved_vocab_size, dropout=0.0)
+    feat_dim = checkpoint.get("feature_dim", 17)
+    extra_dim = checkpoint.get("extra_feature_dim", 0)
+    model = WinProbabilityModel(vocab_size=saved_vocab_size, feature_dim=feat_dim,
+                                extra_feature_dim=extra_dim, dropout=0.0,
+                                tcn_channels=checkpoint.get("tcn_channels"),
+                                card_embed_dim=checkpoint.get("card_embed_dim", 16))
     model.load_state_dict(sd)
     model.to(device)
     model.eval()
 
     logger.info(
-        "Loaded WP checkpoint %s epoch %d (val_loss=%.4f, val_acc=%.3f)",
-        wp_path.name, checkpoint["epoch"], checkpoint["val_loss"], checkpoint["val_acc"],
+        "Loaded WP checkpoint %s epoch %d (val_loss=%.4f, val_acc=%.3f, feature_dim=%d)",
+        wp_path.name, checkpoint["epoch"], checkpoint["val_loss"], checkpoint["val_acc"], feat_dim,
     )
 
     # Load calibrator — try versioned name first, then generic
@@ -570,7 +702,7 @@ def infer_wp(session: Session, model_dir: Optional[Path] = None) -> None:
     else:
         print("  · No calibration file found — using raw sigmoid probabilities")
 
-    dataset = SequenceDataset(session, vocab)
+    dataset = SequenceDataset(session, vocab, extra_features=(feat_dim + extra_dim) > 17)
     if not dataset:
         print("  ✗ No games with replay data found.")
         return
@@ -596,7 +728,7 @@ def infer_wp(session: Session, model_dir: Optional[Path] = None) -> None:
     trainer.model = model
     trainer.device = device
     trainer.full_loader = DataLoader(
-        dataset, batch_size=BATCH_SIZE, shuffle=False,
+        dataset, batch_size=(512 if feat_dim > 17 else BATCH_SIZE), shuffle=False,
         collate_fn=wp_collate_fn, num_workers=0,
     )
 
@@ -697,7 +829,12 @@ def infer_wp_incremental(session: Session, model_dir: Optional[Path] = None) -> 
     nan_fixed = _sanitize_state_dict(sd)
     if nan_fixed:
         logger.warning("Sanitized %d NaN weights in %s state_dict", nan_fixed, wp_path.name)
-    model = WinProbabilityModel(vocab_size=checkpoint["vocab_size"], dropout=0.0)
+    feat_dim = checkpoint.get("feature_dim", 17)
+    extra_dim = checkpoint.get("extra_feature_dim", 0)
+    model = WinProbabilityModel(vocab_size=checkpoint["vocab_size"], feature_dim=feat_dim,
+                                extra_feature_dim=extra_dim, dropout=0.0,
+                                tcn_channels=checkpoint.get("tcn_channels"),
+                                card_embed_dim=checkpoint.get("card_embed_dim", 16))
     model.load_state_dict(sd)
     model.to(device)
     model.eval()
@@ -713,7 +850,7 @@ def infer_wp_incremental(session: Session, model_dir: Optional[Path] = None) -> 
 
     # Build dataset for only the missing games
     missing_set = set(missing)
-    dataset = SequenceDataset(session, vocab, battle_ids=missing)
+    dataset = SequenceDataset(session, vocab, battle_ids=missing, extra_features=(feat_dim + extra_dim) > 17)
     if not dataset:
         _write_wp_watermark(new_watermark)
         return 0
@@ -724,7 +861,7 @@ def infer_wp_incremental(session: Session, model_dir: Optional[Path] = None) -> 
     trainer.model = model
     trainer.device = device
     trainer.full_loader = DataLoader(
-        dataset, batch_size=BATCH_SIZE, shuffle=False,
+        dataset, batch_size=(512 if feat_dim > 17 else BATCH_SIZE), shuffle=False,
         collate_fn=wp_collate_fn, num_workers=0,
     )
 
@@ -774,22 +911,43 @@ def train_wp(
     vocab = CardVocabulary(session)
     logger.info("Vocabulary size: %d", vocab.size)
 
-    # 2. Create dataset
-    if lazy:
-        import os
+    # 2. Create dataset. WP_SHARD_DIR (pre-extracted memmap shards, see
+    # wp_shard_cache.py) takes priority — no DB streaming, no collate bottleneck.
+    _shard_dir = os.environ.get("WP_SHARD_DIR")
+    if _shard_dir:
+        from tracker.ml.wp_shard_cache import ShardDataset
+        dataset = ShardDataset(_shard_dir)
+        if bool(dataset.meta.get("extra_features")) != WP_EXTRA_FEATURES:
+            raise RuntimeError(
+                f"Shard extra_features={dataset.meta.get('extra_features')} does not "
+                f"match WP_EXTRA_FEATURES={WP_EXTRA_FEATURES} — rebuild shards.")
+        print(f"  → Shard dataset: {len(dataset)} games from {_shard_dir} "
+              f"(L={dataset.max_len}, F={dataset.feature_dim}, memmap firehose)")
+        lazy = False
+    elif lazy and WP_EXTRA_FEATURES:
+        logger.warning("Lazy dataset does not support extra_features yet — using in-memory SequenceDataset")
+        lazy = False
+    if _shard_dir:
+        pass
+    elif lazy:
         from tracker.ml.lazy_dataset import LazySequenceDataset
         db_url = os.environ.get("DATABASE_URL", str(session.bind.url))
         dataset = LazySequenceDataset(session, vocab, db_url=db_url)
         print(f"  → Lazy dataset: {len(dataset)} games (DB-backed, low memory)")
     else:
-        dataset = SequenceDataset(session, vocab)
+        dataset = SequenceDataset(session, vocab, extra_features=WP_EXTRA_FEATURES)
+        print(f"  → Dataset feature_dim = {dataset.feature_dim}"
+              f"{' (base+extra board-truth)' if WP_EXTRA_FEATURES else ''}")
     if len(dataset) < 50:
         logger.error("Need at least 50 games with replay data (have %d)", len(dataset))
         print(f"  ✗ Need at least 50 games with replay data (have {len(dataset)})")
         return
 
     # 3. Compute class weight for imbalanced data
-    if lazy:
+    if _shard_dir:
+        labels = dataset.labels[:]          # uint8 memmap -> in-RAM copy (N bytes)
+        labels = [float(v) for v in labels]
+    elif lazy:
         # Lazy dataset stores labels directly
         labels = dataset._labels
     else:
@@ -808,9 +966,59 @@ def train_wp(
     checkpoint_path = model_dir / filename
     print(f"  → Training WP v{version} ({filename})")
 
-    # 5. Initialize model — try transfer from current production or TCN
+    # 5. Initialize model.
+    #  - Base features only (17): transfer the pretrained encoder as before.
+    #  - With board-truth features (>17): HEAD-INJECTION — keep the pretrained
+    #    encoder (input width 16+17=33) frozen and concatenate the extra features
+    #    onto the TCN output before the head. This keeps transfer learning (the
+    #    from-scratch retrain lost ~2.7pts acc discarding the pretrained encoder)
+    #    while still feeding the model the board-truth signal, and trains only the
+    #    small head (fast, low-mem, no from-scratch NaN risk).
+    feat_dim = getattr(dataset, "feature_dim", 17)
     prod = get_production(session, "wp")
-    if prod and (model_dir / prod.filename).exists():
+    BASE_FEAT = 17
+    # WP_FROM_SCRATCH=1 forces a full-encoder from-scratch train even for a wide
+    # feature vector. Head-injection's frozen encoder is stale on the grown corpus
+    # (wp_v6: 0.731 vs from-scratch wp_v5: 0.757), so from-scratch is currently the
+    # better config until the TCN encoder itself is retrained on the full corpus.
+    _force_scratch = os.environ.get("WP_FROM_SCRATCH") == "1"
+    _head_inject = feat_dim > BASE_FEAT and not _force_scratch
+    _built_from_scratch = False
+    if _force_scratch and feat_dim != 17:
+        _tcn_ch, _emb = _arch_env()
+        logger.info("WP_FROM_SCRATCH=1 — full-encoder from-scratch (feature_dim=%d, "
+                    "tcn_channels=%s, card_embed=%d)", feat_dim, _tcn_ch or "default", _emb)
+        print(f"  → Training from scratch (feature_dim={feat_dim}, forced full encoder"
+              f"{'' if _tcn_ch is None else f', tcn={_tcn_ch}, embed={_emb}'})")
+        model = WinProbabilityModel(vocab_size=vocab.size, feature_dim=feat_dim, dropout=DROPOUT,
+                                    tcn_channels=_tcn_ch, card_embed_dim=_emb)
+        _built_from_scratch = True
+    elif _head_inject:
+        extra = feat_dim - BASE_FEAT
+        src = None
+        if prod and (model_dir / prod.filename).exists():
+            src = str(model_dir / prod.filename)
+        elif (model_dir / "tcn_v1.pt").exists():
+            src = str(model_dir / "tcn_v1.pt")
+        else:
+            existing = _resolve_wp_path(session, model_dir)
+            src = str(existing) if existing else None
+        if src:
+            logger.info("Head-injection: frozen encoder from %s + %d board-truth feats at head",
+                        src, extra)
+            print(f"  → Head-injection (frozen encoder from {Path(src).name} "
+                  f"+ {extra} board-truth feats at head)")
+            model = WinProbabilityModel.from_pretrained_tcn(
+                src, vocab.size, device, freeze_encoder=not unfreeze_encoder,
+                dropout=DROPOUT, extra_feature_dim=extra,
+            )
+        else:
+            logger.warning("No pretrained encoder found — head-injection from scratch")
+            print("  → Head-injection from scratch (no pretrained encoder)")
+            model = WinProbabilityModel(vocab_size=vocab.size, feature_dim=BASE_FEAT,
+                                        extra_feature_dim=extra, dropout=DROPOUT)
+            _built_from_scratch = True
+    elif prod and (model_dir / prod.filename).exists():
         logger.info("Transfer learning from production %s", prod.filename)
         print(f"  → Transfer learning from production {prod.filename}")
         model = WinProbabilityModel.from_pretrained_tcn(
@@ -846,7 +1054,27 @@ def train_wp(
     n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
     # 6. Train
-    trainer = WPTrainer(model, dataset, device, model_dir, class_weight=class_weight)
+    # From-scratch training (feature_dim != 17) trains the full encoder, so it
+    # runs in fp32 (bf16 NaN-poisons a random init) and at batch 512 (the A770
+    # can't hold batch-4096 full-encoder activations — OUT_OF_HOST_MEMORY).
+    # Only a genuine full-encoder-from-scratch build needs the slow, stabilized
+    # path (fp32, small batch, warmup). Head-injection with a frozen pretrained
+    # encoder trains only the small head → fast path (bf16, batch 4096), same as
+    # the original transfer training.
+    _from_scratch = _built_from_scratch
+    # From-scratch batch defaults to 512, but batch 1024/2048 is now usable once
+    # the 4GB single-allocation ceiling is lifted (env: UR_L0_*RELAXED_ALLOCATION*
+    # + IGC_ExtraOCLOptions=-cl-intel-greater-than-4GB-buffer-required). Bigger
+    # batches amortize XPU kernel-dispatch overhead — measured ~3.5x throughput at
+    # 2048 — so WP_BATCH_SIZE overrides it. Scale LR with batch (WP_LR).
+    _fs_batch = int(os.environ.get("WP_BATCH_SIZE", "512")) if _from_scratch else BATCH_SIZE
+    _fs_lr = float(os.environ.get("WP_LR", str(FROM_SCRATCH_LR))) if _from_scratch else LEARNING_RATE
+    trainer = WPTrainer(model, dataset, device, model_dir,
+                        class_weight=class_weight,
+                        amp=not _from_scratch,
+                        batch_size=_fs_batch,
+                        learning_rate=_fs_lr,
+                        warmup_epochs=WARMUP_EPOCHS if _from_scratch else 0)
     best_path = trainer.train(checkpoint_path=checkpoint_path)
 
     # 7. Load best model
