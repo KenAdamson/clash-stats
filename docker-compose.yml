@@ -194,6 +194,7 @@ services:
     restart: unless-stopped
     volumes:
       - ./docker/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - /home/kenadamson/server-docs/docker/monitoring/prometheus-extra:/etc/prometheus/extra:ro
       - prometheus_data:/prometheus
     networks:
       - media-network
@@ -226,6 +227,7 @@ services:
     volumes:
       - ./docker/monitoring/alloy-config.alloy:/etc/alloy/config.alloy:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - "/var/lib/plexmediaserver/Library/Application Support/Plex Media Server/Logs:/plex-logs:ro"
     depends_on:
       - loki
     networks:
@@ -240,6 +242,7 @@ services:
     volumes:
       - grafana_data:/var/lib/grafana
       - ./docker/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - /home/kenadamson/server-docs/docker/monitoring/grafana-dashboards:/etc/grafana/provisioning/dashboards-media:ro
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-changeme}
       - GF_UNIFIED_ALERTING_ENABLED=true

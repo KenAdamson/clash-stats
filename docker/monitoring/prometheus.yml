@@ -2,6 +2,10 @@ global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
+# Load scrape jobs contributed by other repos (server-docs owns the media jobs).
+scrape_config_files:
+  - /etc/prometheus/extra/*.yml
+
 scrape_configs:
   - job_name: "cr-tracker"
     static_configs:

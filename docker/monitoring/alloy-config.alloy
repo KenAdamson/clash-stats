@@ -30,3 +30,20 @@ loki.write "local" {
     url = "http://loki:3100/loki/api/v1/push"
   }
 }
+
+// Plex runs as a NATIVE systemd service, not a container, so discovery.docker
+// above cannot see it. Tail its log files directly instead.
+// "Plex Transcoder Statistics.log" carries the QoS gold:
+//     <Playback startTime=".." endTime=".." state="buffering" .. />
+// which gives exact rebuffer events WITH durations (transcoded sessions only).
+local.file_match "plex_logs" {
+  path_targets = [
+    {__path__ = "/plex-logs/Plex Media Server.log",          job = "plex", log = "server"},
+    {__path__ = "/plex-logs/Plex Transcoder Statistics.log", job = "plex", log = "transcoder-stats"},
+  ]
+}
+
+loki.source.file "plex" {
+  targets    = local.file_match.plex_logs.targets
+  forward_to = [loki.write.local.receiver]
+}

@@ -1,0 +1,13 @@
+# Generic extension point: load dashboards contributed by other repos.
+# The directory is bind-mounted from server-docs/docker/monitoring/grafana-dashboards.
+apiVersion: 1
+providers:
+  - name: "Media Ops"
+    orgId: 1
+    folder: "Media"
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/provisioning/dashboards-media
+      foldersFromFilesStructure: false
