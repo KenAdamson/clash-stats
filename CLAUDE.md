@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-A Python tool for analyzing Clash Royale gameplay at a level the community ecosystem doesn't support. This isn't a hobbyist script — it's the analytics backend for a player who has climbed to 11,400+ trophies (PB 11,461 — 39 from ranked) with a deck that literally zero other humans play, in ~2,800 lifetime games while peers at the same trophy range have 10,000-15,000+.
+A Python tool for analyzing Clash Royale gameplay at a level the community ecosystem doesn't support. This isn't a hobbyist script — it's the analytics backend for a player who has climbed to 12,100+ trophies (PB 12,298) with a deck that literally zero other humans play, in ~6,000 lifetime games while peers at the same trophy range have 10,000-15,000+. *(Stats as of 2026-07-26; verify against `/players/{tag}` rather than trusting this line.)*
 
 The existing community tools (RoyaleAPI, StatsRoyale, Deckshop) are built for meta players running popular decks. They show aggregate stats, not individualized probabilistic analysis. This tool fills that gap.
 
@@ -69,8 +69,8 @@ Database migrations are managed by Alembic. Migrations were consolidated into a 
 These data points inform what analytics matter:
 
 - **Play style:** ~17 games/day in the current active stretch (434 games in 25 days). The ~1.35 games/day lifetime average is misleading — it includes an 8-9 year break from the game.
-- **Efficiency:** ~2,800 games to 11,400+ trophies (PB 11,461). Peers at same range: 10,000-15,000+ games.
-- **Three-crown rate:** ~73% lifetime (overwhelmingly wins by destruction, not chip)
+- **Efficiency:** ~6,000 games (2,987W / 3,001L) to 12,100+ trophies (PB 12,298). Peers at same range: 10,000-15,000+ games.
+- **Three-crown rate:** ~61% lifetime (1,822 of 2,987 wins) — still overwhelmingly wins by destruction, not chip. The lifetime figure drifts down as more games are played at 12k+, where a ~62% 3-crown rate is normal for the tier, not a regression.
 - **Matchup data matters.** Both problem matchups and hard counters exist — the tracker should surface these from real battle data rather than relying on assumptions.
 - **Tilt pattern:** Rare but devastating.
 
@@ -84,6 +84,8 @@ These data points inform what analytics matter:
 - `GET /players/{tag}/upcomingchests` — Chest cycle (not currently used)
 
 **Auth:** Bearer token in Authorization header. Key from developer.clashroyale.com.
+
+**⚠ Keys are IP-whitelisted.** If the WAN address changes (router/modem re-negotiation), every call returns `403 accessDenied.invalidIp` and *all* ingest stops — personal, corpus and dims — until the key is re-issued. The 403 body names the rejected IP, so diagnosis is immediate; decode a key's binding with `base64 -d` on the JWT payload and read `limits[].cidrs`. **Whitelist a CIDR range (e.g. `98.232.126.0/24`), not a single address** — a DHCP lease can drift mid-outage. To apply a new key *without restarting the container* (important when a training run is in flight): `entrypoint.sh` bakes `CR_API_KEY` into the generated `/app/*.sh` cron wrappers, so rewrite that export in each wrapper and update `.env` for the next restart. Recovery is automatic once the key is valid — the crons keep firing. Note the battlelog only exposes the last 25 battles, so an outage longer than ~25 games loses them permanently.
 
 **Rate limits:** Be respectful. The proxy has its own limits.
 
