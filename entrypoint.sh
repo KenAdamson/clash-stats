@@ -34,6 +34,44 @@ SCRAPER_ENV_EXPORTS=""
 [ -n "${ROYALEAPI_REQUESTS_PER_SEC}" ] && SCRAPER_ENV_EXPORTS="${SCRAPER_ENV_EXPORTS}export ROYALEAPI_REQUESTS_PER_SEC=\"${ROYALEAPI_REQUESTS_PER_SEC}\"
 "
 
+# --- Corpus replay egress: DIRECT (2026-07-26) -----------------------------
+# The 2026-06 RoyaleAPI ban was pinned to the OLD residential IP. After the
+# router cutover the new WAN IP is unbanned: direct requests get an ordinary
+# Cloudflare challenge (cf-mitigated: challenge, not block) and, with a
+# residential-minted cf_clearance, return clean 200s. Meanwhile the shared
+# Mullvad exit is heavily challenged (~600 403s/day, yield ~0 replays/cycle).
+# Corpus replays therefore egress DIRECT; personal/alt stay on the VPN, so a
+# re-ban would cost corpus throughput (recoverable) rather than personal
+# battle history (not recoverable).
+#
+# cf_clearance is bound to the egress IP, so the direct path MUST use its own
+# session file — otherwise the two paths keep invalidating each other's cookie.
+# The Discord login cookie (__royaleapi_session_v2) is NOT IP-bound and is
+# seeded by copying the VPN session file on first use.
+#
+# Set CORPUS_REPLAY_DIRECT=0 to fall back to the VPN path.
+CORPUS_REPLAY_DIRECT="${CORPUS_REPLAY_DIRECT:-1}"
+CORPUS_SESSION_PATH="${ROYALEAPI_SESSION_PATH:-/app/data/royaleapi_session.json}"
+CORPUS_SCRAPER_ENV="${SCRAPER_ENV_EXPORTS}"
+if [ "${CORPUS_REPLAY_DIRECT}" = "1" ]; then
+    CORPUS_SESSION_PATH="${DIRECT_SESSION_PATH:-/app/data/royaleapi_session_direct.json}"
+    # Empty proxy/control-url = no VPN, no exit rotation. The standalone
+    # `flaresolverr` container egresses residential; cr-scraper-fs is VPN-bound.
+    CORPUS_SCRAPER_ENV="export ROYALEAPI_PROXY=\"\"
+export FLARESOLVERR_URL=\"${DIRECT_FLARESOLVERR_URL:-http://flaresolverr:8191/v1}\"
+export GLUETUN_CONTROL_URL=\"\"
+"
+    # Seed the direct session from the VPN one so the login cookie carries over;
+    # cf_clearance is re-minted against the residential IP on first use.
+    if [ ! -f "${CORPUS_SESSION_PATH}" ] && [ -f "${ROYALEAPI_SESSION_PATH:-/app/data/royaleapi_session.json}" ]; then
+        cp "${ROYALEAPI_SESSION_PATH:-/app/data/royaleapi_session.json}" "${CORPUS_SESSION_PATH}"
+        echo "entrypoint: seeded direct corpus session at ${CORPUS_SESSION_PATH}"
+    fi
+    echo "entrypoint: corpus replays egress DIRECT (session ${CORPUS_SESSION_PATH})"
+else
+    echo "entrypoint: corpus replays egress via VPN proxy"
+fi
+
 # Build fetch script with baked-in env vars
 # (Debian cron runs jobs in a clean environment)
 cat > /app/fetch.sh << EOF
@@ -270,9 +308,9 @@ exec flock -n ${LOCKDIR}/corpus_replays.lock sh -c '
 cd /app
 export CR_API_KEY="${CR_API_KEY}"
 [ -n "${CR_API_URL}" ] && export CR_API_URL="${CR_API_URL}"
-export ROYALEAPI_SESSION_PATH="${ROYALEAPI_SESSION_PATH:-/app/data/royaleapi_session.json}"
+export ROYALEAPI_SESSION_PATH="${CORPUS_SESSION_PATH}"
 [ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
-${SCRAPER_ENV_EXPORTS}
+${CORPUS_SCRAPER_ENV}
 export ROYALEAPI_REQUESTS_PER_SEC="${CORPUS_REPLAY_RATE:-1.0}"
 export PYTHONUNBUFFERED=1
 clash-stats --corpus-combined --corpus-limit 16 --replays-per-player 12 --max-pages 1 --concurrency 2 ${DB_FLAG}

@@ -781,7 +781,7 @@ def _fetch_replays_http_impl(
     # Page 2+: GET /player/{tag}/battles/scroll/{data-index}/type/all
     all_links: list[dict] = []
     scroll_cursor = None
-    rotated_this_pass = False  # reactive VPN rotation fires at most once per pass
+    recovered_this_pass = False  # reactive 403 recovery fires at most once per pass
 
     for page_num in range(max_pages):
         if scroll_cursor:
@@ -802,18 +802,35 @@ def _fetch_replays_http_impl(
 
         if status != 200:
             logger.warning("Battle page %d returned %d for %s", page_num + 1, status, tag_clean)
-            # Reactive rotation: a 403 means this exit just got CF-challenged.
-            # Roll to a fresh pool IP (once per pass) and retry the same page.
-            if status == 403 and not rotated_this_pass and GLUETUN_CONTROL_URL:
-                rotated_this_pass = True
-                logger.info("Battle page 403 — rotating VPN exit and retrying %s", tag_clean)
-                if rotate_vpn_exit():
+            # Reactive 403 recovery, at most once per pass. A 403 means
+            # Cloudflare stopped trusting this (egress IP, UA, cf_clearance)
+            # triple — usually because the token's trust window closed early,
+            # well before CF_REFRESH_MAX_AGE makes _cf_clearance_is_stale()
+            # fire at pass start. Recovery: roll the exit if we're behind the
+            # VPN, then ALWAYS re-mint cf_clearance. The token is bound to the
+            # egress IP, so retrying with the existing header can only 403
+            # again — and after a rotation it is invalid by definition.
+            # Re-minting also repairs the session file for the players that
+            # follow in this run, so one burst costs one ~4s refresh, not a
+            # wiped pass. Safe here: the whole pass holds the scrape flock.
+            if status == 403 and not recovered_this_pass:
+                recovered_this_pass = True
+                if GLUETUN_CONTROL_URL:
+                    logger.info("Battle page 403 — rotating VPN exit for %s", tag_clean)
+                    rotate_vpn_exit()
+                logger.info("Battle page 403 — re-minting cf_clearance for %s", tag_clean)
+                if refresh_cf_clearance(state_path, warmup_tag=tag_clean):
+                    cookies = _load_cookies(state_path)
+                    _ACTIVE_USER_AGENT = _session_user_agent(state_path)
+                    cookie_header = _build_cookie_header(cookies)
                     try:
                         status, html, set_cookies = _http_get(url, cookie_header)
                         if set_cookies:
                             _capture_cookies(set_cookies)
                     except Exception as e:
-                        logger.warning("Retry after rotation failed for %s: %s", tag_clean, e)
+                        logger.warning("Retry after cf_clearance re-mint failed for %s: %s", tag_clean, e)
+                else:
+                    logger.warning("cf_clearance re-mint failed for %s", tag_clean)
             if status != 200:
                 break
 

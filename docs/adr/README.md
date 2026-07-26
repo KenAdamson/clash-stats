@@ -19,6 +19,7 @@ The replay scraper (`replays.py`) captures every card placement event with tick-
 | [007](007-training-data-pipeline.md) | Training Data Pipeline & Scale Strategy | **Implemented** | Top-ladder corpus (13K+ players), 3-4K battles/day, stratified sampling |
 | [008](008-observability.md) | Pipeline Observability & Resilience | **Implemented** | Prometheus metrics, Loki log aggregation, Grafana dashboards, circuit breakers, structured retries |
 | [009](009-visual-game-state-recognition.md) | Visual Game State Recognition | **In Progress (Phase 1.5+2)** | Replay-guided labeling, SAMv2 unit tracking on XPU. YOLO distillation (Phase 4) and tactical reconstruction (Phase 5) pending |
+| [010](010-scraping-egress-split.md) | RoyaleAPI Scraping Egress Split | **Implemented** | Corpus replays egress direct (residential IP unbanned after router cut-over); personal/alt stay on the VPN so a re-ban costs replaceable data. Separate `cf_clearance` session per egress + reactive 403 re-mint |
 
 ## Detailed Technical Documentation
 

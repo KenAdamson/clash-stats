@@ -49,11 +49,25 @@ services:
       # a fresh token tolerates concurrency 8 cleanly. This cap just bounds the
       # blast radius if a refresh fails and we fall back to a stale token.
       - ROYALEAPI_REQUESTS_PER_SEC=10.0
-      # Route ALL RoyaleAPI traffic through the dedicated scraper VPN exit.
-      # Both the proxy and the cf_clearance minter share that one Mullvad IP,
-      # keeping our residential IP (banned 06-08) off RoyaleAPI entirely.
+      # PERSONAL + ALT replay traffic goes through the dedicated scraper VPN
+      # exit; the proxy and the cf_clearance minter share that one Mullvad IP.
+      # (Corpus replays egress DIRECT — see CORPUS_REPLAY_DIRECT below.)
       - ROYALEAPI_PROXY=http://cr-scraper-vpn:8888
       - FLARESOLVERR_URL=http://cr-scraper-vpn:8191/v1
+      # Set EXPLICITLY: replay_http.py defaults this to the same URL when unset,
+      # so a direct-egress job that merely omits it still takes the rotation
+      # path on a 403 — rotating the SHARED exit and invalidating the other
+      # jobs' cf_clearance. Direct paths must pass "".
+      - GLUETUN_CONTROL_URL=http://cr-scraper-vpn:8000
+      # Corpus replays bypass the VPN (1) or use it (0). The 2026-06 RoyaleAPI
+      # ban was pinned to the OLD residential IP and did not survive the router
+      # cutover: direct now returns clean 200s while the shared Mullvad exit is
+      # heavily challenged. Personal/alt stay on the VPN on purpose — a re-ban
+      # then costs corpus throughput (recoverable), not personal battle history.
+      # cf_clearance is bound to the egress IP, hence the separate session file.
+      - CORPUS_REPLAY_DIRECT=1
+      - DIRECT_SESSION_PATH=/app/data/royaleapi_session_direct.json
+      - DIRECT_FLARESOLVERR_URL=http://flaresolverr:8191/v1
       - DATABASE_URL=postgresql://clash_stats:${DB_PASSWORD}@clash-postgres,192.168.7.62/clash_stats?target_session_attrs=read-write
       - DASHBOARD_DATABASE_URL=postgresql://clash_stats:${DB_PASSWORD}@192.168.7.62/clash_stats
     volumes:
