@@ -42,8 +42,18 @@ RUN mkdir -p /app/src/tracker && \
 COPY src/ /app/src/
 RUN pip install --no-cache-dir --no-deps .
 
-# Create data directory for SQLite volume mount
+# Create data directory for the volume mount
 RUN mkdir -p /app/data
+
+# Ops toolbox: training launchers, evaluation, diagnostics, feature research.
+# These used to live loose in the ./data volume, which meant they were outside
+# source control (data/ is a symlink git will not traverse) and had to be
+# docker-cp'd in by hand. Baking them in keeps the image self-contained: the
+# scripts that build and evaluate the models ship WITH the runtime that uses
+# them. Placed after COPY src/ so editing a tool does not invalidate the
+# multi-GB torch install layer.
+COPY tools/ /app/tools/
+RUN chmod -R a+rx /app/tools
 
 # Cron schedule — Debian cron reads from /etc/cron.d/
 COPY crontab /etc/cron.d/cr-tracker
