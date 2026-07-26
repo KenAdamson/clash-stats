@@ -377,9 +377,13 @@ chmod +x /app/embed_new.sh
 XPU_TRAIN_LOCK=${LOCKDIR}/xpu_train.lock
 
 # TCN retraining
+# NB: no `exec` here — `exec flock ... || echo` makes the fallback unreachable,
+# because exec replaces the shell before the `||` can run. These jobs now skip
+# routinely (whenever the XPU lock is held), and a weekly retrain skipping
+# silently for weeks would be invisible in docker logs.
 cat > /app/tcn_train.sh << EOF
 #!/bin/sh
-exec flock -n ${XPU_TRAIN_LOCK} flock -n ${LOCKDIR}/tcn_train.lock sh -c '
+flock -n ${XPU_TRAIN_LOCK} flock -n ${LOCKDIR}/tcn_train.lock sh -c '
 cd /app
 [ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
@@ -391,7 +395,7 @@ chmod +x /app/tcn_train.sh
 # Activity model retraining
 cat > /app/train_activity.sh << EOF
 #!/bin/sh
-exec flock -n ${XPU_TRAIN_LOCK} flock -n ${LOCKDIR}/train_activity.lock sh -c '
+flock -n ${XPU_TRAIN_LOCK} flock -n ${LOCKDIR}/train_activity.lock sh -c '
 cd /app
 [ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
