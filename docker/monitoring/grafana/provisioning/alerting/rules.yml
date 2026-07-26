@@ -179,6 +179,20 @@ groups:
           severity: warning
 
       # Session expired detected in logs (Loki)
+      #
+      # ⚠ ONLY log-derived rule here, and it inherits its pipeline's gaps: it reads
+      # zero for any window alloy failed to ship to Loki, which is indistinguishable
+      # from "no session expiry happened". Not hypothetical — alloy currently replays
+      # container logs from the beginning on restart and Loki rejects everything past
+      # the unordered-write window, so batches are actively dropped.
+      #
+      # It is also REDUNDANT: `RoyaleAPI Session Expired` above tests the same
+      # condition via session_expiry_total, a metric, which is immune to that gap.
+      # So this rule contributes no coverage and can report false quiet.
+      # RECOMMEND removing it at the observability migration, or pairing it with a
+      # freshness check on the log stream so absence-of-data is separable from
+      # absence-of-problem. Left in place for now — deleting an alert is a call for
+      # the migration window, not a drive-by.
       - uid: session-expired-logs
         title: Session Expired (Logs)
         condition: C
