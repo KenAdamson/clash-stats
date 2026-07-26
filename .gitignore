@@ -6,8 +6,11 @@ __pycache__/
 .DS_Store
 data/
 .env
+# Any .env sidecar (.env.bak.*, .env.local, .env.anthropic, ...) may hold live
+# credentials — ignore the whole family and allow only the checked-in template.
+.env.*
+!.env.example
 src/cycle_sim/
-.env.anthropic
 replays/
 *.db
 .claude/
