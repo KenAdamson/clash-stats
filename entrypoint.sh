@@ -393,9 +393,13 @@ EOF
 chmod +x /app/tcn_train.sh
 
 # Activity model retraining
+# NOT gated on ${XPU_TRAIN_LOCK}: activity_model.py trains a sklearn
+# GradientBoostingClassifier — CPU only, no torch, no XPU — so it does not
+# compete with WP/TCN training for the card. Gating it would have blocked the
+# weekly retrain for the whole duration of any multi-day training run.
 cat > /app/train_activity.sh << EOF
 #!/bin/sh
-flock -n ${XPU_TRAIN_LOCK} flock -n ${LOCKDIR}/train_activity.lock sh -c '
+flock -n ${LOCKDIR}/train_activity.lock sh -c '
 cd /app
 [ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
