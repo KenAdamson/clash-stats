@@ -313,7 +313,7 @@ export ROYALEAPI_SESSION_PATH="${CORPUS_SESSION_PATH}"
 ${CORPUS_SCRAPER_ENV}
 export ROYALEAPI_REQUESTS_PER_SEC="${CORPUS_REPLAY_RATE:-1.0}"
 export PYTHONUNBUFFERED=1
-clash-stats --corpus-combined --corpus-limit 16 --replays-per-player 12 --max-pages 1 --concurrency 2 ${DB_FLAG}
+clash-stats --corpus-combined --corpus-limit ${CORPUS_REPLAY_LIMIT:-16} --replays-per-player 12 --max-pages 1 --concurrency 2 ${DB_FLAG}
 ' || echo "corpus_replays: previous run still active, skipping"
 EOF
 chmod +x /app/corpus_replays.sh
