@@ -93,10 +93,26 @@ groups:
         labels:
           severity: warning
 
-      # Battle scraper silent — no fetch cycles completed in 20 minutes
-      # Checks scrape_runs_total (increments on every fetch, even with 0 new battles).
-      # Uses noDataState: OK to avoid false alarms on container restarts (counter
-      # resets cause Prometheus to report no data until the second scrape).
+      # Battle scraper silent — no battles written in 45 minutes.
+      #
+      # This alert used to read:
+      #   increase(scrape_runs_total{scrape_type="battles"}[20m])
+      # which fired permanently while the scraper was perfectly healthy, for two
+      # independent reasons (diagnosed 2026-07-26 after it paged for ~8h):
+      #
+      #   1. scrape_runs_total increments only at run COMPLETION, and a
+      #      --corpus-limit 500 pass takes longer than the 20m window. A window
+      #      containing zero completions is normal, not silence.
+      #   2. The selector matched three series (outcome=success/failed/partial)
+      #      and Grafana evaluates the threshold PER SERIES with no aggregation.
+      #      outcome="partial" sits at 7 and essentially never increments, so it
+      #      satisfied `lt 1` forever — one alert instance that can never resolve.
+      #
+      # Fix: measure the thing we actually care about — battles written to the DB —
+      # which climbs continuously during a run instead of stepping at boundaries.
+      # sum() collapses the corpus labels to ONE series so per-series evaluation
+      # cannot resurrect the same bug (personal/alt are legitimately flat whenever
+      # Ken isn't playing; only the total means "the scraper is alive").
       - uid: scraper-silent
         title: Battle Scraper Silent
         condition: C
@@ -104,11 +120,11 @@ groups:
         data:
           - refId: A
             relativeTimeRange:
-              from: 1200
+              from: 2700
               to: 0
             datasourceUid: prometheus
             model:
-              expr: increase(scrape_runs_total{scrape_type="battles"}[20m])
+              expr: sum(increase(battles_scraped_total[45m]))
               instant: true
           - refId: C
             datasourceUid: __expr__
@@ -121,7 +137,7 @@ groups:
                     params: [1]
         for: 10m
         annotations:
-          summary: "No battle fetch cycles completed in 20+ minutes. Scraper process may be down."
+          summary: "No battles written to the DB in 45+ minutes. Scraper may be down or wedged."
         labels:
           severity: warning
 
