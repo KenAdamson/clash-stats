@@ -171,12 +171,27 @@ class SequenceDataset(Dataset):
         self.extra_features = extra_features
         self.feature_dim = BASE_FEATURE_DIM + (EXTRA_FEATURE_DIM if extra_features else 0)
 
-        # Build evo set: cards that have ability_used=1 in replay_events
-        evo_cards = set(
-            session.execute(
-                text("SELECT DISTINCT card_name FROM replay_events WHERE ability_used = 1")
-            ).scalars().all()
-        )
+        # Build evo set: cards that have ability_used=1 in replay_events.
+        # Cached alongside the card vocabulary — the live DISTINCT walks 100M+
+        # replay_events rows (~49s/call) and this constructor runs on every
+        # 5-minute inference cron. The set changes only when Supercell ships an
+        # evolution; a 24h-stale answer is indistinguishable in practice, and a
+        # brand-new evo missing for a day merely means its ability flag is 0 in
+        # features until the next refresh. SQLite (tests) always queries live.
+        from tracker.ml.card_metadata import _cache_load, _cache_store
+        _is_pg = session.bind is not None and session.bind.dialect.name == "postgresql"
+        _cached = _cache_load() if _is_pg else None
+        if _cached is not None and _cached.get("evo_cards") is not None:
+            evo_cards = set(_cached["evo_cards"])
+        else:
+            evo_cards = set(
+                session.execute(
+                    text("SELECT DISTINCT card_name FROM replay_events WHERE ability_used = 1")
+                ).scalars().all()
+            )
+            if _is_pg and _cached is not None:
+                # vocab fresh but evo missing — write evo into the shared cache
+                _cache_store([tuple(r) for r in _cached["rows"]], sorted(evo_cards))
         self._evo_cards = evo_cards
 
         # Find all PvP battles with sufficient replay events.

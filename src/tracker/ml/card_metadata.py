@@ -2,9 +2,22 @@
 
 No static JSON file needed — card names and elixir costs are extracted
 from the deck_cards table, which is populated by the scraper.
+
+The DB derivation is CACHED to a JSON file (default data/card_vocab.json,
+TTL 24h). The answer — ~120 card names — changes only when Supercell ships
+a card, but the loose index-scan below degraded from seconds to ~5.7 min/call
+as deck_cards grew past 200M rows, and every 5-minute inference cron rebuilt
+the vocabulary from scratch: 7,218 calls ≈ 28 CPU-days in three weeks, the
+single largest CPU consumer on the box. The cache also makes the card→index
+mapping stable within its TTL, which trained checkpoints implicitly depend on
+(a new card sorting into the middle would shift every later index).
+Set CARD_VOCAB_CACHE="" to disable, CARD_VOCAB_TTL to tune (seconds).
 """
 
+import json
 import logging
+import os
+import time
 from typing import Optional
 
 from sqlalchemy import select, distinct, text
@@ -13,6 +26,53 @@ from sqlalchemy.orm import Session
 from tracker.models import DeckCard
 
 logger = logging.getLogger(__name__)
+
+_CACHE_PATH = os.environ.get("CARD_VOCAB_CACHE", "data/card_vocab.json")
+_CACHE_TTL = float(os.environ.get("CARD_VOCAB_TTL", "86400"))
+
+
+def _cache_load() -> Optional[dict]:
+    """Return the cached vocab dict, or None if absent/stale/disabled."""
+    if not _CACHE_PATH:
+        return None
+    try:
+        with open(_CACHE_PATH) as fh:
+            data = json.load(fh)
+        if time.time() - data["built_at"] > _CACHE_TTL:
+            return None
+        return data
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def _cache_store(rows: list, evo_cards: Optional[list] = None) -> None:
+    """Atomically persist the derived vocab (and optionally the evo set)."""
+    if not _CACHE_PATH:
+        return
+    prev = None
+    try:
+        with open(_CACHE_PATH) as fh:
+            prev = json.load(fh)
+    except (OSError, ValueError):
+        pass
+    data = {
+        "built_at": time.time(),
+        "rows": [[n, e] for n, e in rows],
+        # preserve an evo set written by the other producer if we lack one
+        "evo_cards": evo_cards if evo_cards is not None
+                     else (prev or {}).get("evo_cards"),
+    }
+    tmp = f"{_CACHE_PATH}.tmp.{os.getpid()}"
+    try:
+        with open(tmp, "w") as fh:
+            json.dump(data, fh)
+        os.replace(tmp, _CACHE_PATH)
+    except OSError as e:
+        logger.warning("card_vocab cache write failed: %s", e)
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 
 # Loose index-scan (skip-scan) over deck_cards. The table is ~85M rows but holds
 # only ~121 distinct cards; a plain DISTINCT/Index-Scan→Unique walks all 85M
@@ -99,10 +159,19 @@ class CardVocabulary:
 
     def __init__(self, session: Session):
         # Query distinct (card_name, elixir), sorted for deterministic ordering.
-        # On PostgreSQL use the loose index-scan to avoid a full 85M-row walk;
-        # elsewhere (SQLite tests) fall back to a plain DISTINCT on tiny data.
+        # On PostgreSQL, serve from the JSON cache when fresh (see module
+        # docstring — the live derivation costs minutes against 200M+ rows and
+        # used to run every 5-minute cron tick); on miss, run the loose
+        # index-scan and write through. SQLite (tests) always queries live —
+        # tiny data, and tests must not couple to a cache file.
         if session.bind is not None and session.bind.dialect.name == "postgresql":
-            rows = session.execute(_LOOSE_SCAN_SQL).all()
+            cached = _cache_load()
+            if cached is not None:
+                rows = [tuple(r) for r in cached["rows"]]
+                logger.info("CardVocabulary: served from cache (%s)", _CACHE_PATH)
+            else:
+                rows = session.execute(_LOOSE_SCAN_SQL).all()
+                _cache_store(rows)
         else:
             rows = session.execute(
                 select(DeckCard.card_name, DeckCard.card_elixir)
