@@ -42,9 +42,18 @@ PATH=/usr/local/bin:/usr/bin:/bin
 # Incremental TCN embedding: embed new games every 6 hours
 0 1,7,13,19 * * * root /app/embed_new.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Weekly: retrain TCN on full corpus (Sunday 4am UTC)
-0 4 * * 0 root /app/tcn_train.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
+# FROZEN 2026-07-28 (remove #TCNFREEZE# to re-enable): every retrain moves the
+# embedding space, invalidating all previously computed embeddings/manifold
+# coords — while the encoder's main consumer is the similarity/manifold stack,
+# which NEEDS a stable space to be comparable over time. The WP encoder (v9,
+# 4x width, full 1.67M pool) is being evaluated as this encoder's replacement;
+# retrain deliberately (with a versioned full re-embed) or not at all.
+#TCNFREEZE# 0 4 * * 0 root /app/tcn_train.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Weekly: retrain activity model for corpus scheduling (Monday 6:30am UTC, after corpus_update)
 30 6 * * 1 root /app/train_activity.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
+# Weekly: WP drift tripwire — evaluate production model on newest games (Tuesday 5am UTC).
+# A sustained accuracy drop = retrain early; flat = keep waiting for the corpus to double.
+0 5 * * 2 root /app/wp_drift_check.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 
 # --- Discovery jobs ---
 # Hourly: add opponents I've lost to into the corpus

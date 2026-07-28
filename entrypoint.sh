@@ -392,6 +392,23 @@ clash-stats --train-tcn ${DB_FLAG}
 EOF
 chmod +x /app/tcn_train.sh
 
+# WP drift tripwire (weekly): evaluate the PRODUCTION model on the newest
+# games and warn if accuracy sags below its own baseline. This is what makes
+# "hold off retraining until the corpus doubles" a monitored position instead
+# of a bet. Takes ${XPU_TRAIN_LOCK} non-blocking: it is a brief inference
+# pass, but on small-BAR the card cannot host it beside a training run — if a
+# capacity run is live, skipping a weekly check is the correct trade.
+cat > /app/wp_drift_check.sh << EOF
+#!/bin/sh
+flock -n ${XPU_TRAIN_LOCK} flock -n ${LOCKDIR}/wp_drift_check.lock sh -c '
+cd /app
+[ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
+export PYTHONPATH=/app/src PYTHONUNBUFFERED=1
+python3 tools/eval/wp_drift_check.py
+' || echo "wp_drift_check: XPU busy or previous run still active, skipping"
+EOF
+chmod +x /app/wp_drift_check.sh
+
 # Activity model retraining
 # NOT gated on ${XPU_TRAIN_LOCK}: activity_model.py trains a sklearn
 # GradientBoostingClassifier — CPU only, no torch, no XPU — so it does not
