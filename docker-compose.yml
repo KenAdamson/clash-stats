@@ -66,6 +66,17 @@ services:
       # then costs corpus throughput (recoverable), not personal battle history.
       # cf_clearance is bound to the egress IP, hence the separate session file.
       - CORPUS_REPLAY_DIRECT=1
+      # Breadth: 32 proven over 6h+12h holds (2.7x yield, pushback flat, one
+      # transient CF event). Without this the entrypoint default silently
+      # reverts the running experiment to 16 on recreate.
+      - CORPUS_REPLAY_LIMIT=32
+      # XPU allocation knobs, proven 2026-07-23 (lift the 4GB single-alloc cap;
+      # batch 1024 stable on small-BAR). Baked here so cron-launched training
+      # (tcn_train) and ad-hoc runs get them, not just the launcher scripts.
+      - UR_L0_ENABLE_RELAXED_ALLOCATION_LIMITS=1
+      - UR_L0_USE_RELAXED_ALLOCATION_LIMITS=1
+      - UR_L0_USE_IMMEDIATE_COMMANDLISTS=1
+      - IGC_ExtraOCLOptions=-cl-intel-greater-than-4GB-buffer-required
       - DIRECT_SESSION_PATH=/app/data/royaleapi_session_direct.json
       - DIRECT_FLARESOLVERR_URL=http://flaresolverr:8191/v1
       - DATABASE_URL=postgresql://clash_stats:${DB_PASSWORD}@clash-postgres,192.168.7.62/clash_stats?target_session_attrs=read-write
