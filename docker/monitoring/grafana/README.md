@@ -5,6 +5,6 @@ stack; this dir is bind-mounted to /etc/grafana/dashboards/clash per the
 three-mount contract). JSON dashboards only — providers are owned by
 server-docs, not here.
 
-The copy of pipeline.json in ../provisioning/dashboards/ is the LEGACY
-location scanned by the pre-extraction stack; it is deleted at the cutover
-tidy-up. Until then, edits go to BOTH copies or, better, wait for cutover.
+The pre-extraction stack (and its provisioning/dashboards/ dir with the
+legacy provider yamls) was deleted at the 2026-07-28 cutover tidy-up;
+dashboards/ here is the single source of truth.
