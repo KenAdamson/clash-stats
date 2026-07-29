@@ -210,6 +210,33 @@ averaging are exactly what distributional distances preserve.
 the dynamics don't carry it either, and the signal (if any) is sub-second
 mechanics (→ C3) or policy-level (→ C2).
 
+**VERDICT 2026-07-29: killed by its own criterion — and the shape control
+is the cleanest negative of the program** (c5_distributional_eval.py,
+sliced-W1 quantile sketches, K=64 × L=16, full retrieval):
+
+| variant | AUC_easy | AUC_hard | d6-8 | vs centroid cosine |
+|---|---|---|---|---|
+| sw_full (location+shape) | 0.582 | 0.348 | 0.556 | worse on all three |
+| **sw_shape (centroid removed)** | **0.521** | 0.373 | **0.5045** | shape ≈ chance |
+| sw_timing | 0.683 | 0.237 | 0.627 | ≈ timing centroid |
+
+`sw_shape` is the decisive row: with location subtracted, the truly-disjoint
+stratum sits at **0.5045** — dead chance — and retrieval R@1 is literally
+zero. Within-group distribution SHAPE (consistency, variance structure,
+asymmetry of good vs bad games) carries no pilot signal at this
+resolution. The centroid was already the best statistic; the information
+it "destroyed" was noise. Adding shape to location (sw_full) actively
+dilutes the location signal.
+
+Program conclusion after four pre-registered falsifications (raw cosine,
+timing features, adversarial projection, distributional geometry):
+**representation space is exhausted.** The cross-deck ladder peaked at
+0.692 (C1 weak-adversary) and no statistic over per-game vectors reaches
+usability. What remains is C2 (compare DECISIONS, not representations —
+the chess-proven method, dual-use as ADR-005) and C4 (generative pilot
+latent), or an honorable park with the same-deck hands-fingerprint as the
+program's durable product.
+
 ## 3.5 The deck–tempo entanglement hypotheses (Ken, 2026-07-29 — parked for later)
 
 C3's failure mode reframed, in Ken's words: timing tells you something about
