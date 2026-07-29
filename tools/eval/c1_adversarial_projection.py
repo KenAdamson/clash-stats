@@ -174,6 +174,12 @@ def main():
     model = Projector(x.shape[1], OUT_DIM, len(cards)).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
     players_list = [p for p in tr_players if len(tr_players[p]) >= 2]
+    deck_players = defaultdict(list)
+    for (t_, d_) in tr_groups:
+        deck_players[d_].append(t_)
+    shared_decks = [d for d, ps in deck_players.items() if len(set(ps)) >= 2]
+    logger.info("decks shared by >=2 train players: %d (hard-negative pool)",
+                len(shared_decks))
 
     steps = max(1, len(players_list) // P_PLAYERS) * 8
     for ep in range(1, EPOCHS + 1):
@@ -182,17 +188,29 @@ def main():
         tot_c = tot_a = 0.0
         for _ in range(steps):
             batch_idx, pl_ids, hots = [], [], []
+            # half the batch: same-deck cross-player pairs (the hard negatives
+            # the first run never put in front of the loss)
+            pi_next = 0
+            for d in rng.choice(shared_decks, min(8, len(shared_decks)), replace=False):
+                ps = list(dict.fromkeys(deck_players[d]))
+                for p in rng.choice(ps, 2, replace=False):
+                    rows = tr_groups[(p, d)]
+                    for r in rng.choice(rows, min(2, len(rows)), replace=False):
+                        batch_idx.append(int(r)); pl_ids.append(p)
+                        hots.append(deck_hot[d])
+                pi_next += 1
             for pi, p in enumerate(rng.choice(players_list, P_PLAYERS, replace=False)):
                 ds = tr_players[p]
                 for d in rng.choice(ds, min(len(ds), 2), replace=False):
                     rows = tr_groups[(p, d)]
                     take = rng.choice(rows, min(K_GAMES // 2, len(rows)), replace=False)
                     for r in take:
-                        batch_idx.append(r); pl_ids.append(pi)
+                        batch_idx.append(int(r)); pl_ids.append(p)
                         hots.append(deck_hot[d])
             xb = X[batch_idx]
             z, dl = model(xb, lamb)
-            pl = torch.tensor(pl_ids, device=device)
+            uniq = {v: i for i, v in enumerate(dict.fromkeys(pl_ids))}
+            pl = torch.tensor([uniq[v] for v in pl_ids], device=device)
             hot = torch.from_numpy(np.stack(hots)).to(device)
             sim = z @ z.T / TEMP
             same_pl = pl.unsqueeze(0) == pl.unsqueeze(1)
