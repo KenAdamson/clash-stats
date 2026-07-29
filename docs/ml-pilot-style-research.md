@@ -119,6 +119,28 @@ also the component Ken names directly ("styles and timings").
 flagship (same human, same hands, two accounts) — if THAT fails, motor
 signal doesn't survive our 20Hz capture, and C3 is dead for this dataset.
 
+**VERDICT 2026-07-29: killed by its own criterion — with two salvage
+findings** (tools/eval/motor_timing_extract.py + motor_signal_eval.py,
+21 timing-only features, 181,827 games, unchanged Phase-0 harness):
+
+- Kill-test: the flagship's distance-8 decks read **45.5 / 44.0 pctile** =
+  noise. Timing alone cannot link Ken to Ken across disjoint decks.
+  AUC_hard 0.371 [.358–.385]: cadence is *causally* deck-shaped (elixir
+  costs set the rhythm), so "no card IDs in the features" was deck-blind
+  at the feature level but not statistically — the harness caught it.
+- **Salvage 1 — timing beats the 512-dim embeddings on every style axis:**
+  AUC_easy 0.693 vs 0.617; truly-disjoint (d6-8) stratum **0.636 vs 0.594**;
+  retrieval R@1 0.77% vs 0.66%. Twenty-one hand-built timing features carry
+  *more* cross-deck pilot signal than the WP latent space. Style lives
+  partly in tempo → C1's projection should take timing features as input
+  alongside (or instead of) raw embeddings.
+- **Salvage 2 — same-deck identity verification is essentially solved:**
+  the distance-0 flagship deck (alt playing main's own deck) scored
+  **99.7th percentile** at sim 0.944 across a 9k trophy gap and an
+  underleveled account. Timing + fixed deck ≈ a hands-fingerprint. Directly
+  applicable to alt/multi-account detection and corpus dedup, where the
+  deck is typically shared.
+
 ### C4. Hierarchical generative model with an explicit pilot latent (the voice-print)
 
 Extend the CVAE line (ADR-006 infra) to a structured latent:
