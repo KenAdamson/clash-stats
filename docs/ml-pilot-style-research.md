@@ -76,6 +76,32 @@ term (it had none).
 **Kill criterion:** if AUC_hard < 0.55 after tuning, the linearly-accessible
 residual is too thin — move down the list.
 
+**VERDICT 2026-07-29: killed by its own criterion after the tuning round**
+(c1_adversarial_projection.py; hybrid 533-dim input; pilot-level 60/40
+split, Ken never trained on; two runs):
+
+| run | adversary | AUC_easy | AUC_hard | d6-8 | R@1 |
+|---|---|---|---|---|---|
+| λ=0.5, no same-deck pairs in batch | LOST (adv loss fell) | 0.771 | 0.176 | **0.692** | 2.4% |
+| λ=4.0 + deck-matched hard negatives | STALEMATE (flat ~0.21) | 0.725 | **0.294** | 0.663 | 1.2% |
+
+The tuned run improved the hard test by 0.12 — by *spending* style signal
+(easy AUC and the d6-8 stratum both fell). The adversary never won: deck
+BCE plateaued rather than climbing, meaning deck information could not be
+squeezed out of the projection without bleeding pilot information with it.
+**That is the entanglement hypothesis (§3.5) demonstrated adversarially:
+in this feature space, deck and pilot are not separable subspaces.** The
+flagship's disjoint decks stayed at noise (35/31 pctile) in both runs;
+the d=0 control stayed at ~100th, as always.
+
+Standing result across the program so far — the d6-8 (truly disjoint)
+ladder: raw 0.594 → timing 0.636 → C1-weak **0.692** (peak; achieved
+*without* deck-stripping) → C1-strong 0.663. The cross-deck signal is
+real, learnable, transfers to unseen players, and tops out well short of
+usable — in representation space. C2 (policy-level stylometry) is the
+first candidate that changes the *object* being compared rather than the
+geometry, and inherits 0.692 as the number to beat.
+
 ### C2. Behavioral stylometry via next-action surprisal (the policy view) — *strongest prior art*
 
 Style *is* the policy π(action | state). Train one population-average
