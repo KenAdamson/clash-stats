@@ -34,7 +34,10 @@ logger = logging.getLogger("tracker.ml.motor_timing")
 
 SHARD_DIR = Path("data/pilot_embed/wp_v9")
 OUT_DIR = Path("data/pilot_embed/motor")
-BATCH = 2000
+BATCH = int(os.environ.get("MOTOR_BATCH", "400"))  # small enough to finish
+# inside the hot-standby's WAL-replay grace window; 2000-battle batches were
+# cancelled with "conflict with recovery". The script resumes, so callers
+# wrap it in a retry loop.
 TPS = 20.0                      # ticks per second (verified 2026-07-09)
 PH1, PH2 = 2400, 3600           # elixir phase boundaries in ticks
 
