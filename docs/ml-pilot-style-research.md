@@ -30,16 +30,27 @@ conditioning away the deck instead of hoping it averages out.
 
 ## 2. Phase 0 — fix the benchmark first (prerequisite for all five)
 
-The current benchmark has a flaw that **must** be fixed before any method is
-scored: "different deck" means different deck *hash*, and hashes differ on
-evo levels, so many positives are near-identical decks.
+**DONE 2026-07-29** (tools/eval/deck_cardsets_extract.py + pilot_signal_eval.py).
+Deck distance = 8 − |card-set overlap|; positives require distance ≥ 3;
+results stratified; bootstrap CIs; retrieval candidates distance-filtered;
+flagship distances verified. Corrected baseline (own-side pooling):
 
-- Define deck distance = 8 − |card-set overlap|. Positives require distance
-  ≥ 3 (genuinely different decks); report results stratified by distance.
-- Keep the existing hard-negative construction (same deck, different pilot)
-  and the flagship (main↔alt vs same-deck controls) — they were correct.
-- Bar to clear, unchanged: **AUC_hard > 0.5** with CI excluding 0.5, and the
-  flagship in the top decile. Every candidate is judged by this one harness.
+| metric | hash-based (old) | distance-corrected | reading |
+|---|---|---|---|
+| AUC_easy | 0.664 | **0.617** [.605–.628] | 38% of old positives were d≤2 near-duplicates (that stratum alone: 0.747) |
+| — d6-8 stratum | — | **0.594** | truly disjoint decks: barely above chance |
+| AUC_hard | 0.428 | **0.374** [.363–.386] | deck beats pilot even harder with honest positives |
+| retrieval R@1 | 2.0% | **0.66%** | near-duplicates were most of the "hits" |
+
+Flagship postscript: the one alt deck that ever scored above noise (78th
+pctile) turned out to have **deck distance 0 to main** — it is the alt's
+copy of the main's own deck. The two genuinely disjoint alt decks (d=8) sit
+at the 45th and 25th percentile. The glimmer was the leak.
+
+Net: the raw-space negative result is *stronger* than first reported. The
+bar for C1–C5 is unchanged and now trustworthy: **AUC_hard > 0.5** with CI
+excluding 0.5 on distance-≥3 positives, flagship (d=8 decks only) in the
+top decile.
 
 ## 3. Five candidates
 
