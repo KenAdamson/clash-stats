@@ -151,6 +151,12 @@ services:
       HTTP_CONTROL_SERVER_ADDRESS: ":8000"
     volumes:
       - ./docker/scraper-vpn/control-auth.toml:/gluetun/auth/config.toml:ro
+    # Reap orphaned healthcheck children — same gluetun issue as flare-it. The
+    # healthcheck is a shell pipeline; when it overruns `timeout: 10s` Docker
+    # kills the shell and the surviving wget/grep reparent to gluetun's
+    # entrypoint (PID 1), which never calls wait(). docker-init (tini) as PID 1
+    # reaps them instead.
+    init: true
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- https://am.i.mullvad.net/connected | grep -q 'connected to Mullvad' || exit 1"]
