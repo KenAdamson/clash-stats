@@ -184,6 +184,40 @@ averaging are exactly what distributional distances preserve.
 the dynamics don't carry it either, and the signal (if any) is sub-second
 mechanics (→ C3) or policy-level (→ C2).
 
+## 3.5 The deck–tempo entanglement hypotheses (Ken, 2026-07-29 — parked for later)
+
+C3's failure mode reframed, in Ken's words: timing tells you something about
+the person, but it is too inter-related with deck to be a separable signal.
+The entanglement runs BOTH directions:
+
+- **Selection:** people who like fast play pick fast decks that suit their
+  style — the deck-choice prior is itself style expression, not a nuisance.
+- **Constraint:** people who play fast decks are *forced* to play fast or
+  they lose; heavier decks simply can NOT be played fast — ever.
+- **Elixir economy is the central driver** of both, and **macro-scale
+  strategy becomes a resonant feature of an archetype's play style** — the
+  deck sets a tempo band, and the pilot resonates within it.
+
+Testable versions, for whenever this thread resumes:
+
+- **H-t1 (residual tempo):** within a single archetype/tempo band, per-pilot
+  timing deviations from the archetype's mean rhythm are stable across
+  sessions (the C3 features, re-baselined per archetype instead of globally).
+  C3's d0-2 stratum at 0.87 says within-deck consistency is strong; the
+  question is whether the *residual* survives an archetype switch.
+- **H-t2 (tempo preference as prior):** a pilot's deck HISTORY has a stable
+  tempo centroid — people who switch decks switch within their tempo band
+  more often than across it. Measurable from deck-hash sequences × avg
+  elixir, no replays needed.
+- **H-t3 (resonance):** macro-strategy features (elixir-hold discipline,
+  commit-vs-bank cycles from elixir_trace) cluster by archetype, and pilot
+  identity shows as a stable *phase/offset within* the archetype cluster,
+  not as a separate cluster.
+
+These fold naturally into C1 (archetype-conditioned normalization of the
+timing inputs) and C5 (trajectory phase/offset is exactly what path
+signatures capture).
+
 ## 4. Honorable mentions (not in the five, kept for the record)
 
 - **Per-pilot inverse RL:** recover reward weights (tempo vs value vs tower
