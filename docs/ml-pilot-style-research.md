@@ -271,6 +271,51 @@ These fold naturally into C1 (archetype-conditioned normalization of the
 timing inputs) and C5 (trajectory phase/offset is exactly what path
 signatures capture).
 
+## 3.6 C6 — tempo normalization: intrinsic × deck scaling (Ken, 2026-07-30)
+
+**Thesis:** a player's timing characteristics are an *intrinsic* scaled by
+the deck's elixir economy. Fast decks make you faster, slow decks make you
+slower — but YOU are still there, as a stable offset relative to the
+deck-conditional norm. Formally: `log T(player,deck) = μ + α_deck + β_band
++ β_player + ε`. This is not refuted by C1: the adversary *removed* all
+deck-correlated variance (taking the scaled copy of the pilot with it);
+C6 *divides through* by the deck instead. C3's own results support it —
+same-deck consistency 0.87 vs cross-deck noise is exactly the signature of
+intrinsic × large-scaling.
+
+**Ladder amplification (why the top feels timing-separated):** trophy
+equilibrium on an Elo-like ladder ∝ logit(win-rate vs local pool) — Ken's
+"inverted logistic" is the ladder's literal transfer function. It
+integrates thousands of games and stretches tiny persistent timing edges
+into visible trophy gaps; steepest where the pool is most compressed.
+Consequence: never regress on raw trophies; and expect band-dependent
+residual scale (heteroscedasticity).
+
+**Method (curve-agnostic):** primary variant uses CONDITIONAL RANKS — each
+feature mapped to its normal-score within a (deck-tempo × trophy-band)
+cell, annihilating any *monotone* deck/band effect without estimating the
+curve. Parametric log-residual variant runs alongside; rank > log on ICC
+is evidence the true curve is non-log (the logistic suspicion, tested for
+free). Deck tempo covariates: avg elixir + cheapest-4 cycle cost.
+
+**Noise handling ("quadrature gating"):** (1) precision-weighted
+aggregation with per-game sampling-error floors; (2) split-half
+reliability per group — odd/even half-residuals combined in quadrature as
+a self-estimated noise magnitude, gating unreliable groups/features;
+(3) cell-wise studentization for band-dependent scale.
+
+**Pre-registered Stage 1 (diagnostic before any harness):** per-feature
+ICC of (player,deck)-group residuals across each player's decks
+(distance-≥3 pairs only, LOO norms). Prediction: reaction-family features
+(react_med, snap_frac) carry ICC > 0; raw cadence mostly does not.
+**Kill criterion:** if the reaction family's ICC is indistinguishable from
+zero across decks, the intrinsic is not recoverable at 20Hz and C6 is
+falsified for this dataset. Stage 2 (only if Stage 1 lives): residual
+signatures on the unchanged Phase-0 harness. Upgrade path: elixir-GATED
+reaction latency (reaction time counted only when the elixir to answer
+existed — economy removed from the measurement, not just the norm) via
+elixir_trace, added for whichever family survives Stage 1.
+
 ## 4. Honorable mentions (not in the five, kept for the record)
 
 - **Per-pilot inverse RL:** recover reward weights (tempo vs value vs tower
