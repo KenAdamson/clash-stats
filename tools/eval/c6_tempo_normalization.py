@@ -135,10 +135,18 @@ def main():
     by_player = defaultdict(list)
     for (t, d) in groups:
         by_player[t].append(d)
+    # STRICT: a player's ICC set must be MUTUALLY distant (pairwise >= 3).
+    # The earlier version admitted near-duplicate pairs (A, A' at d=1 both kept
+    # because each had a distant sibling B), padding within-player consistency.
+    # Greedy max-first selection: order decks by games, add if >= MIN_DECK_DIST
+    # from everything already selected.
     eligible = {}
     for t, ds in by_player.items():
-        keep = [d for d in ds if any(
-            (deck_dist(cs, d, d2) or 0) >= MIN_DECK_DIST for d2 in ds if d2 != d)]
+        order = sorted(ds, key=lambda d: -len(groups[(t, d)]))
+        keep = []
+        for d in order:
+            if all((deck_dist(cs, d, k) or 0) >= MIN_DECK_DIST for k in keep):
+                keep.append(d)
         if len(keep) >= 2:
             eligible[t] = keep
     logger.info("groups %d; players with distance->=3 deck pairs: %d",
