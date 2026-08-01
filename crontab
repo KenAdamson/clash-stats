@@ -19,8 +19,16 @@ PATH=/usr/local/bin:/usr/bin:/bin
 2-59/5 * * * * root /app/corpus_replays.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Weekly: refresh top-ladder player tags (Monday 6am UTC)
 0 6 * * 1 root /app/corpus_update.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
-# Refresh simulation results daily at 2am UTC
-0 2 * * * root /app/sim_refresh.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
+# Refresh simulation results daily at 2am UTC.
+# DISABLED (#SIMOFF#) — sim-full peaks around 10GB across its forked worker
+# pool and runs ~6h, on a 62GB host that also carries Postgres, the media
+# stack and ML training. It was disabled once before (2026-07-16) as a RAM
+# hog, but only at runtime; the 2026-07-28 container recreate restored this
+# line from the image and it silently came back. Disabling it HERE is what
+# makes it stick.
+# Re-enable condition (Ken, 2026-08-01): after the host is upgraded to 128GB.
+# To restore: sed -i 's/^#SIMOFF# //' crontab, rebuild, recreate.
+#SIMOFF# 0 2 * * * root /app/sim_refresh.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Refresh derived dimensions daily at 3:30am UTC: harvest clan IDENTITY for all
 # ~490K clans from battle data (no API), enrich a priority batch of clan
 # MEASURES via the clan API (ours-first, draining the backlog over runs), and
