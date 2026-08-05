@@ -43,6 +43,9 @@ def _now() -> datetime:
 # enriches them lazily, ours-first.
 _OUR_CORPUSES = ("personal", "alt")
 
+# Our own accounts, prioritized in the player_king resolver (see there).
+_OUR_ACCOUNT_TAGS = ("#L90009GPP", "#VRVR9Q2QP")
+
 # Resolver defaults: how many clans to API-fetch per run, re-resolution age,
 # and a give-up cap so deleted/perma-404 clans aren't retried forever.
 _RESOLVE_BATCH = 300
@@ -291,11 +294,18 @@ def resolve_player_king(
           AND COALESCE(pk.resolve_attempts, 0) < :max_attempts
           AND (pk.resolved_at IS NULL
                OR pk.resolved_at < now() - make_interval(days => :max_age_days))
-        ORDER BY pd.implied_trophy_gap DESC NULLS LAST,
+        -- OUR accounts first: they sort near-last by implied_trophy_gap
+        -- (negative gaps -- they are the strong side, not smurfs), so with
+        -- ~2,800 opponents ahead of them they would effectively never be
+        -- resolved, leaving collection level and mastery null for exactly
+        -- the two players we care most about.
+        ORDER BY (pd.player_tag = ANY(:our_tags)) DESC,
+                 pd.implied_trophy_gap DESC NULLS LAST,
                  pd.last_seen DESC NULLS LAST
         LIMIT :batch
         """
-    ), {"max_attempts": max_attempts, "max_age_days": max_age_days, "batch": batch}
+    ), {"max_attempts": max_attempts, "max_age_days": max_age_days, "batch": batch,
+        "our_tags": list(_OUR_ACCOUNT_TAGS)}
     ).scalars().all()
 
     logger.info("resolve_player_king: %d players selected", len(candidates))
