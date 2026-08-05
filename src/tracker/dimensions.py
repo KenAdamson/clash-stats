@@ -23,6 +23,7 @@ from sqlalchemy import case, func, select, text
 from sqlalchemy.orm import Session
 
 from tracker.api import APIError, ClashRoyaleAPI
+from tracker.badges import card_mastery, collection_level, mode_progress
 from tracker.models import Battle, ClanDim, LevelTrophyRef, PlayerDim, PlayerKing
 
 logger = logging.getLogger(__name__)
@@ -310,16 +311,55 @@ def resolve_player_king(
                 "resolve_attempts = player_king.resolve_attempts + 1, refreshed_at = now()"
             ), {"t": tag})
             continue
+        # expLevel is the LEGACY King Level: real for pre-rework accounts,
+        # 1 for post-rework ones. Collection Level (the in-game replacement)
+        # lives in the badges array; the documented top-level field is a dead
+        # placeholder reading 0 for everyone. Store both — king_level keeps
+        # its legacy meaning so the 008 smurf-gap reference stays valid.
+        col_lvl, col_prog = collection_level(p)
         session.execute(text(
             """
             INSERT INTO player_king
-                (player_tag, king_level, best_trophies, resolved_at, resolve_attempts, refreshed_at)
-            VALUES (:t, :kl, :bt, now(), 1, now())
+                (player_tag, king_level, best_trophies, collection_level,
+                 collection_progress, resolved_at, resolve_attempts, refreshed_at)
+            VALUES (:t, :kl, :bt, :cl, :cp, now(), 1, now())
             ON CONFLICT (player_tag) DO UPDATE SET
-                king_level = :kl, best_trophies = :bt, resolved_at = now(),
+                king_level = :kl, best_trophies = :bt,
+                collection_level = :cl, collection_progress = :cp,
+                resolved_at = now(),
                 resolve_attempts = player_king.resolve_attempts + 1, refreshed_at = now()
             """
-        ), {"t": tag, "kl": p.get("expLevel"), "bt": p.get("bestTrophies")})
+        ), {"t": tag, "kl": p.get("expLevel"), "bt": p.get("bestTrophies"),
+            "cl": col_lvl, "cp": col_prog})
+
+        # Per-card mastery (usage, not upgrade level) and per-mode progress.
+        # Both come from payload we already fetched — no extra API calls.
+        mastery = card_mastery(p)
+        if mastery:
+            session.execute(text(
+                """
+                INSERT INTO player_card_mastery
+                    (player_tag, card_name, mastery_level, mastery_progress, refreshed_at)
+                VALUES (:t, :c, :l, :pr, now())
+                ON CONFLICT (player_tag, card_name) DO UPDATE SET
+                    mastery_level = :l, mastery_progress = :pr, refreshed_at = now()
+                """
+            ), [{"t": tag, "c": c, "l": lv, "pr": pr} for c, (lv, pr) in mastery.items()])
+        modes = mode_progress(p)
+        if modes:
+            session.execute(text(
+                """
+                INSERT INTO player_mode_progress
+                    (player_tag, mode_key, arena_id, arena_name, trophies,
+                     best_trophies, refreshed_at)
+                VALUES (:t, :k, :ai, :an, :tr, :bt, now())
+                ON CONFLICT (player_tag, mode_key) DO UPDATE SET
+                    arena_id = :ai, arena_name = :an, trophies = :tr,
+                    best_trophies = :bt, refreshed_at = now()
+                """
+            ), [{"t": tag, "k": k, "ai": v["arena_id"], "an": v["arena_name"],
+                 "tr": v["trophies"], "bt": v["best_trophies"]}
+                for k, v in modes.items()])
         resolved += 1
 
     session.commit()
@@ -419,9 +459,17 @@ def refresh_player_dim(
         select(LevelTrophyRef.deck_top_level, LevelTrophyRef.median_trophy)
     )}
     # king (experience) level from the persistent cache (survives rebuilds)
-    king_map = {tag: kl for tag, kl in session.execute(
-        select(PlayerKing.player_tag, PlayerKing.king_level)
-    )}
+    # king_level is the LEGACY value (real pre-rework, 1 after); collection
+    # level is the current in-game measure. Carry both — consumers choosing an
+    # investment proxy should prefer collection_level, which is populated for
+    # BOTH account cohorts.
+    king_map, coll_map = {}, {}
+    for tag, kl, cl in session.execute(
+        select(PlayerKing.player_tag, PlayerKing.king_level,
+               PlayerKing.collection_level)
+    ):
+        king_map[tag] = kl
+        coll_map[tag] = cl
 
     # Full rebuild — derived data.
     session.query(PlayerDim).delete()
@@ -448,7 +496,8 @@ def refresh_player_dim(
             player_tag=r.player_tag,
             name=r.name,
             latest_trophies=r.latest_trophies,
-            exp_level=king_map.get(r.player_tag),  # king level from player_king cache
+            exp_level=king_map.get(r.player_tag),  # LEGACY king level (1 for post-rework accts)
+            collection_level=coll_map.get(r.player_tag),  # current measure, both cohorts
             clan_tag=clan_map.get(r.player_tag),
             first_seen=r.first_seen,
             last_seen=r.last_seen,

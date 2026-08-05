@@ -285,6 +285,7 @@ class PlayerDim(Base):
     name: Mapped[Optional[str]]
     latest_trophies: Mapped[Optional[int]]
     exp_level: Mapped[Optional[int]]
+    collection_level: Mapped[Optional[int]]  # current measure; exp_level is LEGACY
     # Nullable soft-FK to clan_dim.clan_tag. Not a hard FK: a player's clan may
     # not be present in clan_dim (clan_dim only covers clans we've refreshed),
     # and we never want a missing clan to block a player upsert.
@@ -388,7 +389,9 @@ class PlayerKing(Base):
     __tablename__ = "player_king"
 
     player_tag: Mapped[str] = mapped_column(String, primary_key=True)
-    king_level: Mapped[Optional[int]]
+    king_level: Mapped[Optional[int]]           # LEGACY (1 for post-rework accounts)
+    collection_level: Mapped[Optional[int]]     # current in-game measure (badges)
+    collection_progress: Mapped[Optional[int]]
     best_trophies: Mapped[Optional[int]]
     resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     resolve_attempts: Mapped[int] = mapped_column(default=0)
@@ -446,3 +449,39 @@ class ReplaySummary(Base):
     elixir_leaked: Mapped[Optional[float]]
 
     battle: Mapped["Battle"] = relationship()
+
+
+class PlayerCardMastery(Base):
+    """Per-card mastery from the badges array.
+
+    Mastery counts how much a card has been USED, not how far it has been
+    upgraded — a behavioural signal distinct from deck_cards.card_level.
+    ``card_name`` is the badge's internal CamelCase ("HogRider"); join to
+    other card spellings via ``tracker.badges.mastery_key``.
+    """
+
+    __tablename__ = "player_card_mastery"
+
+    player_tag: Mapped[str] = mapped_column(String, primary_key=True)
+    card_name: Mapped[str] = mapped_column(String, primary_key=True)
+    mastery_level: Mapped[Optional[int]]
+    mastery_progress: Mapped[Optional[int]]
+    refreshed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+
+class PlayerModeProgress(Base):
+    """Per-mode arena/trophies from the UNDOCUMENTED `progress` payload dict.
+
+    Undocumented means the shape can change or disappear without notice, so
+    every column is nullable and callers must treat values as optional.
+    """
+
+    __tablename__ = "player_mode_progress"
+
+    player_tag: Mapped[str] = mapped_column(String, primary_key=True)
+    mode_key: Mapped[str] = mapped_column(String, primary_key=True)
+    arena_id: Mapped[Optional[int]]
+    arena_name: Mapped[Optional[str]]
+    trophies: Mapped[Optional[int]]
+    best_trophies: Mapped[Optional[int]]
+    refreshed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
