@@ -84,14 +84,17 @@ def icc_oneway(groups: list[np.ndarray]):
     return float(icc), len(groups)
 
 
-def main():
-    rng = np.random.default_rng(SEED)
+def prepare():
+    """Load motor shards, keep games whose deck has elixir covariates, bin cells.
+
+    Returns (cs, tags, decks, trophies, feats, names, avg_el, cyc4, band, cell).
+    Stage 2 reuses this so both stages normalize against an identical grid.
+    """
     cs = load_cardsets()
     cov = deck_covariates(cs)
     tags, decks, trophies, feats, names = load_motor()
-    n_feat = feats.shape[1]
     logger.info("games %d, features %d, decks w/ covariates %d",
-                len(tags), n_feat, len(cov))
+                len(tags), feats.shape[1], len(cov))
 
     have_cov = np.array([d in cov for d in decks.tolist()])
     tags, decks, trophies, feats = tags[have_cov], decks[have_cov], trophies[have_cov], feats[have_cov]
@@ -99,9 +102,18 @@ def main():
     cyc4 = np.array([cov[d][1] for d in decks.tolist()])
     band = np.clip(trophies // BAND_W, 0, 9)
     el_bin = np.digitize(avg_el, np.quantile(avg_el, np.linspace(0, 1, N_ELIXIR_BINS + 1)[1:-1]))
-    cell = el_bin * 100 + band
+    return cs, tags, decks, trophies, feats, names, avg_el, cyc4, band, el_bin * 100 + band
 
-    # --- per-game residuals, both variants ---
+
+def residualize(feats, avg_el, cyc4, band, cell):
+    """Per-game deck-tempo residuals, both variants (rank and log).
+
+    rank: normal scores within (elixir-bin x band) cell — annihilates any
+          monotone deck/band effect without estimating its shape.
+    log : log1p feature regressed on [avg_elixir, cycle4, band], residual
+          studentized within cell — the parametric multiplicative model.
+    """
+    n_feat = feats.shape[1]
     res_rank = np.full_like(feats, np.nan)
     res_log = np.full_like(feats, np.nan)
     for f in range(n_feat):
@@ -126,8 +138,17 @@ def main():
                 if s.sum() >= 50 and np.nanstd(r[s]) > 0:
                     tmp[s] = (r[s] - np.nanmean(r[s])) / np.nanstd(r[s])
             res_log[m, f] = tmp
+    return res_rank, res_log
 
-    # --- groups and player deck-pairs at distance >= 3 ---
+
+def eligible_players(tags, decks, cs):
+    """(groups, eligible) — per-player deck sets that are MUTUALLY distant.
+
+    The earlier version admitted near-duplicate pairs (A, A' at d=1 both kept
+    because each had a distant sibling B), padding within-player consistency.
+    Greedy max-first selection: order decks by games, add if >= MIN_DECK_DIST
+    from everything already selected.
+    """
     group_rows = defaultdict(list)
     for i, (t, d) in enumerate(zip(tags.tolist(), decks.tolist())):
         group_rows[(t, d)].append(i)
@@ -135,20 +156,24 @@ def main():
     by_player = defaultdict(list)
     for (t, d) in groups:
         by_player[t].append(d)
-    # STRICT: a player's ICC set must be MUTUALLY distant (pairwise >= 3).
-    # The earlier version admitted near-duplicate pairs (A, A' at d=1 both kept
-    # because each had a distant sibling B), padding within-player consistency.
-    # Greedy max-first selection: order decks by games, add if >= MIN_DECK_DIST
-    # from everything already selected.
     eligible = {}
     for t, ds in by_player.items():
-        order = sorted(ds, key=lambda d: -len(groups[(t, d)]))
         keep = []
-        for d in order:
+        for d in sorted(ds, key=lambda d: -len(groups[(t, d)])):
             if all((deck_dist(cs, d, k) or 0) >= MIN_DECK_DIST for k in keep):
                 keep.append(d)
         if len(keep) >= 2:
             eligible[t] = keep
+    return groups, by_player, eligible
+
+
+def main():
+    cs, tags, decks, trophies, feats, names, avg_el, cyc4, band, cell = prepare()
+    n_feat = feats.shape[1]
+    res_rank, res_log = residualize(feats, avg_el, cyc4, band, cell)
+
+    # --- groups and player deck-pairs at distance >= 3 ---
+    groups, by_player, eligible = eligible_players(tags, decks, cs)
     logger.info("groups %d; players with distance->=3 deck pairs: %d",
                 len(groups), len(eligible))
 
