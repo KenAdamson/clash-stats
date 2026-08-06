@@ -170,6 +170,12 @@ class ShardDataset:
         # Older shard dirs predate the deck prior; absent files mean the loader
         # yields zeros, which the PAD embedding maps to a zero vector — so a v9
         # shard set still trains a v9-shaped model without a rebuild.
+        # Per-game rarity weights (optional). Applied by scaling the loss mask,
+        # which the trainer already normalises by — so a weight is a weighted
+        # mean, with no change to the loss code or the batch signature.
+        self.has_weights = (d / "deck_weights.npy").exists()
+        self.deck_weights = (np.load(d / "deck_weights.npy", mmap_mode="r")
+                             if self.has_weights else None)
         self.has_decks = (d / "deck_ids.npy").exists()
         self.deck_ids = np.load(d / "deck_ids.npy", mmap_mode="r") if self.has_decks else None
         self.deck_vars = np.load(d / "deck_vars.npy", mmap_mode="r") if self.has_decks else None
@@ -209,6 +215,13 @@ class ShardBatchLoader:
     # the unknown state, and it matches production, where stubs keep arriving.
     DECK_MASK_RATE = float(os.environ.get("WP_DECK_MASK_RATE", "0.10"))
 
+    # Weight the loss by how unusual a deck's SHAPE is. Off by default: it
+    # deliberately distorts the training distribution, so it is a decision, not
+    # a default. Motivation is measured -- 510 spell-heavy games in 1.68M carry
+    # 0.03% of the gradient, and the model opens them at 47% when they really
+    # win 21%, an error the aggregate loss cannot see.
+    RARITY_WEIGHTS = os.environ.get("WP_RARITY_WEIGHTS", "0") == "1"
+
     def __init__(self, dataset: ShardDataset, indices, batch_size: int, shuffle: bool):
         self.ds = dataset
         self.indices = np.asarray(indices, dtype=np.int64)
@@ -234,6 +247,7 @@ class ShardBatchLoader:
                 lab_blk = np.asarray(self.ds.labels[a:b])
                 dck_blk = np.asarray(self.ds.deck_ids[a:b]) if self.ds.has_decks else None
                 dvr_blk = np.asarray(self.ds.deck_vars[a:b]) if self.ds.has_decks else None
+                wgt_blk = np.asarray(self.ds.deck_weights[a:b]) if self.ds.has_weights else None
             else:
                 cid_blk = self.ds.card_ids[rows]
                 feat_blk = self.ds.features[rows]
@@ -241,6 +255,7 @@ class ShardBatchLoader:
                 lab_blk = self.ds.labels[rows]
                 dck_blk = self.ds.deck_ids[rows] if self.ds.has_decks else None
                 dvr_blk = self.ds.deck_vars[rows] if self.ds.has_decks else None
+                wgt_blk = self.ds.deck_weights[rows] if self.ds.has_weights else None
             perm = (np.random.permutation(len(rows)) if self.shuffle
                     else np.arange(len(rows)))
             for s in range(0, len(rows), self.batch_size):
@@ -253,6 +268,11 @@ class ShardBatchLoader:
                 game_labels = torch.from_numpy(lab_blk[pb].astype(np.float32))
                 labels = game_labels.unsqueeze(1).expand(len(pb), L)
                 mask = (torch.arange(L).unsqueeze(0) < lengths_t.unsqueeze(1)).float()
+                # Training only. Never during eval, or metrics stop being
+                # comparable between models.
+                if self.shuffle and self.RARITY_WEIGHTS and wgt_blk is not None:
+                    mask = mask * torch.from_numpy(
+                        wgt_blk[pb].astype(np.float32)).unsqueeze(1)
                 if dck_blk is not None:
                     deck_ids = torch.from_numpy(dck_blk[pb].astype(np.int64))
                     deck_vars = torch.from_numpy(dvr_blk[pb].astype(np.int64))
@@ -265,4 +285,4 @@ class ShardBatchLoader:
                     deck_ids = torch.zeros(len(pb), 2, 8, dtype=torch.int64)
                     deck_vars = torch.zeros(len(pb), 2, 8, dtype=torch.int64)
                 yield card_ids, features, lengths_t, labels, mask, deck_ids, deck_vars
-            del cid_blk, feat_blk, len_blk, lab_blk, dck_blk, dvr_blk
+            del cid_blk, feat_blk, len_blk, lab_blk, dck_blk, dvr_blk, wgt_blk
