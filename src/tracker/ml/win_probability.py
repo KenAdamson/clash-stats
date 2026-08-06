@@ -48,6 +48,7 @@ class WinProbabilityModel(nn.Module):
         kernel_size: int = 3,
         dropout: float = 0.2,
         deck_features: bool = False,
+        deck_interaction: bool = False,
     ):
         super().__init__()
         self.card_embedding = nn.Embedding(vocab_size, card_embed_dim, padding_idx=0)
@@ -89,7 +90,25 @@ class WinProbabilityModel(nn.Module):
         # are available at EVERY tick including the first, rather than diffusing
         # in through causal convolutions.
         self.deck_features = deck_features
-        self.deck_dim = 2 * card_embed_dim if deck_features else 0
+        # [own ; opp ; own*opp ; own-opp].
+        #
+        # own and opp alone enter the head additively — W_own·own + W_opp·opp —
+        # which can express "this deck is strong" but NOT "this deck beats that
+        # one". A hard counter is an interaction, and measurement bore that out:
+        # against empirical archetype-matchup win rates spanning 0.076, v9 (no
+        # deck input) spread 0.0100 and the additive v10 spread 0.0202 — twice
+        # as much differentiation, but still only ~27% of the truth. The model
+        # had the direction of Goblin Barrel Bait over Goblin Giant roughly
+        # right and the magnitude off by nearly 4x, which is what shrinkage
+        # toward the mean looks like when marginals are asked to approximate an
+        # interaction.
+        #
+        # own*opp is a rank-1 bilinear term — the cheapest thing that lets a
+        # specific pairing be special rather than the sum of two reputations.
+        # own-opp carries relative strength, which the sum cannot isolate.
+        self.deck_interaction = deck_interaction and deck_features
+        n_blocks = 4 if self.deck_interaction else 2
+        self.deck_dim = n_blocks * card_embed_dim if deck_features else 0
 
         input_channels = card_embed_dim + feature_dim  # 16 + 17 = 33
         # The deck prior is ADDED to the head's first-layer output rather than
@@ -131,7 +150,11 @@ class WinProbabilityModel(nn.Module):
         Mean-pooling over the 8 cards keeps it order-invariant, which a deck is.
         """
         emb = self.card_embedding(deck_ids) + self.variant_embedding(deck_variants)
-        return emb.mean(dim=2).flatten(1)  # (batch, 2, D) -> (batch, 2D)
+        pooled = emb.mean(dim=2)                       # (batch, 2, D)
+        own, opp = pooled[:, 0], pooled[:, 1]
+        if not self.deck_interaction:
+            return pooled.flatten(1)                   # (batch, 2D)
+        return torch.cat([own, opp, own * opp, own - opp], dim=1)  # (batch, 4D)
 
     def forward(
         self,
