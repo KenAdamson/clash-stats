@@ -11,7 +11,9 @@ Architecture:
     → Transpose → (batch, 33, seq_len)
     → TCN Encoder: 6 TemporalBlocks (causal dilated convolutions)
       channels: [33→64, 64→64, 64→128, 128→128, 128→256, 256→256]
-    → Per-tick head: Linear(256→64) → ReLU → Dropout → Linear(64→1)
+    → Concat deck prior (v10): mean-pooled card+variant embeddings for BOTH
+      decks, broadcast to every tick so it is present at tick 0
+    → Per-tick head: Linear(256[+extra][+deck]→64) → ReLU → Dropout → Linear(64→1)
     → Output: P(win) at each tick
 """
 
@@ -19,6 +21,9 @@ import torch
 import torch.nn as nn
 
 from tracker.ml.tcn import TCNEncoder
+
+# base / evo / hero (deck_cards.card_variant)
+N_CARD_VARIANTS = 3
 
 
 class WinProbabilityModel(nn.Module):
@@ -42,9 +47,15 @@ class WinProbabilityModel(nn.Module):
         tcn_channels: list[int] | None = None,
         kernel_size: int = 3,
         dropout: float = 0.2,
+        deck_features: bool = False,
     ):
         super().__init__()
         self.card_embedding = nn.Embedding(vocab_size, card_embed_dim, padding_idx=0)
+        # base / evo / hero. The card vocabulary is keyed on card_name alone, so
+        # Evo Witch and Witch share an index; this offset is what separates them.
+        # Variant is per (battle, side, card) — the same Wizard is evo in one of
+        # Ken's games and hero in the other — so it cannot live in the vocabulary.
+        self.variant_embedding = nn.Embedding(N_CARD_VARIANTS, card_embed_dim)
         self.feature_dim = feature_dim
         # Record the architecture shape so a checkpoint can be reconstructed at
         # inference without hardcoding sizes (capacity experiments vary these).
@@ -56,6 +67,22 @@ class WinProbabilityModel(nn.Module):
         # extra features are concatenated onto the TCN output before the head.
         # extra_feature_dim=0 reproduces the original (encoder-input) behaviour.
         self.extra_feature_dim = extra_feature_dim
+
+        # Deck composition, injected at the head alongside extra_feature_dim.
+        #
+        # This is the v10 change. Until now the model had NO deck input at all:
+        # it learned a deck only by watching cards get played, so at the first
+        # event it had seen one card and the opponent had revealed at most one.
+        # A structural matchup — a PEKKA against a deck holding no tank killer
+        # and no cheap kiting unit — was unrepresentable, and pre_game_wp sat at
+        # a near-uninformative median 0.467 across 518K games.
+        #
+        # Both decks are known from the API before a game is ever scored, so the
+        # prior is free. Deck vectors reach the head directly, which means they
+        # are available at EVERY tick including the first, rather than diffusing
+        # in through causal convolutions.
+        self.deck_features = deck_features
+        self.deck_dim = 2 * card_embed_dim if deck_features else 0
 
         input_channels = card_embed_dim + feature_dim  # 16 + 17 = 33
 
@@ -69,17 +96,32 @@ class WinProbabilityModel(nn.Module):
         # Per-tick classification head: (batch, 256[+extra], seq_len) → (batch, 1, seq_len)
         out_ch = self.tcn.output_channels  # 256
         self.head = nn.Sequential(
-            nn.Conv1d(out_ch + extra_feature_dim, 64, 1),
+            nn.Conv1d(out_ch + extra_feature_dim + self.deck_dim, 64, 1),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Conv1d(64, 1, 1),
         )
+
+    def encode_decks(
+        self, deck_ids: torch.Tensor, deck_variants: torch.Tensor
+    ) -> torch.Tensor:
+        """(batch, 2, 8) card ids + variants -> (batch, 2*card_embed_dim).
+
+        Reuses the played-card embedding table, so a deck vector lives in the
+        same space the model already learned from 1.67M games of placements —
+        the deck prior costs one small variant table, not a second encoder.
+        Mean-pooling over the 8 cards keeps it order-invariant, which a deck is.
+        """
+        emb = self.card_embedding(deck_ids) + self.variant_embedding(deck_variants)
+        return emb.mean(dim=2).flatten(1)  # (batch, 2, D) -> (batch, 2D)
 
     def forward(
         self,
         card_ids: torch.Tensor,
         features: torch.Tensor,
         lengths: torch.Tensor,
+        deck_ids: torch.Tensor | None = None,
+        deck_variants: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Forward pass producing per-tick logits.
 
@@ -87,6 +129,8 @@ class WinProbabilityModel(nn.Module):
             card_ids: (batch, seq_len) int64 — card vocabulary indices.
             features: (batch, seq_len, feature_dim) float32.
             lengths: (batch,) int64 — original sequence lengths.
+            deck_ids: (batch, 2, 8) int64 — own/opponent deck card indices.
+            deck_variants: (batch, 2, 8) int64 — 0 base, 1 evo, 2 hero.
 
         Returns:
             logits: (batch, seq_len) — raw logits per tick (apply sigmoid for P(win)).
@@ -106,6 +150,17 @@ class WinProbabilityModel(nn.Module):
         tcn_out = self.tcn(combined)  # (batch, 256, seq_len)
         if extra is not None:
             tcn_out = torch.cat([tcn_out, extra.transpose(1, 2)], dim=1)  # (batch, 256+extra, seq_len)
+        if self.deck_features:
+            if deck_ids is None or deck_variants is None:
+                raise ValueError(
+                    "model was built with deck_features=True but forward() got no "
+                    "deck tensors — the dataset and checkpoint are out of sync"
+                )
+            # Constant across time, broadcast to every tick: the deck prior must
+            # be available at tick 0, which is the whole point of the change.
+            deck = self.encode_decks(deck_ids, deck_variants)  # (batch, 2D)
+            deck = deck.unsqueeze(2).expand(-1, -1, tcn_out.size(2))
+            tcn_out = torch.cat([tcn_out, deck], dim=1)
         logits = self.head(tcn_out).squeeze(1)  # (batch, seq_len)
 
         return logits

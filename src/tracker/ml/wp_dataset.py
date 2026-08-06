@@ -25,8 +25,10 @@ def wp_collate_fn(
         lengths: (batch,) int64
         labels: (batch, max_len) float32 — game result broadcast to all ticks
         mask: (batch, max_len) float32 — 1.0 for real ticks, 0.0 for padding
+        deck_ids: (batch, 2, 8) int64 — own/opponent deck card indices
+        deck_vars: (batch, 2, 8) int64 — 0 base, 1 evo, 2 hero
     """
-    card_ids, features, lengths, game_labels = _base_collate(batch)
+    card_ids, features, lengths, game_labels, deck_ids, deck_vars = _base_collate(batch)
     batch_size = card_ids.size(0)
     max_len = card_ids.size(1)
 
@@ -37,4 +39,4 @@ def wp_collate_fn(
     arange = torch.arange(max_len).unsqueeze(0)  # (1, max_len)
     mask = (arange < lengths.unsqueeze(1)).float()  # (batch, max_len)
 
-    return card_ids, features, lengths, labels, mask
+    return card_ids, features, lengths, labels, mask, deck_ids, deck_vars

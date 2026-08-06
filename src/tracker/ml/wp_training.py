@@ -304,18 +304,20 @@ class WPTrainer:
             train_loss = 0.0
             train_ticks = 0
 
-            for card_ids, features, lengths, labels, mask in self.train_loader:
+            for card_ids, features, lengths, labels, mask, deck_ids, deck_vars in self.train_loader:
                 card_ids = card_ids.to(self.device)
                 features = features.to(self.device)
                 lengths = lengths.to(self.device)
                 labels = labels.to(self.device)
                 mask = mask.to(self.device)
+                deck_ids = deck_ids.to(self.device)
+                deck_vars = deck_vars.to(self.device)
 
                 self.optimizer.zero_grad()
                 _amp = (torch.autocast(device_type=self.device.type, dtype=torch.bfloat16)
                         if self.amp else contextlib.nullcontext())
                 with _amp:
-                    logits = self.model(card_ids, features, lengths)
+                    logits = self.model(card_ids, features, lengths, deck_ids, deck_vars)
                     loss_per_tick = self.criterion(logits, labels)
                     loss = (loss_per_tick * mask).sum() / mask.sum().clamp(min=1)
 
@@ -422,6 +424,7 @@ class WPTrainer:
                     "extra_feature_dim": getattr(self.model, "extra_feature_dim", 0),
                     "tcn_channels": getattr(self.model, "tcn_channels", None),
                     "card_embed_dim": getattr(self.model, "card_embed_dim", 16),
+                    "deck_features": getattr(self.model, "deck_features", False),
                     "epoch": epoch,
                     "val_loss": val_loss,
                     "val_acc": val_acc,
@@ -450,17 +453,19 @@ class WPTrainer:
         total_games = 0
 
         with torch.no_grad():
-            for card_ids, features, lengths, labels, mask in loader:
+            for card_ids, features, lengths, labels, mask, deck_ids, deck_vars in loader:
                 card_ids = card_ids.to(self.device)
                 features = features.to(self.device)
                 lengths = lengths.to(self.device)
                 labels = labels.to(self.device)
                 mask = mask.to(self.device)
+                deck_ids = deck_ids.to(self.device)
+                deck_vars = deck_vars.to(self.device)
 
                 _amp = (torch.autocast(device_type=self.device.type, dtype=torch.bfloat16)
                         if self.amp else contextlib.nullcontext())
                 with _amp:
-                    logits = self.model(card_ids, features, lengths)
+                    logits = self.model(card_ids, features, lengths, deck_ids, deck_vars)
                     loss_per_tick = self.criterion(logits, labels)
                 total_loss += (loss_per_tick * mask).sum().item()
                 total_ticks += mask.sum().item()
@@ -487,12 +492,14 @@ class WPTrainer:
         all_logits: list[np.ndarray] = []
         all_labels: list[np.ndarray] = []
 
-        for card_ids, features, lengths, labels, mask in self.val_loader:
+        for card_ids, features, lengths, labels, mask, deck_ids, deck_vars in self.val_loader:
             card_ids = card_ids.to(self.device)
             features = features.to(self.device)
             lengths = lengths.to(self.device)
+            deck_ids = deck_ids.to(self.device)
+            deck_vars = deck_vars.to(self.device)
 
-            logits = self.model(card_ids, features, lengths)
+            logits = self.model(card_ids, features, lengths, deck_ids, deck_vars)
 
             batch_size = logits.size(0)
             last_indices = (lengths - 1).clamp(min=0).long()
@@ -539,12 +546,14 @@ class WPTrainer:
         # Process in batches matching the dataloader
         sample_idx = 0
 
-        for card_ids, features, lengths, labels, mask in self.full_loader:
+        for card_ids, features, lengths, labels, mask, deck_ids, deck_vars in self.full_loader:
             card_ids = card_ids.to(self.device)
             features = features.to(self.device)
             lengths = lengths.to(self.device)
+            deck_ids = deck_ids.to(self.device)
+            deck_vars = deck_vars.to(self.device)
 
-            logits = self.model(card_ids, features, lengths)  # (batch, seq_len)
+            logits = self.model(card_ids, features, lengths, deck_ids, deck_vars)  # (batch, seq_len)
             logits_np = logits.cpu().numpy()
             if calibrator is not None and calibrator.fitted:
                 probs = calibrator.calibrate_logits(logits_np)
@@ -680,7 +689,8 @@ def infer_wp(session: Session, model_dir: Optional[Path] = None) -> None:
     model = WinProbabilityModel(vocab_size=saved_vocab_size, feature_dim=feat_dim,
                                 extra_feature_dim=extra_dim, dropout=0.0,
                                 tcn_channels=checkpoint.get("tcn_channels"),
-                                card_embed_dim=checkpoint.get("card_embed_dim", 16))
+                                card_embed_dim=checkpoint.get("card_embed_dim", 16),
+                                deck_features=checkpoint.get("deck_features", False))
     model.load_state_dict(sd)
     model.to(device)
     model.eval()
@@ -834,7 +844,8 @@ def infer_wp_incremental(session: Session, model_dir: Optional[Path] = None) -> 
     model = WinProbabilityModel(vocab_size=checkpoint["vocab_size"], feature_dim=feat_dim,
                                 extra_feature_dim=extra_dim, dropout=0.0,
                                 tcn_channels=checkpoint.get("tcn_channels"),
-                                card_embed_dim=checkpoint.get("card_embed_dim", 16))
+                                card_embed_dim=checkpoint.get("card_embed_dim", 16),
+                                deck_features=checkpoint.get("deck_features", False))
     model.load_state_dict(sd)
     model.to(device)
     model.eval()
@@ -990,9 +1001,15 @@ def train_wp(
                     "tcn_channels=%s, card_embed=%d)", feat_dim, _tcn_ch or "default", _emb)
         print(f"  → Training from scratch (feature_dim={feat_dim}, forced full encoder"
               f"{'' if _tcn_ch is None else f', tcn={_tcn_ch}, embed={_emb}'})")
+        _deck = os.environ.get("WP_DECK_FEATURES", "1") == "1"
         model = WinProbabilityModel(vocab_size=vocab.size, feature_dim=feat_dim, dropout=DROPOUT,
-                                    tcn_channels=_tcn_ch, card_embed_dim=_emb)
+                                    tcn_channels=_tcn_ch, card_embed_dim=_emb,
+                                    deck_features=_deck)
         _built_from_scratch = True
+        if _deck:
+            logger.info("Deck prior ENABLED: both decks mean-pooled (card+variant "
+                        "embeddings) and injected at the head, so P(win) has a "
+                        "matchup prior at tick 0")
 
         # WP_RESUME=<path>: warm-start the weights from an earlier run of the
         # SAME architecture instead of starting cold. A long capacity run that
@@ -1020,7 +1037,23 @@ def train_wp(
                     f"WP_RESUME feature_dim mismatch: checkpoint "
                     f"{_ck.get('feature_dim')} vs current {feat_dim}"
                 )
-            model.load_state_dict(_ck["model_state_dict"])
+            # Shape-compatible transfer. Enabling the deck prior grows the head's
+            # first conv (out_ch -> out_ch+deck_dim) and adds variant_embedding,
+            # so a strict load would refuse a checkpoint whose encoder is exactly
+            # what we want to keep. Everything that matches is taken; the rest is
+            # initialised fresh and named in the log so a silent partial load can
+            # never be mistaken for a full one.
+            _src_sd = _ck["model_state_dict"]
+            _own_sd = model.state_dict()
+            _take = {k: v for k, v in _src_sd.items()
+                     if k in _own_sd and _own_sd[k].shape == v.shape}
+            _skip = sorted(set(_own_sd) - set(_take))
+            model.load_state_dict(_take, strict=False)
+            if _skip:
+                logger.info("WP_RESUME transferred %d/%d tensors; freshly initialised: %s",
+                            len(_take), len(_own_sd), ", ".join(_skip))
+                print(f"  → Warm start transferred {len(_take)}/{len(_own_sd)} tensors; "
+                      f"fresh: {', '.join(_skip)}")
             logger.info("WP_RESUME — warm-started from %s (epoch %s, val_loss %.4f, "
                         "val_acc %.4f); optimizer/LR schedule restart",
                         _resume, _ck.get("epoch"), _ck.get("val_loss", float("nan")),

@@ -63,6 +63,12 @@ BASE_FEATURE_DIM = 17
 EXTRA_FEATURE_DIM = 7
 CORPUS_ENRICHMENT_PATH = "data/corpus_enrichment.pkl"
 
+# Deck prior (v10). Eight cards per side, own first then opponent, as vocabulary
+# indices plus a base/evo/hero variant code. Both decks are known from the API
+# before a game is scored, so this costs nothing at inference time.
+DECK_SIZE = 8
+VARIANT_IDX = {"base": 0, "evo": 1, "hero": 2}
+
 # Card type to one-hot index
 CARD_TYPE_IDX = {"troop": 0, "spell": 1, "building": 2}
 
@@ -154,6 +160,7 @@ class SequenceDataset(Dataset):
         vocab: CardVocabulary,
         battle_ids: list[str] | None = None,
         extra_features: bool = False,
+        deck_features: bool = True,
         battle_rows: list | None = None,
         sample_sink=None,
     ):
@@ -169,6 +176,9 @@ class SequenceDataset(Dataset):
         # 3 exact-elixir (own/opp/differential, analytic from placements) and 2
         # game-level opponent-skill constants (trophy_gap, opp efficiency).
         self.extra_features = extra_features
+        # Deck prior is always built when decks are available — it is a game-level
+        # constant, so it costs 16 int16 per game rather than anything per-tick.
+        self.deck_features = deck_features
         self.feature_dim = BASE_FEATURE_DIM + (EXTRA_FEATURE_DIM if extra_features else 0)
 
         # Build evo set: cards that have ability_used=1 in replay_events.
@@ -309,16 +319,23 @@ class SequenceDataset(Dataset):
                 ))
             del rows
 
+            decks = self._load_decks(session, chunk) if self.deck_features else {}
+            _no_deck = (np.zeros((2, DECK_SIZE), dtype=np.int16),
+                        np.zeros((2, DECK_SIZE), dtype=np.int8))
+
             for battle_id in chunk:
                 evts = events_by_battle[battle_id]
                 if len(evts) < MIN_EVENTS:
                     skipped += 1
                     continue
                 card_ids, features = self._build_sample(battle_id, evts)
+                d_ids, d_var = decks.get(battle_id, _no_deck)
                 if self._sample_sink is not None:
-                    self._sample_sink(battle_id, card_ids, features, result_map[battle_id])
+                    self._sample_sink(battle_id, card_ids, features,
+                                      result_map[battle_id], d_ids, d_var)
                 else:
-                    self._samples.append((card_ids, features, result_map[battle_id]))
+                    self._samples.append((card_ids, features, result_map[battle_id],
+                                          d_ids, d_var))
                     self.battle_ids_in_order.append(battle_id)
             del events_by_battle
 
@@ -332,6 +349,36 @@ class SequenceDataset(Dataset):
             skipped,
             np.mean([s[1].shape[0] for s in self._samples]) if self._samples else 0,
         )
+
+    def _load_decks(self, session, chunk: list) -> dict:
+        """battle_id -> (ids (2,8) int16, variants (2,8) int8), own row first.
+
+        A deck is unordered, so cards are taken in a stable name order and the
+        model mean-pools them. Missing or short decks pad with 0 (the PAD index),
+        which the embedding maps to a zero vector.
+        """
+        rows = session.execute(
+            text("""
+                SELECT battle_id, is_player_deck, card_name, card_variant
+                FROM deck_cards WHERE battle_id IN :bids
+                ORDER BY battle_id, is_player_deck DESC, card_name
+            """),
+            {"bids": tuple(chunk)},
+        ).all()
+        out: dict[str, tuple] = {}
+        for bid, is_own, name, variant in rows:
+            if bid not in out:
+                out[bid] = (np.zeros((2, DECK_SIZE), dtype=np.int16),
+                            np.zeros((2, DECK_SIZE), dtype=np.int8),
+                            [0, 0])
+            ids, vars_, fill = out[bid]
+            r = 0 if is_own == 1 else 1
+            if fill[r] >= DECK_SIZE:
+                continue  # duplicate deck_cards rows exist for some battles
+            ids[r, fill[r]] = self.vocab.encode(name)
+            vars_[r, fill[r]] = VARIANT_IDX.get(variant or "base", 0)
+            fill[r] += 1
+        return {b: (i, v) for b, (i, v, _) in out.items()}
 
     def _build_sample(self, battle_id: str, evts: list) -> tuple[np.ndarray, np.ndarray]:
         """Build (card_ids, features) arrays for one battle's events.
@@ -410,11 +457,13 @@ class SequenceDataset(Dataset):
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, float]:
         """Return (card_ids, features, label) for a single game."""
-        card_ids, features, label = self._samples[idx]
+        card_ids, features, label, d_ids, d_var = self._samples[idx]
         return (
             torch.from_numpy(card_ids),
             torch.from_numpy(features),
             label,
+            torch.from_numpy(d_ids.astype(np.int64)),
+            torch.from_numpy(d_var.astype(np.int64)),
         )
 
 
@@ -429,7 +478,7 @@ def collate_fn(
         lengths: (batch,) int64 — original sequence lengths
         labels: (batch,) float32
     """
-    card_ids_list, features_list, labels = zip(*batch)
+    card_ids_list, features_list, labels, deck_ids_list, deck_var_list = zip(*batch)
     lengths = torch.tensor([len(c) for c in card_ids_list], dtype=torch.int64)
     max_len = int(lengths.max())
 
@@ -446,5 +495,8 @@ def collate_fn(
         padded_features[i, :seq_len] = feats
 
     labels_tensor = torch.tensor(labels, dtype=torch.float32)
+    deck_ids = torch.stack(deck_ids_list)      # (batch, 2, 8)
+    deck_vars = torch.stack(deck_var_list)     # (batch, 2, 8)
 
-    return padded_card_ids, padded_features, lengths, labels_tensor
+    return (padded_card_ids, padded_features, lengths, labels_tensor,
+            deck_ids, deck_vars)

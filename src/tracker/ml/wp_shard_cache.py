@@ -65,7 +65,7 @@ def build_shards(
     from tracker.ml.card_metadata import CardVocabulary
     from tracker.ml.sequence_dataset import (
         SequenceDataset, select_training_battles,
-        BASE_FEATURE_DIM, EXTRA_FEATURE_DIM,
+        BASE_FEATURE_DIM, EXTRA_FEATURE_DIM, DECK_SIZE,
     )
 
     out = Path(out_dir)
@@ -89,11 +89,19 @@ def build_shards(
         out / "lengths.npy", mode="w+", dtype=np.int32, shape=(n,))
     labels_mm = np.lib.format.open_memmap(
         out / "labels.npy", mode="w+", dtype=np.uint8, shape=(n,))
+    # Deck prior: per GAME, not per tick. 16 int16 + 16 int8 per game is ~50MB
+    # across the full 1.7M pool, versus ~55GB had it been stored per timestep —
+    # and it keeps the block-shuffled sequential read the firehose was built for.
+    deck_ids_mm = np.lib.format.open_memmap(
+        out / "deck_ids.npy", mode="w+", dtype=np.int16, shape=(n, 2, DECK_SIZE))
+    deck_vars_mm = np.lib.format.open_memmap(
+        out / "deck_vars.npy", mode="w+", dtype=np.int8, shape=(n, 2, DECK_SIZE))
 
     state = {"row": 0, "truncated": 0}
     bid_file = open(out / "battle_ids.txt", "w")
 
-    def sink(battle_id: str, card_ids: np.ndarray, features: np.ndarray, label: float):
+    def sink(battle_id: str, card_ids: np.ndarray, features: np.ndarray, label: float,
+             deck_ids: np.ndarray, deck_vars: np.ndarray):
         i = state["row"]
         ln = len(card_ids)
         if ln > max_len:
@@ -105,6 +113,8 @@ def build_shards(
         features_mm[i, :ln] = features.astype(np.float16)
         lengths_mm[i] = ln
         labels_mm[i] = int(label)
+        deck_ids_mm[i] = deck_ids
+        deck_vars_mm[i] = deck_vars
         bid_file.write(battle_id + "\n")
         state["row"] += 1
 
@@ -125,12 +135,15 @@ def build_shards(
         "max_len": max_len,
         "feature_dim": feature_dim,
         "extra_features": extra_features,
+        "deck_features": True,
+        "deck_size": DECK_SIZE,
         "truncated_games": state["truncated"],
         "built_at_utc": datetime.now(timezone.utc).isoformat(),
         "source": "battles PvP+pathOfLegend win/loss, time-ascending",
     }
     (out / "meta.json").write_text(json.dumps(meta, indent=2))
-    for mm in (card_ids_mm, features_mm, lengths_mm, labels_mm):
+    for mm in (card_ids_mm, features_mm, lengths_mm, labels_mm,
+               deck_ids_mm, deck_vars_mm):
         mm.flush()
     logger.info("WP shards built: %d rows (%d truncated to L=%d)",
                 n_written, state["truncated"], max_len)
@@ -154,6 +167,12 @@ class ShardDataset:
         self.features = np.load(d / "features.npy", mmap_mode="r")
         self.lengths = np.load(d / "lengths.npy", mmap_mode="r")
         self.labels = np.load(d / "labels.npy", mmap_mode="r")
+        # Older shard dirs predate the deck prior; absent files mean the loader
+        # yields zeros, which the PAD embedding maps to a zero vector — so a v9
+        # shard set still trains a v9-shaped model without a rebuild.
+        self.has_decks = (d / "deck_ids.npy").exists()
+        self.deck_ids = np.load(d / "deck_ids.npy", mmap_mode="r") if self.has_decks else None
+        self.deck_vars = np.load(d / "deck_vars.npy", mmap_mode="r") if self.has_decks else None
         self.battle_ids_in_order = (d / "battle_ids.txt").read_text().splitlines()
         logger.info("ShardDataset: %d games (L=%d, F=%d) memmapped from %s",
                     self.n, self.max_len, self.feature_dim, shard_dir)
@@ -172,7 +191,7 @@ class ShardBatchLoader:
     each block is read with ONE sequential slice (NVMe-friendly, ~GB/s), and rows
     are permuted within the block before batching. Fresh block order + fresh
     permutations every epoch. Emits the same (card_ids, features, lengths,
-    labels, mask) tuples as wp_collate_fn.
+    labels, mask, deck_ids, deck_vars) tuples as wp_collate_fn.
     """
 
     BLOCK_ROWS = 65536  # ~600MB of fp16 features per sequential read, ~128 batches
@@ -200,11 +219,15 @@ class ShardBatchLoader:
                 feat_blk = np.asarray(self.ds.features[a:b])
                 len_blk = np.asarray(self.ds.lengths[a:b])
                 lab_blk = np.asarray(self.ds.labels[a:b])
+                dck_blk = np.asarray(self.ds.deck_ids[a:b]) if self.ds.has_decks else None
+                dvr_blk = np.asarray(self.ds.deck_vars[a:b]) if self.ds.has_decks else None
             else:
                 cid_blk = self.ds.card_ids[rows]
                 feat_blk = self.ds.features[rows]
                 len_blk = self.ds.lengths[rows]
                 lab_blk = self.ds.labels[rows]
+                dck_blk = self.ds.deck_ids[rows] if self.ds.has_decks else None
+                dvr_blk = self.ds.deck_vars[rows] if self.ds.has_decks else None
             perm = (np.random.permutation(len(rows)) if self.shuffle
                     else np.arange(len(rows)))
             for s in range(0, len(rows), self.batch_size):
@@ -217,5 +240,11 @@ class ShardBatchLoader:
                 game_labels = torch.from_numpy(lab_blk[pb].astype(np.float32))
                 labels = game_labels.unsqueeze(1).expand(len(pb), L)
                 mask = (torch.arange(L).unsqueeze(0) < lengths_t.unsqueeze(1)).float()
-                yield card_ids, features, lengths_t, labels, mask
-            del cid_blk, feat_blk, len_blk, lab_blk
+                if dck_blk is not None:
+                    deck_ids = torch.from_numpy(dck_blk[pb].astype(np.int64))
+                    deck_vars = torch.from_numpy(dvr_blk[pb].astype(np.int64))
+                else:
+                    deck_ids = torch.zeros(len(pb), 2, 8, dtype=torch.int64)
+                    deck_vars = torch.zeros(len(pb), 2, 8, dtype=torch.int64)
+                yield card_ids, features, lengths_t, labels, mask, deck_ids, deck_vars
+            del cid_blk, feat_blk, len_blk, lab_blk, dck_blk, dvr_blk
