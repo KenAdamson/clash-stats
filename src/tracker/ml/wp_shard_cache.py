@@ -196,6 +196,19 @@ class ShardBatchLoader:
 
     BLOCK_ROWS = 65536  # ~600MB of fp16 features per sequential read, ~128 batches
 
+    # Fraction of TRAINING rows whose deck prior is blanked to the unknown state.
+    #
+    # Not a regulariser — a distribution fix. Replay-link stub battles
+    # (_ensure_link_battle) carry replay events but no deck_cards by design, so
+    # ~1.8% of the pool has no deck at all. Corpus replay scraping ramped in
+    # mid-June, so every stub sits in the recent tail, and the time-ordered split
+    # puts 100% of them in validation: 9.01% of val, 0.00% of train. Training on
+    # decks that are always present and then validating on a zero vector 9% of
+    # the time feeds the model an input it has never seen, which would penalise
+    # the deck prior for a data artefact rather than measure it. Masking teaches
+    # the unknown state, and it matches production, where stubs keep arriving.
+    DECK_MASK_RATE = float(os.environ.get("WP_DECK_MASK_RATE", "0.10"))
+
     def __init__(self, dataset: ShardDataset, indices, batch_size: int, shuffle: bool):
         self.ds = dataset
         self.indices = np.asarray(indices, dtype=np.int64)
@@ -243,6 +256,11 @@ class ShardBatchLoader:
                 if dck_blk is not None:
                     deck_ids = torch.from_numpy(dck_blk[pb].astype(np.int64))
                     deck_vars = torch.from_numpy(dvr_blk[pb].astype(np.int64))
+                    # shuffle=True marks the training pass; never mask during eval.
+                    if self.shuffle and self.DECK_MASK_RATE > 0:
+                        drop = torch.rand(deck_ids.size(0)) < self.DECK_MASK_RATE
+                        deck_ids[drop] = 0
+                        deck_vars[drop] = 0
                 else:
                     deck_ids = torch.zeros(len(pb), 2, 8, dtype=torch.int64)
                     deck_vars = torch.zeros(len(pb), 2, 8, dtype=torch.int64)

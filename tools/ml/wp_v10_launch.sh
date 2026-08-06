@@ -66,10 +66,17 @@ fi
 
 # NOT `exec flock ... || echo`: exec replaces the shell, so the fallback branch
 # would never run and a lock-contention skip would vanish silently.
-flock -n "${XPU_TRAIN_LOCK}" clash-stats --train-wp >> "$log" 2>&1
+#
+# -E 99 gives lock contention its own exit code. Without it flock returns 1 both
+# when the lock is held AND when the command itself exits 1, so the first v10
+# crash (an XPU OOM inside training) was logged as "another job is live" — a
+# misdiagnosis that sent me looking at the lock instead of at the model.
+flock -n -E 99 "${XPU_TRAIN_LOCK}" clash-stats --train-wp >> "$log" 2>&1
 rc=$?
-if [ $rc -eq 1 ]; then
+if [ $rc -eq 99 ]; then
   echo "[v10 $(date -u +%FT%TZ)] could not take ${XPU_TRAIN_LOCK} — another XPU training job is live" >> "$log"
+elif [ $rc -ne 0 ]; then
+  echo "[v10 $(date -u +%FT%TZ)] TRAINING FAILED rc=${rc} — see traceback above" >> "$log"
 fi
 echo "[v10 $(date -u +%FT%TZ)] exited rc=${rc}" >> "$log"
 exit $rc

@@ -87,7 +87,7 @@ def auc(scores: np.ndarray, labels: np.ndarray) -> float:
     return float((ranks[:len(pos)].sum() - len(pos) * (len(pos) + 1) / 2) / (len(pos) * len(neg)))
 
 
-def evaluate(model, loader, device, tick_buckets=(0, 1, 3, 8, 20)) -> dict:
+def evaluate(model, loader, device, tick_buckets=(0, 1, 3, 8, 20), deck_present=None) -> dict:
     """Loss/accuracy overall, plus tick-0 scores and accuracy by tick bucket."""
     tot_loss = tot_n = tot_correct = 0.0
     t0_scores, t0_labels = [], []
@@ -117,7 +117,18 @@ def evaluate(model, loader, device, tick_buckets=(0, 1, 3, 8, 20)) -> dict:
 
     t0s = np.concatenate(t0_scores)
     t0l = np.concatenate(t0_labels)
+    # Split the tick-0 result by whether a deck was actually known. ~9% of the
+    # validation tail is replay-link stub battles that carry no deck_cards by
+    # design, and the deck prior cannot help there — pooling the two hides the
+    # effect on the population where the feature can do anything at all.
+    split = {}
+    if deck_present is not None and len(deck_present) == len(t0s):
+        for lbl, m in (("deck_known", deck_present), ("deck_unknown", ~deck_present)):
+            if m.sum():
+                split[lbl] = {"n": int(m.sum()), "tick0_auc": auc(t0s[m], t0l[m]),
+                              "tick0_sd": float(t0s[m].std())}
     return {
+        "by_deck_availability": split,
         "val_loss": tot_loss / max(tot_n, 1),
         "val_acc": tot_correct / max(tot_n, 1),
         "tick0_mean": float(t0s.mean()),
@@ -142,6 +153,11 @@ def main() -> None:
     n_val = int(ds.n * VAL_FRACTION)
     val_idx = np.arange(ds.n - n_val, ds.n)      # time-ordered holdout, as in training
     logger.info("val split: %d games (last %.0f%% by battle_time)", len(val_idx), VAL_FRACTION * 100)
+    _ids = np.asarray(ds.deck_ids[val_idx]).reshape(len(val_idx), -1)
+    deck_present = ~(_ids == 0).all(axis=1)
+    logger.info("val deck availability: %d known, %d unknown (%.2f%% stub battles)",
+                int(deck_present.sum()), int((~deck_present).sum()),
+                100.0 * (~deck_present).mean())
 
     report = {"shard_dir": SHARD_DIR, "n_val_games": len(val_idx), "models": {}}
     for name in (a_name, b_name):
@@ -151,7 +167,7 @@ def main() -> None:
             continue
         model = load_model(path, device)
         loader = ShardBatchLoader(ds, val_idx, BATCH, shuffle=False)
-        res = evaluate(model, loader, device)
+        res = evaluate(model, loader, device, deck_present=deck_present)
         res["deck_features"] = model.deck_features
         report["models"][name] = res
         print(f"\n== {name} (deck_features={model.deck_features}) ==")
@@ -160,12 +176,20 @@ def main() -> None:
               f"p5-p95 {res['tick0_p5']:.3f}-{res['tick0_p95']:.3f}  AUC {res['tick0_auc']:.4f}")
         print("  acc by tick: " + "  ".join(
             f"t{k}={v:.4f}" for k, v in res["acc_by_tick"].items() if v is not None))
+        for lbl, d in res.get("by_deck_availability", {}).items():
+            print(f"  {lbl:<14} n={d['n']:>7}  tick0 AUC {d['tick0_auc']:.4f}  sd {d['tick0_sd']:.4f}")
         del model
 
     if len(report["models"]) == 2:
         a, b = report["models"][a_name], report["models"][b_name]
         d_loss = b["val_loss"] - a["val_loss"]
         d_auc = b["tick0_auc"] - a["tick0_auc"]
+        ka = (a.get("by_deck_availability") or {}).get("deck_known", {})
+        kb = (b.get("by_deck_availability") or {}).get("deck_known", {})
+        if ka and kb:
+            print(f"\n  on games where the deck IS known (n={kb['n']}):")
+            print(f"    tick0 AUC {ka['tick0_auc']:.4f} -> {kb['tick0_auc']:.4f} "
+                  f"({kb['tick0_auc'] - ka['tick0_auc']:+.4f})")
         verdict = ("CANDIDATE" if d_loss < 0 and d_auc > 0.02 else
                    "INCONCLUSIVE" if d_loss < 0 else "REJECT")
         report["verdict"] = {"delta_val_loss": d_loss, "delta_tick0_auc": d_auc,

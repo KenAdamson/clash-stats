@@ -85,6 +85,16 @@ class WinProbabilityModel(nn.Module):
         self.deck_dim = 2 * card_embed_dim if deck_features else 0
 
         input_channels = card_embed_dim + feature_dim  # 16 + 17 = 33
+        # The deck prior is ADDED to the head's first-layer output rather than
+        # concatenated onto the TCN output. Algebraically identical — a linear
+        # layer over [tcn ; deck] is W_tcn·tcn + W_deck·deck — but concatenating
+        # a time-broadcast deck materialises a (batch, 512+deck, L) tensor: 453MB
+        # at batch 1024, against this box's 256MB small-BAR host-visible window.
+        # That is what killed the first v10 run at epoch 1 with
+        # UR_RESULT_ERROR_OUT_OF_HOST_MEMORY. As a projection the deck costs
+        # (batch, 64, 1), broadcast over time for free, so v10's head is no
+        # heavier than v9's — and every v9 head tensor keeps its name and shape,
+        # so the warm start still transfers it.
 
         self.tcn = TCNEncoder(
             input_channels=input_channels,
@@ -95,8 +105,9 @@ class WinProbabilityModel(nn.Module):
 
         # Per-tick classification head: (batch, 256[+extra], seq_len) → (batch, 1, seq_len)
         out_ch = self.tcn.output_channels  # 256
+        self.deck_proj = nn.Conv1d(self.deck_dim, 64, 1) if deck_features else None
         self.head = nn.Sequential(
-            nn.Conv1d(out_ch + extra_feature_dim + self.deck_dim, 64, 1),
+            nn.Conv1d(out_ch + extra_feature_dim, 64, 1),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Conv1d(64, 1, 1),
@@ -150,18 +161,21 @@ class WinProbabilityModel(nn.Module):
         tcn_out = self.tcn(combined)  # (batch, 256, seq_len)
         if extra is not None:
             tcn_out = torch.cat([tcn_out, extra.transpose(1, 2)], dim=1)  # (batch, 256+extra, seq_len)
+        h = self.head[0](tcn_out)  # (batch, 64, seq_len)
         if self.deck_features:
             if deck_ids is None or deck_variants is None:
                 raise ValueError(
                     "model was built with deck_features=True but forward() got no "
                     "deck tensors — the dataset and checkpoint are out of sync"
                 )
-            # Constant across time, broadcast to every tick: the deck prior must
-            # be available at tick 0, which is the whole point of the change.
-            deck = self.encode_decks(deck_ids, deck_variants)  # (batch, 2D)
-            deck = deck.unsqueeze(2).expand(-1, -1, tcn_out.size(2))
-            tcn_out = torch.cat([tcn_out, deck], dim=1)
-        logits = self.head(tcn_out).squeeze(1)  # (batch, seq_len)
+            # (batch, 2D, 1) -> (batch, 64, 1), broadcast-added across every tick.
+            # Constant in time by construction, so the prior is present at tick 0
+            # — the whole point — without a per-tick copy of it existing anywhere.
+            deck = self.encode_decks(deck_ids, deck_variants).unsqueeze(2)
+            h = h + self.deck_proj(deck)
+        for layer in self.head[1:]:
+            h = layer(h)
+        logits = h.squeeze(1)  # (batch, seq_len)
 
         return logits
 
