@@ -13,10 +13,13 @@
 # seconds apart. The GPU crons are paused in the repo crontab (#V10BUILD#) for
 # the duration, but the lock is the belt to that braces.
 #
-# Batch 1024 is the proven sustained maximum on this box, not a guess: 2048 and
-# 1536 both die under sustained load once Adam moments accumulate, because the
-# 256MB small-BAR host-visible window caps TOTAL host-backed memory and the
-# relaxed-allocation vars lift only the 4GB SINGLE-allocation ceiling.
+# Batch 512, which is what v9 (the 2x-width variant-B run, 3.83M params) itself
+# used. The "batch 1024 is the proven sustained max" result was measured on the
+# ~974K-param model and does NOT carry to this width: at 1024 a 3.83M-param v10
+# dies with UR_RESULT_ERROR_OUT_OF_HOST_MEMORY in the backward pass, because the
+# 256MB small-BAR host-visible window caps TOTAL host-backed memory once Adam
+# moments and the gradient graph accumulate. Relaxed-alloc lifts only the 4GB
+# SINGLE-allocation ceiling, not this.
 #
 # Usage:  nohup bash /app/tools/ml/wp_v10_launch.sh &
 set -u
@@ -40,11 +43,11 @@ export WP_CARD_EMBED=32
 export WP_SHARD_DIR=/app/data/wp_shards
 export WP_FROM_SCRATCH=1
 export WP_DECK_FEATURES=1
-export WP_BATCH_SIZE=1024
-# Half of the 6e-4 used for v9's cold start: a warm start restarts Adam and the
-# LR schedule, so the full rate would knock the loaded weights out of the basin
-# they already found.
-export WP_LR=3e-4
+export WP_BATCH_SIZE=512
+# Half the from-scratch default at this batch: a warm start restarts Adam and
+# the LR schedule, so the full rate would knock the loaded weights out of the
+# basin they already found.
+export WP_LR=1.5e-4
 export WP_RESUME=/app/data/ml_models/wp_v9.pt
 
 cd /app || exit 1
