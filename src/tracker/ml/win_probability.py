@@ -55,7 +55,14 @@ class WinProbabilityModel(nn.Module):
         # Evo Witch and Witch share an index; this offset is what separates them.
         # Variant is per (battle, side, card) — the same Wizard is evo in one of
         # Ken's games and hero in the other — so it cannot live in the vocabulary.
-        self.variant_embedding = nn.Embedding(N_CARD_VARIANTS, card_embed_dim)
+        #
+        # Created ONLY with the deck prior. Building it unconditionally adds a
+        # tensor that pre-v10 checkpoints do not carry, so a strict load of v9
+        # fails with a missing key — which would have broken production
+        # inference the moment the paused wp_infer_new cron came back.
+        self.variant_embedding = (
+            nn.Embedding(N_CARD_VARIANTS, card_embed_dim) if deck_features else None
+        )
         self.feature_dim = feature_dim
         # Record the architecture shape so a checkpoint can be reconstructed at
         # inference without hardcoding sizes (capacity experiments vary these).
