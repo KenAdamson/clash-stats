@@ -13,6 +13,7 @@ import random
 import re
 import time
 from pathlib import Path
+from typing import Optional
 
 from bs4 import BeautifulSoup
 from circuitbreaker import circuit, CircuitBreakerError
@@ -70,11 +71,36 @@ def parse_replay_html(html: str) -> dict:
         Dict with:
           - events: list of card placement event dicts
           - summaries: list of per-side elixir summary dicts
+          - duration_s: match length in seconds, or None
     """
     soup = BeautifulSoup(html, "html.parser")
     events = _parse_events(soup)
     summaries = _parse_summaries(soup)
-    return {"events": events, "summaries": summaries}
+    return {
+        "events": events,
+        "summaries": summaries,
+        "duration_s": _parse_end_time(soup),
+    }
+
+
+def _parse_end_time(soup: BeautifulSoup) -> Optional[int]:
+    """Match length in seconds, from the timeline's end marker ("2:20" -> 140).
+
+    The only non-placement fact the replay page carries. Worth having on its own,
+    but the real use is as a weak state observation: regular time is 180s, so a
+    match ending materially before that ended by king tower, and one running past
+    it went to overtime. Every other signal in this feed is terminal (win/loss),
+    which makes even one bit of intermediate outcome unusually valuable.
+    """
+    marker = soup.select_one(".replay_time .marker.end_time")
+    if marker is None:
+        return None
+    text = marker.get_text(strip=True)
+    m = re.match(r"^(\d+):(\d{1,2})$", text)
+    if not m:
+        logger.warning("Unparseable replay end_time %r", text)
+        return None
+    return int(m.group(1)) * 60 + int(m.group(2))
 
 
 def _parse_events(soup: BeautifulSoup) -> list[dict]:
@@ -224,9 +250,15 @@ def store_replay_data(session: Session, battle_id: str, data: dict) -> None:
             elixir_leaked=summary.get("elixir_leaked"),
         ))
 
-    # Mark battle as fetched
+    # Mark battle as fetched, and record the match length if the page gave one.
+    # battle_duration has been NULL for every battle ever stored — the CR API
+    # does not supply it and nothing else did either.
+    values = {"replay_fetched": 1}
+    duration = data.get("duration_s")
+    if duration is not None:
+        values["battle_duration"] = duration
     session.execute(
-        update(Battle).where(Battle.battle_id == battle_id).values(replay_fetched=1)
+        update(Battle).where(Battle.battle_id == battle_id).values(**values)
     )
     session.commit()
 
