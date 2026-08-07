@@ -28,21 +28,70 @@ from tracker.models import DeckCard
 logger = logging.getLogger(__name__)
 
 _CACHE_PATH = os.environ.get("CARD_VOCAB_CACHE", "data/card_vocab.json")
-_CACHE_TTL = float(os.environ.get("CARD_VOCAB_TTL", "86400"))
+# The card vocabulary changes only when Supercell ships a new card — a few
+# times a year. A 24h TTL was pointlessly short for data that static, and it
+# turned expiry into a synchronised cliff: on 2026-08-07 the cache aged past
+# 24h and FIVE processes (two corpus, two personal, one wp-infer) each missed
+# simultaneously and each launched the recursive CTE against a 284M-row
+# deck_cards. That query cost 5.7 min at 210M rows and now costs 25+; they
+# thrashed IO against each other and stalled WP inference for half an hour.
+_CACHE_TTL = float(os.environ.get("CARD_VOCAB_TTL", str(7 * 86400)))
+# Single-flight: only the process that wins this lock rebuilds. Everyone else
+# serves the stale cache, which is correct — a vocabulary hours or days past
+# its TTL is still the right vocabulary, and stale-but-instant beats
+# correct-but-25-minutes for something that changes twice a year.
+_CACHE_LOCK = _CACHE_PATH + ".rebuild" if _CACHE_PATH else ""
 
 
-def _cache_load() -> Optional[dict]:
-    """Return the cached vocab dict, or None if absent/stale/disabled."""
+def _cache_load(allow_stale: bool = False) -> Optional[dict]:
+    """Return the cached vocab dict, or None if absent/stale/disabled.
+
+    allow_stale=True returns the cache regardless of age — used when another
+    process already holds the rebuild lock, so this one serves stale data
+    instead of piling a second 25-minute CTE onto the same table.
+    """
     if not _CACHE_PATH:
         return None
     try:
         with open(_CACHE_PATH) as fh:
             data = json.load(fh)
-        if time.time() - data["built_at"] > _CACHE_TTL:
+        if not allow_stale and time.time() - data["built_at"] > _CACHE_TTL:
             return None
         return data
     except (OSError, ValueError, KeyError):
         return None
+
+
+def _try_rebuild_lock() -> Optional[int]:
+    """Win the right to rebuild, or None if another process already has it.
+
+    O_EXCL create is the whole mechanism. A lock older than an hour is treated
+    as abandoned (the holder was killed mid-CTE) and stolen, so a crash cannot
+    wedge the cache stale forever.
+    """
+    if not _CACHE_LOCK:
+        return None
+    try:
+        if time.time() - os.path.getmtime(_CACHE_LOCK) > 3600:
+            os.unlink(_CACHE_LOCK)
+    except OSError:
+        pass
+    try:
+        return os.open(_CACHE_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return None
+    except OSError:
+        return None
+
+
+def _release_rebuild_lock(fd: Optional[int]) -> None:
+    if fd is None:
+        return
+    try:
+        os.close(fd)
+        os.unlink(_CACHE_LOCK)
+    except OSError:
+        pass
 
 
 def _cache_store(rows: list, evo_cards: Optional[list] = None) -> None:
@@ -170,8 +219,23 @@ class CardVocabulary:
                 rows = [tuple(r) for r in cached["rows"]]
                 logger.info("CardVocabulary: served from cache (%s)", _CACHE_PATH)
             else:
-                rows = session.execute(_LOOSE_SCAN_SQL).all()
-                _cache_store(rows)
+                lock_fd = _try_rebuild_lock()
+                if lock_fd is None:
+                    stale = _cache_load(allow_stale=True)
+                    if stale is not None:
+                        rows = [tuple(r) for r in stale["rows"]]
+                        logger.info("CardVocabulary: cache stale but another process "
+                                    "is rebuilding — serving stale (%d cards)", len(rows))
+                    else:
+                        rows = session.execute(_LOOSE_SCAN_SQL).all()
+                else:
+                    try:
+                        logger.info("CardVocabulary: cache expired — rebuilding "
+                                    "(holds the single-flight lock)")
+                        rows = session.execute(_LOOSE_SCAN_SQL).all()
+                        _cache_store(rows)
+                    finally:
+                        _release_rebuild_lock(lock_fd)
         else:
             rows = session.execute(
                 select(DeckCard.card_name, DeckCard.card_elixir)
