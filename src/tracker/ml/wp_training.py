@@ -144,7 +144,20 @@ def _arch_env():
 
 
 def _detect_device() -> torch.device:
-    """Detect the best available device: XPU → CUDA → CPU."""
+    """Detect the best available device: XPU → CUDA → CPU.
+
+    WP_DEVICE overrides the search. The reason it exists: this box has ONE
+    small-BAR A770 that cannot hold two GPU jobs -- that collision killed a
+    training run -- so while a train is live the 5-minute inference cron has to
+    be paused, and P(win) curves go stale for as long as training takes. The
+    WP model is 3.8M parameters and inference is a handful of forward passes
+    per game, so CPU is entirely adequate for keeping the dashboard current;
+    it is only training that needs the GPU.
+    """
+    forced = os.environ.get("WP_DEVICE", "").strip().lower()
+    if forced:
+        logger.info("WP_DEVICE=%s — overriding device detection", forced)
+        return torch.device(forced)
     if hasattr(torch, "xpu") and torch.xpu.is_available():
         device = torch.device("xpu")
         logger.info("Using Intel XPU: %s", torch.xpu.get_device_name(0))

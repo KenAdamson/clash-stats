@@ -45,13 +45,16 @@ PATH=/usr/local/bin:/usr/bin:/bin
 0 8 * * 0,3 root /app/reseed_risers.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 
 # --- ML training ---
-# PAUSED (#V10BUILD#) — WP v10 training needs the A770 to itself. The XPU is
+# PAUSED (#V10BUILD#) — WP training needs the A770 to itself. The XPU is
 # small-BAR and cannot hold two jobs (that is what crashed the variant-B run),
 # and xpu_train.lock only serializes TRAINING, not inference. Restore with:
-#   sed -i 's/^#V10BUILD# //' crontab   then rebuild/recreate, or docker cp
+# wp_infer_new is NO LONGER paused: its wrapper now tests xpu_train.lock and
+# scores on CPU when a trainer holds it, so inference and training coexist.
+#   sed -i 's/^#V10BUILD# //' crontab   then rebuild/recreate (see
+#   tools/deploy_tracker.sh deploy_crontab -- docker cp alone breaks ownership)
 #   the crontab and `crontab /etc/cron.d/...` for a live-only restore.
 # Incremental WP inference: process new games every 5 min (offset from corpus)
-#V10BUILD# */5 * * * * root /app/wp_infer_new.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
+*/5 * * * * root /app/wp_infer_new.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Incremental TCN embedding: embed new games every 6 hours
 #V10BUILD# 0 1,7,13,19 * * * root /app/embed_new.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Weekly: retrain TCN on full corpus (Sunday 4am UTC)

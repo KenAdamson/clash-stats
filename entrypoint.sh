@@ -14,6 +14,10 @@ if [ -z "${DATABASE_URL}" ]; then
 fi
 DB_FLAG="--db ${DATABASE_URL}"
 LOCKDIR=/tmp/locks
+# Hoisted next to LOCKDIR: the wp_infer_new wrapper heredoc expands this at
+# WRITE time, and it is written ~60 lines before the old definition site --
+# so defining it later silently produced `flock -n  true` with an empty path.
+XPU_TRAIN_LOCK=${XPU_TRAIN_LOCK:-${LOCKDIR}/xpu_train.lock}
 rm -rf "$LOCKDIR"
 mkdir -p "$LOCKDIR"
 
@@ -318,14 +322,29 @@ clash-stats --corpus-combined --corpus-limit ${CORPUS_REPLAY_LIMIT:-16} --replay
 EOF
 chmod +x /app/corpus_replays.sh
 
-# Incremental WP inference: process games with replays but no WP data
+# Incremental WP inference: process games with replays but no WP data.
+#
+# Falls back to CPU whenever a training job holds ${XPU_TRAIN_LOCK}. This box
+# has ONE small-BAR A770 that cannot hold two GPU jobs -- that collision killed
+# the variant-B run -- so previously a long training run meant pausing this cron
+# and letting P(win) curves go stale for a day or more. The WP model is 3.8M
+# parameters and inference is a few forward passes per game, so CPU is entirely
+# adequate; only training actually needs the GPU. Now the two coexist and the
+# cron never has to be paused again.
 cat > /app/wp_infer_new.sh << EOF
 #!/bin/sh
 exec flock -n ${LOCKDIR}/wp_infer_new.lock sh -c '
 cd /app
 [ -n "${DATABASE_URL}" ] && export DATABASE_URL="${DATABASE_URL}"
 export PYTHONUNBUFFERED=1
-clash-stats --wp-infer-new ${DB_FLAG}
+# flock -n succeeds => no trainer holds it => GPU is free. Non-zero => training
+# is live, so score on CPU rather than contending for the small-BAR window.
+if flock -n ${XPU_TRAIN_LOCK} true 2>/dev/null; then
+    clash-stats --wp-infer-new ${DB_FLAG}
+else
+    echo "wp_infer_new: XPU busy with training — scoring on CPU"
+    WP_DEVICE=cpu OMP_NUM_THREADS=4 nice -n 10 clash-stats --wp-infer-new ${DB_FLAG}
+fi
 ' || echo "wp_infer_new: previous run still active, skipping"
 EOF
 chmod +x /app/wp_infer_new.sh
@@ -374,7 +393,6 @@ chmod +x /app/embed_new.sh
 #
 # -n (non-blocking): a weekly retrain that collides simply skips and runs next
 # week, which is far cheaper than crashing a multi-day training run.
-XPU_TRAIN_LOCK=${LOCKDIR}/xpu_train.lock
 
 # TCN retraining
 # NB: no `exec` here — `exec flock ... || echo` makes the fallback unreachable,
