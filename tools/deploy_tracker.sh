@@ -25,3 +25,26 @@ for f in "${files[@]}"; do
 done
 docker exec "$C" bash -lc "find /app/src/tracker $SP -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null; true"
 echo "  pycache cleared"
+
+# ---------------------------------------------------------------------------
+# Crontab deployment is NOT the same as source deployment. Kept here because
+# getting it wrong is silent and expensive.
+#
+# `docker cp crontab cr-tracker:/etc/cron.d/cr-tracker` preserves the HOST
+# file's ownership (uid 1000), and Debian cron REFUSES to execute anything in
+# /etc/cron.d not owned by root -- with no error, no log line, nothing. It just
+# stops running every job in the file. That cost 21.5 hours of total ingest on
+# 2026-08-06: the tracker looked healthy, cron was running, the crontab was
+# present and correct, and the jobs simply never fired.
+#
+# Always:
+#   docker cp crontab $C:/etc/cron.d/cr-tracker
+#   docker exec $C chown root:root /etc/cron.d/cr-tracker
+#   docker exec $C chmod 0644     /etc/cron.d/cr-tracker
+# then VERIFY by watching for job output, not by reading the file back.
+deploy_crontab() {
+  docker cp crontab "$C:/etc/cron.d/cr-tracker"
+  docker exec "$C" chown root:root /etc/cron.d/cr-tracker
+  docker exec "$C" chmod 0644 /etc/cron.d/cr-tracker
+  echo "  crontab deployed (root-owned; verify by watching for job output)"
+}
