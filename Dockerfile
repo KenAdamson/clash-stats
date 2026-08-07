@@ -56,8 +56,19 @@ COPY tools/ /app/tools/
 RUN chmod -R a+rx /app/tools
 
 # Cron schedule — Debian cron reads from /etc/cron.d/
+#
+# Ownership is load-bearing: cron SILENTLY refuses to execute any file in
+# /etc/cron.d that is not owned by root. No error, no log line — every job in
+# the file just stops, while cron itself keeps running and the file reads back
+# perfectly. COPY already defaults to uid/gid 0, so the image is correct; the
+# explicit chown is here to state the invariant and to survive any future
+# change to COPY's defaults or a --chown added upstream.
+#
+# The trap is `docker cp`, which preserves the HOST file's ownership. Patching
+# the live crontab that way cost 21.5 hours of ingest on 2026-08-06. Use
+# tools/deploy_tracker.sh deploy_crontab(), which chowns and chmods.
 COPY crontab /etc/cron.d/cr-tracker
-RUN chmod 0644 /etc/cron.d/cr-tracker
+RUN chown root:root /etc/cron.d/cr-tracker && chmod 0644 /etc/cron.d/cr-tracker
 
 COPY entrypoint.sh /app/entrypoint.sh
 
