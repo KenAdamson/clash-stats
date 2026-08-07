@@ -6,6 +6,12 @@ time-ordered split, same batches — and reports the places a deck prior should
 show up if it is real:
 
   1. Held-out val loss / accuracy — the headline, but the least diagnostic.
+     NOTE: the trainer's val_acc is LAST-tick accuracy (one call per game, at
+     the final placement) and its val_loss is class-weighted; both are reported
+     here unweighted and per-tick as well. The distinction is not cosmetic —
+     last-tick accuracy is nearly blind to a deck prior, yet it is what selects
+     the "best" checkpoint, so the training loop optimises a metric that cannot
+     see the feature under test.
   2. Tick-0 spread. v9's pre_game_wp has sd 0.124 and median 0.467 across 518K
      games, i.e. it opens nearly every game at a coin flip because it cannot
      see a matchup. If the deck prior works, tick-0 spread must WIDEN and the
@@ -90,6 +96,7 @@ def auc(scores: np.ndarray, labels: np.ndarray) -> float:
 def evaluate(model, loader, device, tick_buckets=(0, 1, 3, 8, 20), deck_present=None) -> dict:
     """Loss/accuracy overall, plus tick-0 scores and accuracy by tick bucket."""
     tot_loss = tot_n = tot_correct = 0.0
+    last_correct = last_games = 0.0
     t0_scores, t0_labels = [], []
     by_bucket = {b: [0.0, 0.0] for b in tick_buckets}   # bucket -> [correct, n]
     bce = torch.nn.BCEWithLogitsLoss(reduction="none")
@@ -104,6 +111,15 @@ def evaluate(model, loader, device, tick_buckets=(0, 1, 3, 8, 20), deck_present=
             tot_loss += float(loss)
             tot_n += float(mask.sum())
             tot_correct += float((((logits > 0).float() == labels) * mask).sum())
+            # LAST-tick accuracy: one call per game, at the final placement. This
+            # is what the trainer logs as val_acc and what selects the "best"
+            # checkpoint -- and it is nearly blind to a deck prior, because by
+            # the last tick the board has already decided the game. Reported
+            # alongside the per-tick figure so the two are never conflated again.
+            li = (lengths - 1).clamp(min=0).long()
+            ll = logits[torch.arange(logits.size(0), device=logits.device), li]
+            last_correct += float(((ll > 0).float() == labels[:, 0]).sum())
+            last_games += float(logits.size(0))
 
             probs = torch.sigmoid(logits)
             t0_scores.append(probs[:, 0].cpu().numpy())
@@ -129,8 +145,9 @@ def evaluate(model, loader, device, tick_buckets=(0, 1, 3, 8, 20), deck_present=
                               "tick0_sd": float(t0s[m].std())}
     return {
         "by_deck_availability": split,
-        "val_loss": tot_loss / max(tot_n, 1),
-        "val_acc": tot_correct / max(tot_n, 1),
+        "val_loss_unweighted": tot_loss / max(tot_n, 1),
+        "acc_per_tick": tot_correct / max(tot_n, 1),
+        "acc_last_tick": last_correct / max(last_games, 1),
         "tick0_mean": float(t0s.mean()),
         "tick0_sd": float(t0s.std()),
         "tick0_p5": float(np.percentile(t0s, 5)),
@@ -171,7 +188,9 @@ def main() -> None:
         res["deck_features"] = model.deck_features
         report["models"][name] = res
         print(f"\n== {name} (deck_features={model.deck_features}) ==")
-        print(f"  val_loss {res['val_loss']:.4f}   val_acc {res['val_acc']:.4f}")
+        print(f"  val_loss(unweighted) {res['val_loss_unweighted']:.4f}   "
+              f"acc per-tick {res['acc_per_tick']:.4f}   "
+              f"acc last-tick {res['acc_last_tick']:.4f}  <- what the trainer logs")
         print(f"  tick-0: mean {res['tick0_mean']:.3f}  sd {res['tick0_sd']:.4f}  "
               f"p5-p95 {res['tick0_p5']:.3f}-{res['tick0_p95']:.3f}  AUC {res['tick0_auc']:.4f}")
         print("  acc by tick: " + "  ".join(
@@ -182,7 +201,7 @@ def main() -> None:
 
     if len(report["models"]) == 2:
         a, b = report["models"][a_name], report["models"][b_name]
-        d_loss = b["val_loss"] - a["val_loss"]
+        d_loss = b["val_loss_unweighted"] - a["val_loss_unweighted"]
         d_auc = b["tick0_auc"] - a["tick0_auc"]
         ka = (a.get("by_deck_availability") or {}).get("deck_known", {})
         kb = (b.get("by_deck_availability") or {}).get("deck_known", {})
@@ -196,7 +215,11 @@ def main() -> None:
                              "delta_tick0_sd": b["tick0_sd"] - a["tick0_sd"],
                              "result": verdict}
         print(f"\n== VERDICT: {verdict} ==")
-        print(f"  val_loss   {a['val_loss']:.4f} -> {b['val_loss']:.4f}  ({d_loss:+.4f})")
+        print(f"  val_loss   {a['val_loss_unweighted']:.4f} -> "
+              f"{b['val_loss_unweighted']:.4f}  ({d_loss:+.4f})")
+        print(f"  acc last-tick {a['acc_last_tick']:.4f} -> {b['acc_last_tick']:.4f} "
+              f"({b['acc_last_tick']-a['acc_last_tick']:+.4f})  "
+              f"<- near-blind to the deck prior by construction")
         print(f"  tick0 AUC  {a['tick0_auc']:.4f} -> {b['tick0_auc']:.4f}  ({d_auc:+.4f})")
         print(f"  tick0 sd   {a['tick0_sd']:.4f} -> {b['tick0_sd']:.4f}  "
               f"({b['tick0_sd'] - a['tick0_sd']:+.4f})")
