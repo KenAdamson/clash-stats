@@ -439,6 +439,7 @@ class WPTrainer:
                     "card_embed_dim": getattr(self.model, "card_embed_dim", 16),
                     "deck_features": getattr(self.model, "deck_features", False),
                     "deck_interaction": getattr(self.model, "deck_interaction", False),
+                    "deck_antisym": getattr(self.model, "deck_antisym", False),
                     "epoch": epoch,
                     "val_loss": val_loss,
                     "val_acc": val_acc,
@@ -705,7 +706,8 @@ def infer_wp(session: Session, model_dir: Optional[Path] = None) -> None:
                                 tcn_channels=checkpoint.get("tcn_channels"),
                                 card_embed_dim=checkpoint.get("card_embed_dim", 16),
                                 deck_features=checkpoint.get("deck_features", False),
-                                deck_interaction=checkpoint.get("deck_interaction", False))
+                                deck_interaction=checkpoint.get("deck_interaction", False),
+                                deck_antisym=checkpoint.get("deck_antisym", False))
     model.load_state_dict(sd)
     model.to(device)
     model.eval()
@@ -861,7 +863,8 @@ def infer_wp_incremental(session: Session, model_dir: Optional[Path] = None) -> 
                                 tcn_channels=checkpoint.get("tcn_channels"),
                                 card_embed_dim=checkpoint.get("card_embed_dim", 16),
                                 deck_features=checkpoint.get("deck_features", False),
-                                deck_interaction=checkpoint.get("deck_interaction", False))
+                                deck_interaction=checkpoint.get("deck_interaction", False),
+                                deck_antisym=checkpoint.get("deck_antisym", False))
     model.load_state_dict(sd)
     model.to(device)
     model.eval()
@@ -1019,14 +1022,18 @@ def train_wp(
               f"{'' if _tcn_ch is None else f', tcn={_tcn_ch}, embed={_emb}'})")
         _deck = os.environ.get("WP_DECK_FEATURES", "1") == "1"
         _deck_ix = os.environ.get("WP_DECK_INTERACTION", "0") == "1"
+        _deck_as = os.environ.get("WP_DECK_ANTISYM", "0") == "1"
         model = WinProbabilityModel(vocab_size=vocab.size, feature_dim=feat_dim, dropout=DROPOUT,
                                     tcn_channels=_tcn_ch, card_embed_dim=_emb,
-                                    deck_features=_deck, deck_interaction=_deck_ix)
+                                    deck_features=_deck, deck_interaction=_deck_ix,
+                                    deck_antisym=_deck_as)
         _built_from_scratch = True
         if _deck:
             logger.info("Deck prior ENABLED: both decks mean-pooled (card+variant "
                         "embeddings) and injected at the head, so P(win) has a "
                         "matchup prior at tick 0%s",
+                        " — ANTISYMMETRIC (own-opp + skew-bilinear); mirror==0.5 by "
+                        "construction" if _deck_as else
                         " — WITH own*opp interaction term" if _deck_ix else
                         " (additive only, no interaction)")
 

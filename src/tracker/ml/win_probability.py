@@ -49,6 +49,7 @@ class WinProbabilityModel(nn.Module):
         dropout: float = 0.2,
         deck_features: bool = False,
         deck_interaction: bool = False,
+        deck_antisym: bool = False,
     ):
         super().__init__()
         self.card_embedding = nn.Embedding(vocab_size, card_embed_dim, padding_idx=0)
@@ -107,8 +108,37 @@ class WinProbabilityModel(nn.Module):
         # specific pairing be special rather than the sum of two reputations.
         # own-opp carries relative strength, which the sum cannot isolate.
         self.deck_interaction = deck_interaction and deck_features
-        n_blocks = 4 if self.deck_interaction else 2
+        # v11.1: constrain the deck term to be ANTISYMMETRIC.
+        #
+        # A matchup must satisfy P(A beats B) = 1 - P(B beats A), so the deck
+        # contribution to the logit has to flip sign when the decks swap. The
+        # v11 own*opp term does the opposite: elementwise product is
+        # commutative, so it is invariant under the swap and can only express
+        # "this pairing is unusual", never "who wins it". Measured on v11, half
+        # the deck signal was symmetric (sym 0.161 vs anti 0.173) and the model
+        # spent that capacity shifting its baseline down a near-uniform 0.0405
+        # -- global pessimism, exactly what a symmetric term can buy.
+        #
+        # Antisym mode keeps only terms that negate under the swap:
+        #   own - opp                    linear, antisymmetric by construction
+        #   own^T (A - A^T) opp          skew-symmetric bilinear, the canonical
+        #                                "who beats whom" operator and strictly
+        #                                more expressive than the difference
+        # It also makes mirror matches exactly 0.5, killing the +0.029 own-side
+        # bias measured on v10/v11.
+        self.deck_antisym = deck_antisym and deck_features
+        if self.deck_antisym:
+            n_blocks = 2                       # [own-opp ; bilinear]
+        elif self.deck_interaction:
+            n_blocks = 4
+        else:
+            n_blocks = 2
         self.deck_dim = n_blocks * card_embed_dim if deck_features else 0
+        if self.deck_antisym:
+            # K skew-symmetric DxD forms; M_k = A_k - A_k^T is skew for any A_k.
+            self.deck_bilinear = nn.Parameter(
+                torch.randn(card_embed_dim, card_embed_dim, card_embed_dim) * 0.02
+            )
 
         input_channels = card_embed_dim + feature_dim  # 16 + 17 = 33
         # The deck prior is ADDED to the head's first-layer output rather than
@@ -131,7 +161,11 @@ class WinProbabilityModel(nn.Module):
 
         # Per-tick classification head: (batch, 256[+extra], seq_len) → (batch, 1, seq_len)
         out_ch = self.tcn.output_channels  # 256
-        self.deck_proj = nn.Conv1d(self.deck_dim, 64, 1) if deck_features else None
+        # bias=False in antisym mode is load-bearing: with a bias,
+        # f(-x) = -Wx + b, which is NOT -f(x), and the antisymmetry the whole
+        # design rests on would be broken by a constant.
+        self.deck_proj = (nn.Conv1d(self.deck_dim, 64, 1, bias=not self.deck_antisym)
+                          if deck_features else None)
         self.head = nn.Sequential(
             nn.Conv1d(out_ch + extra_feature_dim, 64, 1),
             nn.ReLU(),
@@ -152,6 +186,10 @@ class WinProbabilityModel(nn.Module):
         emb = self.card_embedding(deck_ids) + self.variant_embedding(deck_variants)
         pooled = emb.mean(dim=2)                       # (batch, 2, D)
         own, opp = pooled[:, 0], pooled[:, 1]
+        if self.deck_antisym:
+            skew = self.deck_bilinear - self.deck_bilinear.transpose(-1, -2)
+            bilin = torch.einsum("bi,kij,bj->bk", own, skew, opp)   # (batch, D)
+            return torch.cat([own - opp, bilin], dim=1)             # (batch, 2D)
         if not self.deck_interaction:
             return pooled.flatten(1)                   # (batch, 2D)
         return torch.cat([own, opp, own * opp, own - opp], dim=1)  # (batch, 4D)
