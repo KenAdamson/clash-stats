@@ -170,6 +170,31 @@ def _detect_device() -> torch.device:
     return torch.device("cpu")
 
 
+def load_wp_model(path, device=None, dropout: float = 0.0):
+    """Build and load a WinProbabilityModel from a checkpoint, whatever its shape.
+
+    Reads every constructor argument the checkpoint happens to carry, by
+    introspecting the model signature. Adding a new architecture flag then costs
+    exactly one thing -- saving it in the checkpoint -- instead of an edit to
+    every evaluation script that ever loads a model.
+
+    That is not hypothetical tidiness: three separate evaluations have already
+    died on `Missing key(s) in state_dict` after a flag was added, each one
+    silently invalidating a comparison that looked like it had run.
+    """
+    import inspect
+    ck = torch.load(path, map_location=device or "cpu", weights_only=True)
+    params = inspect.signature(WinProbabilityModel.__init__).parameters
+    kwargs = {k: ck[k] for k in params if k != "self" and k in ck}
+    kwargs["dropout"] = dropout
+    model = WinProbabilityModel(**kwargs)
+    model.load_state_dict(ck["model_state_dict"])
+    if device is not None:
+        model.to(device)
+    model.eval()
+    return model, ck
+
+
 class WPTrainer:
     """Trains the win probability model with per-tick BCE loss.
 
