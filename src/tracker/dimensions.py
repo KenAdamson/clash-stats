@@ -14,8 +14,10 @@ daily cron job (see ``refresh_dims.sh`` sketched in ``entrypoint.sh``).
 """
 
 import logging
+import os
 from collections import defaultdict
 from datetime import datetime, timezone
+from pathlib import Path
 from statistics import median
 from typing import Optional
 
@@ -53,7 +55,38 @@ _RESOLVE_MAX_AGE_DAYS = 30
 _RESOLVE_MAX_ATTEMPTS = 4
 
 
-def harvest_clan_dim(session: Session) -> int:
+CLAN_WATERMARK_PATH = Path("data/clan_harvest_watermark.txt")
+# Re-baseline with a full scan every Nth run. Incremental counting accumulates,
+# so a deleted battle (corpus pruning) would leave n_battles_seen drifting high
+# forever; the full scan recomputes from scratch and self-heals it.
+CLAN_FULL_REBUILD_EVERY = int(os.environ.get("CLAN_FULL_REBUILD_EVERY", "7"))
+
+
+def _read_clan_watermark() -> Optional[int]:
+    try:
+        return int(CLAN_WATERMARK_PATH.read_text().split(",")[0].strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _read_clan_runcount() -> int:
+    try:
+        return int(CLAN_WATERMARK_PATH.read_text().split(",")[1].strip())
+    except (OSError, ValueError, IndexError):
+        return 0
+
+
+def _write_clan_watermark(value: int, runs: int) -> None:
+    try:
+        CLAN_WATERMARK_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = CLAN_WATERMARK_PATH.with_suffix(".tmp")
+        tmp.write_text(f"{value},{runs}")
+        tmp.replace(CLAN_WATERMARK_PATH)
+    except OSError as exc:
+        logger.warning("Could not persist clan harvest watermark: %s", exc)
+
+
+def harvest_clan_dim(session: Session, full: bool = False) -> int:
     """Harvest clan IDENTITY from battle raw_json — NO API calls.
 
     Upserts one row per clan ever seen as an opponent's clan (~490K), filling
@@ -71,8 +104,38 @@ def harvest_clan_dim(session: Session) -> int:
     """
     if session.bind is not None and session.bind.dialect.name == "sqlite":
         return 0
+
+    # The full-scan form reads every battle row and detoasts raw_json for each,
+    # then groups by a JSON expression no index can serve: 26.1M rows and a
+    # 3.8-hour mean across 32 runs, 5 CPU-days in a 34-day window. Clan facts
+    # for battles already processed cannot change, so all of that was rework.
+    #
+    # Incremental scans id > watermark on the PK index instead. Counting then
+    # has to ACCUMULATE rather than replace, which is the one semantic change --
+    # first_seen/last_seen/on_our_accounts already merged correctly via
+    # LEAST/GREATEST/OR. Correctness rests on each battle being counted exactly
+    # once, which holds because ids come from a monotonic sequence and the
+    # predicate is strict.
+    watermark = None if full else _read_clan_watermark()
+    runs = _read_clan_runcount()
+    if watermark is not None and CLAN_FULL_REBUILD_EVERY > 0 and runs >= CLAN_FULL_REBUILD_EVERY:
+        logger.info("harvest_clan_dim: run %d — full re-baseline (deletions make "
+                    "accumulated counts drift; the full scan self-heals them)", runs)
+        watermark = None
+        runs = 0
+    new_watermark = session.execute(
+        text("SELECT COALESCE(MAX(id), 0) FROM battles")).scalar() or 0
+
+    incremental = watermark is not None
+    where_new = "AND b.id > :wm" if incremental else ""
+    count_merge = ("clan_dim.n_battles_seen + EXCLUDED.n_battles_seen"
+                   if incremental else "EXCLUDED.n_battles_seen")
+    params = {"our_corpuses": list(_OUR_CORPUSES)}
+    if incremental:
+        params["wm"] = watermark
+
     result = session.execute(text(
-        """
+        f"""
         INSERT INTO clan_dim (
             clan_tag, clan_name, first_seen, last_seen,
             n_battles_seen, on_our_accounts, refreshed_at
@@ -86,21 +149,26 @@ def harvest_clan_dim(session: Session) -> int:
             count(*) AS n_battles_seen,
             bool_or(corpus = ANY(:our_corpuses)) AS on_our_accounts,
             now() AS refreshed_at
-        FROM battles
+        FROM battles b
         WHERE raw_json->'opponent'->0->'clan'->>'tag' IS NOT NULL
+          {where_new}
         GROUP BY raw_json->'opponent'->0->'clan'->>'tag'
         ON CONFLICT (clan_tag) DO UPDATE SET
-            clan_name       = EXCLUDED.clan_name,
+            -- COALESCE so an increment with no name never nulls a known one.
+            clan_name       = COALESCE(EXCLUDED.clan_name, clan_dim.clan_name),
             first_seen      = LEAST(clan_dim.first_seen, EXCLUDED.first_seen),
             last_seen       = GREATEST(clan_dim.last_seen, EXCLUDED.last_seen),
-            n_battles_seen  = EXCLUDED.n_battles_seen,
+            n_battles_seen  = {count_merge},
             on_our_accounts = clan_dim.on_our_accounts OR EXCLUDED.on_our_accounts,
             refreshed_at    = now()
         """
-    ), {"our_corpuses": list(_OUR_CORPUSES)})
+    ), params)
     session.commit()
     n = result.rowcount or 0
-    logger.info("harvest_clan_dim: upserted %d clan identities (no API)", n)
+    _write_clan_watermark(new_watermark, runs + 1)
+    logger.info("harvest_clan_dim: upserted %d clan identities (%s, watermark %d)",
+                n, "FULL scan" if not incremental else f"incremental from id>{watermark}",
+                new_watermark)
     return n
 
 
