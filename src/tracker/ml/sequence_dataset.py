@@ -380,6 +380,33 @@ class SequenceDataset(Dataset):
             fill[r] += 1
         return {b: (i, v) for b, (i, v, _) in out.items()}
 
+    @staticmethod
+    def _is_rotated(evts: list) -> bool:
+        """True when the replay's coordinate frame is 180-degrees rotated.
+
+        RoyaleAPI renders a replay from the viewpoint of whichever player it was
+        fetched for, so the arena arrives arbitrarily oriented: for ~50% of the
+        corpus BOTH axes are inverted -- high y is the opponent's half and low x
+        is the right lane. Side labels stay correct (verified: team plays the
+        player's cards at the same rate in rotated and normal games), so the
+        damage is confined to geometry.
+
+        Left unhandled this randomises five of the 24 features -- arena_x,
+        arena_y and the three-way lane one-hot -- across half the training set,
+        which is why team and opponent average the SAME arena_y corpus-wide
+        (15,221 vs 15,085) when the player should sit clearly higher.
+
+        The test needs no assumption about how anyone plays: the player defends
+        their own side, so their placements average further from the opponent's
+        goal than the opponent's do. Confirmed against a game whose placements
+        Ken described from memory.
+        """
+        own = [e.arena_y for e in evts if e.side == "team"]
+        opp = [e.arena_y for e in evts if e.side == "opponent"]
+        if len(own) < 3 or len(opp) < 3:
+            return False          # too little evidence — leave it alone
+        return (sum(own) / len(own)) <= (sum(opp) / len(opp))
+
     def _build_sample(self, battle_id: str, evts: list) -> tuple[np.ndarray, np.ndarray]:
         """Build (card_ids, features) arrays for one battle's events.
 
@@ -389,6 +416,9 @@ class SequenceDataset(Dataset):
         """
         card_ids = np.zeros(len(evts), dtype=np.int64)
         features = np.zeros((len(evts), self.feature_dim), dtype=np.float32)
+        # Normalise the arena to a single orientation before reading any
+        # geometry off it (see _is_rotated).
+        rot = self._is_rotated(evts)
 
         for j, ev in enumerate(evts):
             title_name = kebab_to_title(ev.card_name)
@@ -403,14 +433,17 @@ class SequenceDataset(Dataset):
             # game_phase one-hot (4)
             features[j, 2:6] = _game_phase_onehot(ev.game_tick)
 
+            ax = ARENA_X_MAX - ev.arena_x if rot else ev.arena_x
+            ay = ARENA_Y_MAX - ev.arena_y if rot else ev.arena_y
+
             # arena_x normalized [-1, 1]
-            features[j, 6] = (ev.arena_x - ARENA_X_MID) / ARENA_X_MID
+            features[j, 6] = (ax - ARENA_X_MID) / ARENA_X_MID
 
             # arena_y normalized [-1, 1]
-            features[j, 7] = (ev.arena_y - ARENA_Y_MID) / ARENA_Y_MID
+            features[j, 7] = (ay - ARENA_Y_MID) / ARENA_Y_MID
 
             # lane one-hot (3)
-            features[j, 8:11] = _lane_onehot(ev.arena_x)
+            features[j, 8:11] = _lane_onehot(ax)
 
             # play_number capped and normalized
             features[j, 11] = min(ev.play_number, PLAY_NUMBER_CAP) / PLAY_NUMBER_CAP
