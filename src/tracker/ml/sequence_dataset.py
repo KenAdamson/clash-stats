@@ -215,12 +215,19 @@ class SequenceDataset(Dataset):
             # Scoped to specific battles (for incremental inference)
             battle_rows = session.execute(
                 text("""
+                    -- The battle filter MUST live inside the aggregate. Without
+                    -- it the subquery groups all ~29M replay_events rows and the
+                    -- outer WHERE then discards nearly all of it -- for a handful
+                    -- of battles, every five minutes, because this is the path
+                    -- incremental WP inference takes. Pushed down, it is an index
+                    -- probe on idx_replay_events_battle_id instead.
                     SELECT b.battle_id, b.result
                     FROM battles b
                     JOIN (
                         SELECT battle_id, COUNT(*) as event_count
                         FROM replay_events
                         WHERE card_name != '_invalid'
+                          AND battle_id IN :bids
                         GROUP BY battle_id
                         HAVING COUNT(*) >= :min_events
                     ) re_counts ON re_counts.battle_id = b.battle_id
