@@ -8,6 +8,7 @@ import asyncio
 import logging
 import os
 import time
+from pathlib import Path
 
 from sqlalchemy.orm import Session
 
@@ -73,6 +74,37 @@ def mark_stale_replays(session: Session, max_age_days: int = STALE_REPLAY_DAYS) 
     from datetime import datetime, timedelta, timezone
     cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
 
+    # Throttle: this is called from every corpus scrape (once a minute), but it
+    # is a slow scan that finds almost nothing. Battles age past the 2-day cutoff
+    # continuously and gradually (~4.3k are pending at any moment, accruing at
+    # roughly the ingest rate), so running it 1,440 times a day instead of 24
+    # changes no outcome -- a battle RoyaleAPI has already stopped serving does
+    # not care whether we notice within a minute or within an hour -- it just
+    # repeats the search.
+    #
+    # And the search is expensive: idx_battles_replay_stale covers
+    # (replay_fetched, battle_type) but not battle_time, so every call walks all
+    # ~150k unfetched battles and discards >99% of them on a heap filter.
+    # Measured at 6,308 calls averaging 14.6s under load (373ms warm and
+    # uncontended) -- 44% of all database time during a 25-minute sample.
+    #
+    # The obvious fix, a partial index on (battle_type, battle_time) WHERE
+    # replay_fetched = 0, exists (idx_battles_replay_pending) and is 100x
+    # cheaper by cost estimate, but the planner will not choose it: Postgres
+    # keeps no statistics for a partial index's subset, so it assumes
+    # battle_time is distributed as it is table-wide and predicts ~123k matching
+    # rows where the truth is a small fraction of that. Throttling is therefore
+    # the load-bearing fix here, and it works regardless of which plan the
+    # planner picks.
+    interval = int(os.environ.get("MARK_STALE_MIN_INTERVAL_SECONDS", "3600"))
+    marker = Path(os.environ.get("MARK_STALE_MARKER", "data/mark_stale_last_run"))
+    if interval > 0:
+        try:
+            if time.time() - marker.stat().st_mtime < interval:
+                return 0
+        except OSError:
+            pass                      # never run, or unreadable -- fall through
+
     from sqlalchemy import update
     from sqlalchemy.exc import OperationalError
     try:
@@ -87,6 +119,14 @@ def mark_stale_replays(session: Session, max_age_days: int = STALE_REPLAY_DAYS) 
         )
         count = result.rowcount
         session.commit()
+        # Touch AFTER a successful commit, so a failed run retries next cycle
+        # rather than being throttled out for an hour on the strength of a
+        # rollback.
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.touch()
+        except OSError:
+            logger.warning("mark_stale_replays: could not update throttle marker %s", marker)
         if count > 0:
             logger.info("Marked %d stale battles as replay_fetched=2 (older than %d days).", count, max_age_days)
         return count
