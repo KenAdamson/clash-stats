@@ -217,10 +217,17 @@ class WPTrainer:
         batch_size: int = BATCH_SIZE,
         learning_rate: float = LEARNING_RATE,
         warmup_epochs: int = 0,
+        model_version: str = WP_MODEL_VERSION,
     ):
         self.model = model.to(device)
         self.device = device
         self.model_dir = model_dir
+        # Stamped on every win_probability / game_wp_summary row this trainer
+        # writes. Inference callers pass the checkpoint stem (e.g. "wp_v13") so
+        # rows are attributable to the model that produced them; without that,
+        # promoting a new model silently mixes two models' scores under one
+        # label and no query can tell them apart afterwards.
+        self.model_version = model_version
         # batch_size defaults to BATCH_SIZE (fine for the frozen-encoder base
         # model), but the from-scratch full-encoder train retains all TCN
         # activations for backward and blows the A770 Level-Zero allocation
@@ -655,7 +662,7 @@ class WPTrainer:
                         "bid": bid, "tick": game_tick,
                         "wp": float(wp_curve[j]), "wpa": float(wpa[j]),
                         "crit": float(criticality[j]), "eidx": j,
-                        "ver": WP_MODEL_VERSION,
+                        "ver": self.model_version,
                     })
 
                 # Compute summary
@@ -685,7 +692,7 @@ class WPTrainer:
                     top_negative_wpa_card=top_neg,
                     critical_tick=crit_tick,
                     critical_card=crit_card,
-                    model_version=WP_MODEL_VERSION,
+                    model_version=self.model_version,
                 ))
 
                 processed += 1
@@ -779,6 +786,9 @@ def infer_wp(session: Session, model_dir: Optional[Path] = None) -> None:
     trainer = WPTrainer.__new__(WPTrainer)
     trainer.model = model
     trainer.device = device
+    # __new__ skips __init__, so every attribute run_inference touches must be
+    # set here by hand. The stem ties each row to the checkpoint that scored it.
+    trainer.model_version = wp_path.stem
     trainer.full_loader = DataLoader(
         dataset, batch_size=(512 if feat_dim > 17 else BATCH_SIZE), shuffle=False,
         collate_fn=wp_collate_fn, num_workers=0,
@@ -915,6 +925,9 @@ def infer_wp_incremental(session: Session, model_dir: Optional[Path] = None) -> 
     trainer = WPTrainer.__new__(WPTrainer)
     trainer.model = model
     trainer.device = device
+    # __new__ skips __init__, so every attribute run_inference touches must be
+    # set here by hand. The stem ties each row to the checkpoint that scored it.
+    trainer.model_version = wp_path.stem
     trainer.full_loader = DataLoader(
         dataset, batch_size=(512 if feat_dim > 17 else BATCH_SIZE), shuffle=False,
         collate_fn=wp_collate_fn, num_workers=0,
@@ -1194,6 +1207,10 @@ def train_wp(
                         learning_rate=_fs_lr,
                         warmup_epochs=WARMUP_EPOCHS if _from_scratch else 0)
     best_path = trainer.train(checkpoint_path=checkpoint_path)
+    # Rows this run writes belong to the checkpoint it just produced, not to the
+    # legacy "wp-v1" literal. The DELETE below is scoped to the same value, so a
+    # re-run replaces its own rows and leaves other models' scores alone.
+    trainer.model_version = best_path.stem
 
     # 7. Load best model
     checkpoint = torch.load(best_path, map_location=device, weights_only=True)
@@ -1285,11 +1302,11 @@ def train_wp(
         # Clear old WP data
         session.execute(
             sa_text("DELETE FROM win_probability WHERE model_version = :v"),
-            {"v": WP_MODEL_VERSION},
+            {"v": trainer.model_version},
         )
         session.execute(
             sa_text("DELETE FROM game_wp_summary WHERE model_version = :v"),
-            {"v": WP_MODEL_VERSION},
+            {"v": trainer.model_version},
         )
         session.commit()
 
