@@ -281,12 +281,24 @@ def _opponent_clan_tags(session: Session) -> dict[str, Optional[str]]:
     """
     if session.bind is not None and session.bind.dialect.name == "sqlite":
         return {}
+    # Pick the winning row FIRST on cheap columns, then detoast raw_json for only
+    # those. Selecting the JSON expression inside the DISTINCT ON made Postgres
+    # detoast every one of ~26M battles to keep ~100k of them -- raw_json is
+    # large enough to live out-of-line, so that is an out-of-band read per row.
+    # Measured: 35 calls, 50 CPU-hours total, mean 86 min and rising with the
+    # table (2h25m on 2026-08-16). The rewrite touches only (opponent_tag,
+    # battle_time, id) in the scan and detoasts one row per opponent. Same
+    # result, same ordering semantics.
     rows = session.execute(text(
-        "SELECT DISTINCT ON (opponent_tag) opponent_tag, "
-        "       raw_json->'opponent'->0->'clan'->>'tag' AS clan_tag "
-        "FROM battles "
-        "WHERE opponent_tag IS NOT NULL "
-        "ORDER BY opponent_tag, battle_time DESC NULLS LAST"
+        "WITH latest AS ("
+        "  SELECT DISTINCT ON (opponent_tag) opponent_tag, id "
+        "  FROM battles "
+        "  WHERE opponent_tag IS NOT NULL "
+        "  ORDER BY opponent_tag, battle_time DESC NULLS LAST"
+        ") "
+        "SELECT l.opponent_tag, "
+        "       b.raw_json->'opponent'->0->'clan'->>'tag' AS clan_tag "
+        "FROM latest l JOIN battles b ON b.id = l.id"
     )).fetchall()
     return {r.opponent_tag: r.clan_tag for r in rows}
 
