@@ -530,6 +530,15 @@ def corpus_hygiene(
     active = [r[0] for r in session.execute(
         select(PlayerCorpus.player_tag).where(PlayerCorpus.active == 1)
     )]
+    # End the read transaction before the enrichment pass. That pass makes up to
+    # badge_backfill_max API calls and touches the database not once, but the
+    # SELECT above leaves a transaction open, so without this the connection sits
+    # "idle in transaction" for the whole run -- observed at 2h03m on 2026-08-16.
+    # An open transaction holds back the xmin horizon, which stops autovacuum
+    # from reclaiming dead tuples anywhere in the database for that entire
+    # window, on the busiest ingest table set we have. `active` is already
+    # materialized into a Python list, so nothing downstream needs the snapshot.
+    session.commit()
 
     # 1. enrich active players: never-seen tags, plus pre-badge-era entries
     # that lack badge fields (self-healing backfill, capped per run so a large
