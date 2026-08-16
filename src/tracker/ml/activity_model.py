@@ -52,12 +52,40 @@ def _build_player_profiles(session: Session) -> dict[str, dict]:
             'first_battle_time': datetime | None,
         }
     """
-    cached = _load_profile_cache()
-    if cached is not None:
-        profiles = cached
+    env = _load_profile_cache()
+    if env is not None:
+        profiles = env["profiles"]                      # fresh — nothing to do
     else:
-        profiles = _build_heavy_profiles(session)
-        _save_profile_cache(profiles)
+        lock_fd = _try_profile_lock()
+        if lock_fd is None:
+            # Another process is already refreshing. Serving the stale copy is
+            # strictly better than launching a duplicate aggregate: these are
+            # activity histograms over millions of games, so a few extra minutes
+            # of age cannot change a scheduling decision, whereas a second
+            # concurrent full scan measurably hurts every other query.
+            stale = _load_profile_cache(allow_stale=True)
+            profiles = (stale or {}).get("profiles")
+            if profiles is None:
+                profiles = _build_heavy_profiles(session)
+            else:
+                logger.info("activity profiles: refresh in progress elsewhere — "
+                            "serving stale (%d players)", len(profiles))
+        else:
+            try:
+                stale = _load_profile_cache(allow_stale=True)
+                upto = _max_battle_id(session)
+                full_due = (stale is None or
+                            time.time() - stale.get("based_on", 0)
+                            > _PROFILE_FULL_REBUILD_SECONDS)
+                if full_due:
+                    profiles = _build_heavy_profiles(session)
+                    based_on = time.time()
+                else:
+                    profiles = _incremental_profiles(session, stale, upto)
+                    based_on = stale.get("based_on", time.time())
+                _save_profile_cache(profiles, upto, based_on)
+            finally:
+                _release_profile_lock(lock_fd)
 
     # Get last_scraped and trophy info from player_corpus (cheap, always live)
     corpus_rows = session.execute(
@@ -81,117 +109,171 @@ def _build_player_profiles(session: Session) -> dict[str, dict]:
 
 
 _PROFILE_CACHE_PATH = Path("data/activity_profiles_cache.pkl")
+_PROFILE_LOCK_PATH = Path("data/activity_profiles_cache.lock")
+
+# How often to discard the incremental chain and re-derive from scratch. The
+# incremental merge is exact for appends, but it cannot see DELETEs or a
+# battle's corpus label changing after the fact, so drift is re-baselined
+# periodically the same way the clan_dim harvest does it.
+_PROFILE_FULL_REBUILD_SECONDS = int(
+    os.environ.get("ACTIVITY_PROFILE_FULL_REBUILD_SECONDS", str(7 * 24 * 3600))
+)
 
 
 def _profile_cache_ttl() -> int:
     return int(os.environ.get("ACTIVITY_PROFILE_CACHE_TTL", "1800"))
 
 
-def _load_profile_cache() -> Optional[dict]:
-    """Return cached heavy profiles if fresh, else None."""
+def _try_profile_lock() -> Optional[int]:
+    """Win the right to refresh, or None if another process already has it.
+
+    Same O_EXCL mechanism as the card-vocabulary cache, and for the same reason:
+    a plain TTL is a synchronised cliff. Every corpus scrape checks this cache,
+    so at expiry several processes miss simultaneously and each launches its own
+    full-table aggregate. A lock older than an hour is assumed abandoned.
+    """
     try:
-        if time.time() - _PROFILE_CACHE_PATH.stat().st_mtime < _profile_cache_ttl():
-            with open(_PROFILE_CACHE_PATH, "rb") as f:
-                return pickle.load(f)
-    except (OSError, pickle.UnpicklingError, EOFError):
+        if time.time() - os.path.getmtime(_PROFILE_LOCK_PATH) > 3600:
+            os.unlink(_PROFILE_LOCK_PATH)
+    except OSError:
         pass
+    try:
+        _PROFILE_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+        return os.open(str(_PROFILE_LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except (FileExistsError, OSError):
+        return None
+
+
+def _release_profile_lock(fd: Optional[int]) -> None:
+    if fd is None:
+        return
+    try:
+        os.close(fd)
+        os.unlink(_PROFILE_LOCK_PATH)
+    except OSError:
+        pass
+
+
+def _load_profile_cache(allow_stale: bool = False) -> Optional[dict]:
+    """Return the cache envelope, or None.
+
+    The envelope is ``{"profiles", "watermark", "built_at", "based_on"}``.
+    Freshness is read from ``built_at`` inside the file rather than from the
+    file's mtime: rewriting the cache after an incremental top-up would
+    otherwise reset the clock and defer the periodic full re-baseline forever.
+    Pre-envelope caches (a bare profiles dict) are treated as absent so the
+    first run after deploy re-derives once and gains a watermark.
+    """
+    try:
+        with open(_PROFILE_CACHE_PATH, "rb") as f:
+            env = pickle.load(f)
+    except (OSError, pickle.UnpicklingError, EOFError):
+        return None
+    if not isinstance(env, dict) or "profiles" not in env or "watermark" not in env:
+        return None
+    if allow_stale:
+        return env
+    if time.time() - env.get("built_at", 0) < _profile_cache_ttl():
+        return env
     return None
 
 
-def _save_profile_cache(profiles: dict) -> None:
+def _save_profile_cache(profiles: dict, watermark: int, based_on: float) -> None:
+    """Persist the envelope atomically.
+
+    ``based_on`` is the timestamp of the last FULL rebuild and is carried
+    forward across incremental top-ups, so the weekly re-baseline stays anchored
+    to the real derivation rather than to the most recent cheap update.
+    """
     try:
         _PROFILE_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
         tmp = _PROFILE_CACHE_PATH.with_suffix(".tmp")
         with open(tmp, "wb") as f:
-            pickle.dump(profiles, f)
+            pickle.dump({"profiles": profiles, "watermark": watermark,
+                         "built_at": time.time(), "based_on": based_on}, f)
         tmp.replace(_PROFILE_CACHE_PATH)
     except OSError:
         logger.warning("Could not persist activity profile cache")
 
 
-def _build_heavy_profiles(session: Session) -> dict[str, dict]:
-    """The full-table aggregates: hourly/dow histograms + first/last battle."""
-    # Get per-player hourly + dow histograms from battle_time.
-    # battle_time is a DATETIME column — EXTRACT() works on both PostgreSQL and SQLite.
-    # ISODOW: 1=Monday ... 7=Sunday (ISO 8601).
-    rows = session.execute(
-        text("""
-            SELECT
-                player_tag,
-                EXTRACT(HOUR FROM battle_time) AS hour_utc,
-                EXTRACT(ISODOW FROM battle_time) AS dow,
-                COUNT(*) AS cnt
-            FROM battles
-            WHERE corpus IS NOT NULL
-              AND battle_time IS NOT NULL
-            GROUP BY player_tag, hour_utc, dow
-        """)
-    ).all()
+def _max_battle_id(session: Session) -> int:
+    """Highest battles.id, the watermark anchor (index-only, sub-millisecond)."""
+    return int(session.execute(text("SELECT COALESCE(MAX(id), 0) FROM battles")).scalar() or 0)
 
-    profiles: dict[str, dict] = {}
-    for row in rows:
-        tag = row[0]
-        hour = row[1]
-        dow = row[2]
-        cnt = row[3]
 
+def _merge_rows(profiles: dict[str, dict], rows) -> None:
+    """Fold (player, hour, dow, cnt, first, last) rows into profiles, in place.
+
+    Every field here is additive over appends -- counts sum, first_battle_time
+    is a running MIN and last_battle_time a running MAX -- which is exactly why
+    the whole aggregate can be maintained incrementally instead of rescanned.
+    """
+    for tag, hour, dow, cnt, first_bt, last_bt in rows:
         if hour is None or dow is None:
             continue
+        p = profiles.get(tag)
+        if p is None:
+            p = profiles[tag] = {"hourly_counts": {}, "dow_counts": {},
+                                 "total_battles": 0, "last_battle_time": None,
+                                 "first_battle_time": None, "last_scraped": None,
+                                 "trophy_mid": None}
+        h, d = int(hour), int(dow) - 1        # ISODOW 1=Mon -> 0=Mon
+        p["hourly_counts"][h] = p["hourly_counts"].get(h, 0) + cnt
+        p["dow_counts"][d] = p["dow_counts"].get(d, 0) + cnt
+        p["total_battles"] += cnt
+        for key, val, better in (("first_battle_time", first_bt, min),
+                                 ("last_battle_time", last_bt, max)):
+            if val is None:
+                continue
+            if val.tzinfo is None:
+                val = val.replace(tzinfo=timezone.utc)
+            cur = p[key]
+            p[key] = val if cur is None else better(cur, val)
 
-        if tag not in profiles:
-            profiles[tag] = {
-                'hourly_counts': {},
-                'dow_counts': {},
-                'total_battles': 0,
-            }
 
-        p = profiles[tag]
-        p['hourly_counts'][int(hour)] = p['hourly_counts'].get(int(hour), 0) + cnt
-        p['total_battles'] += cnt
+_PROFILE_AGG_SQL = """
+    SELECT player_tag,
+           EXTRACT(HOUR FROM battle_time) AS hour_utc,
+           EXTRACT(ISODOW FROM battle_time) AS dow,
+           COUNT(*) AS cnt,
+           MIN(battle_time) AS first_bt,
+           MAX(battle_time) AS last_bt
+    FROM battles
+    WHERE corpus IS NOT NULL AND battle_time IS NOT NULL
+      {id_filter}
+    GROUP BY player_tag, hour_utc, dow
+"""
 
-        # ISODOW from PostgreSQL: 1=Monday, ..., 7=Sunday
-        # Convert to 0=Monday, ..., 6=Sunday
-        dow_py = int(dow) - 1
-        p['dow_counts'][dow_py] = p['dow_counts'].get(dow_py, 0) + cnt
 
-    # Get last/first battle time per player — native DATETIME, so
-    # MAX/MIN return datetime objects directly.
-    for tag, p in profiles.items():
-        p['last_battle_time'] = None
-        p['first_battle_time'] = None
-
-    time_rows = session.execute(
-        text("""
-            SELECT player_tag,
-                   MAX(battle_time) AS last_bt,
-                   MIN(battle_time) AS first_bt
-            FROM battles
-            WHERE corpus IS NOT NULL
-              AND battle_time IS NOT NULL
-            GROUP BY player_tag
-        """)
+def _incremental_profiles(session: Session, env: dict, upto: int) -> dict[str, dict]:
+    """Top up cached profiles with battles arriving after the watermark."""
+    profiles = env["profiles"]
+    rows = session.execute(
+        text(_PROFILE_AGG_SQL.format(id_filter="AND id > :wm AND id <= :upto")),
+        {"wm": env["watermark"], "upto": upto},
     ).all()
+    _merge_rows(profiles, rows)
+    logger.info("activity profiles: incremental top-up, %d groups from ids %d..%d",
+                len(rows), env["watermark"], upto)
+    return profiles
 
-    for row in time_rows:
-        tag = row[0]
-        if tag in profiles:
-            last_bt = row[1]
-            first_bt = row[2]
-            if last_bt:
-                if last_bt.tzinfo is None:
-                    last_bt = last_bt.replace(tzinfo=timezone.utc)
-                profiles[tag]['last_battle_time'] = last_bt
-            if first_bt:
-                if first_bt.tzinfo is None:
-                    first_bt = first_bt.replace(tzinfo=timezone.utc)
-                profiles[tag]['first_battle_time'] = first_bt
 
-    # last_scraped / trophy_mid are merged live by _build_player_profiles;
-    # default them here so cached profiles always carry the keys.
-    for p in profiles.values():
-        p.setdefault('last_scraped', None)
-        p.setdefault('trophy_mid', None)
+def _build_heavy_profiles(session: Session) -> dict[str, dict]:
+    """Derive profiles from the whole corpus in ONE pass.
 
+    This used to run two separate full scans of battles -- one for the
+    hour/dow histograms and a second for MIN/MAX battle_time per player. They
+    read identical rows under identical predicates, so the min/max are folded
+    into the same GROUP BY and the second scan is gone.
+
+    Callers should prefer the incremental path; this is the cold-start and the
+    periodic re-baseline.
+    """
+    rows = session.execute(text(_PROFILE_AGG_SQL.format(id_filter=""))).all()
+    profiles: dict[str, dict] = {}
+    _merge_rows(profiles, rows)
+    logger.info("activity profiles: FULL rebuild, %d groups -> %d players",
+                len(rows), len(profiles))
     return profiles
 
 
