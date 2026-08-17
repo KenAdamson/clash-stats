@@ -17,12 +17,23 @@ from tracker.ml.storage import GameFeature, to_blob, from_blob
 
 logger = logging.getLogger(__name__)
 
-# Arena midpoints for lane/aggression calculations
-ARENA_X_MID = 8750   # left lane < mid, right lane > mid
-ARENA_Y_MID = 15750  # team half < mid, opponent half > mid
+# Arena midpoints for lane/aggression calculations.
+#
+# OWN half is HIGH arena_y (backline ~31499); the opponent's is low. The old
+# comment here asserted the opposite and the aggression feature was built on it,
+# so it counted plays in the player's OWN half as aggressive -- it measured
+# defence. Verified against Ken's games, split by orientation: 64.4% of his team
+# placements sit above the midline in non-rotated games versus 30.7% in rotated
+# ones.
+ARENA_X_MAX = 17500
+ARENA_Y_MAX = 31500
+ARENA_X_MID = ARENA_X_MAX // 2   # 8750
+ARENA_Y_MID = ARENA_Y_MAX // 2   # 15750
 
-# Feature vector version — bump when the extraction logic changes
-FEATURE_VERSION = "v2"
+# Feature vector version — bump when the extraction logic changes.
+# v3: arena orientation correction + aggression polarity fix. v2 vectors are
+# NOT comparable to v3 ones and must be re-extracted, not mixed.
+FEATURE_VERSION = "v3"
 
 
 def extract_game_features(
@@ -57,6 +68,33 @@ def extract_game_features(
     return _extract_features_from_loaded(battle, events, summaries, deck_cards)
 
 
+def _is_rotated(team_events: list, opp_events: list) -> bool:
+    """True when this replay is stored 180-degrees rotated.
+
+    Own placements sit deeper (higher arena_y) than the opponent's in a normally
+    oriented replay, simply because each player defends their own half. When the
+    relationship inverts, the whole board was rendered from the other viewpoint.
+
+    Mirrors sequence_dataset._is_rotated so both extraction paths agree; needs a
+    few placements per side to be meaningful, and assumes NOT rotated otherwise
+    (the majority case, and it leaves coordinates untouched).
+    """
+    if len(team_events) < 3 or len(opp_events) < 3:
+        return False
+    own = [e.arena_y for e in team_events if e.arena_y is not None]
+    opp = [e.arena_y for e in opp_events if e.arena_y is not None]
+    if len(own) < 3 or len(opp) < 3:
+        return False
+    return (sum(own) / len(own)) <= (sum(opp) / len(opp))
+
+
+def _oriented_xy(ev, rotated: bool) -> tuple[float, float]:
+    """Return (arena_x, arena_y) in canonical orientation."""
+    x = ev.arena_x if ev.arena_x is not None else ARENA_X_MID
+    y = ev.arena_y if ev.arena_y is not None else ARENA_Y_MID
+    return ((ARENA_X_MAX - x, ARENA_Y_MAX - y) if rotated else (x, y))
+
+
 def _extract_features_from_loaded(
     battle: Battle,
     events: list[ReplayEvent],
@@ -77,6 +115,13 @@ def _extract_features_from_loaded(
     player_card_names = sorted(dc.card_name for dc in player_cards)
     team_events = [e for e in events if e.side == "team"]
     opp_events = [e for e in events if e.side == "opponent"]
+
+    # RoyaleAPI renders each replay from the viewpoint of whoever it was fetched
+    # for, so roughly half the corpus is stored 180-degrees rotated on BOTH axes.
+    # Side labels are unaffected -- only the geometry -- so any spatial feature
+    # must be read through this. Without it, "aggression" and "right lane" are
+    # coin flips corpus-wide.
+    rotated = _is_rotated(team_events, opp_events)
 
     for card_name in player_card_names[:8]:
         count = sum(1 for e in team_events if e.card_name == card_name and not e.ability_used)
@@ -137,7 +182,8 @@ def _extract_features_from_loaded(
     first_play_tick = min((e.game_tick for e in team_events), default=0)
     features.append(float(first_play_tick) / max(max_tick, 1))
 
-    right_plays = sum(1 for e in team_events if e.arena_x > ARENA_X_MID)
+    right_plays = sum(1 for e in team_events
+                      if _oriented_xy(e, rotated)[0] > ARENA_X_MID)
     features.append(right_plays / max(len(team_events), 1))
 
     team_ticks = sorted(e.game_tick for e in team_events)
@@ -147,7 +193,11 @@ def _extract_features_from_loaded(
     else:
         features.append(0.0)
 
-    aggressive_plays = sum(1 for e in team_events if e.arena_y > ARENA_Y_MID)
+    # Aggression = placing in the OPPONENT's half, which is LOW arena_y. The
+    # comparison was ">" against a comment claiming own-half-is-low; both were
+    # wrong, so this counted defensive placements as aggressive.
+    aggressive_plays = sum(1 for e in team_events
+                           if _oriented_xy(e, rotated)[1] < ARENA_Y_MID)
     features.append(aggressive_plays / max(len(team_events), 1))
 
     # --- Outcome-adjacent (3 dim) ---
