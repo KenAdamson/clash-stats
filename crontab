@@ -1,5 +1,30 @@
 PATH=/usr/local/bin:/usr/bin:/bin
 
+# ---------------------------------------------------------------------------
+# #COLLECTONLY# — data collection only, everything else paused (2026-08-18).
+#
+# In force for the duration of the TCN v2 retrain (1.89M games, 25-43h). The
+# box cannot run a job that size alongside the normal processing load.
+#
+# The rule used to decide what stays: BACKFILLABLE or not. Everything paused
+# below recomputes from data already on disk, so pausing it costs only latency
+# -- WP inference is watermark-driven and catches up on its own, dimensions and
+# nemeses are full recomputes. What is NOT paused is the four scrape jobs,
+# because the CR API only exposes the last 25 battles: a game that scrolls out
+# of that window while we were not looking is gone permanently, and no amount
+# of later processing brings it back.
+#
+# corpus_discover stays alive for the same reason. It decides WHO we collect
+# from, so skipping it silently narrows the collection set for the duration,
+# and the battles of an undiscovered player are lost on the same 25-game clock.
+# It is one run a day; that is a cheap insurance premium.
+#
+# Restore with:  sed -i 's/^#COLLECTONLY# //' crontab
+#                tools/deploy_tracker.sh   (then deploy_crontab)
+# Then run the backfills: wp-infer-new drains its own backlog, refresh-dims and
+# corpus-nemeses need one manual run each.
+# ---------------------------------------------------------------------------
+
 # Personal combined: fetch battles + replays in one atomic pass
 # Every 2 min — aggressive to ensure no replay data is lost
 # Lockfile prevents overlap; personal data is highest priority
@@ -18,7 +43,7 @@ PATH=/usr/local/bin:/usr/bin:/bin
 # 3→8 players / 10→5 min on 06-10 after a clean hour proved ample headroom.
 2-59/5 * * * * root /app/corpus_replays.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Weekly: refresh top-ladder player tags (Monday 6am UTC)
-0 6 * * 1 root /app/corpus_update.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
+#COLLECTONLY# 0 6 * * 1 root /app/corpus_update.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Refresh simulation results daily at 2am UTC.
 # DISABLED (#SIMOFF#) — sim-full peaks around 10GB across its forked worker
 # pool and runs ~6h, on a 62GB host that also carries Postgres, the media
@@ -34,15 +59,15 @@ PATH=/usr/local/bin:/usr/bin:/bin
 # MEASURES via the clan API (ours-first, draining the backlog over runs), and
 # rebuild player_dim. Non-destructive (harvest upserts, resolve updates) —
 # verified live 2026-06-14.
-30 3 * * * root /app/refresh_dims.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
+#COLLECTONLY# 30 3 * * * root /app/refresh_dims.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Weekly corpus hygiene (Sunday 5am UTC): enrich new players, deactivate bots
 # (clanless + grind-without-progression) and dormant accounts so the scraper
 # re-polls the live core more often. Reversible; dormant accounts self-heal via
 # network discovery when they play again.
-0 5 * * 0 root /app/prune_corpus.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
+#COLLECTONLY# 0 5 * * 0 root /app/prune_corpus.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Rising-star sampler (Wed + Sun 8am UTC): add newly-risen top-5%-of-band
 # players to the tracked corpus (no archive; dormancy hygiene prunes attrition).
-0 8 * * 0,3 root /app/reseed_risers.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
+#COLLECTONLY# 0 8 * * 0,3 root /app/reseed_risers.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 
 # --- ML training ---
 # PAUSED (#V10BUILD#) — WP training needs the A770 to itself. The XPU is
@@ -54,7 +79,7 @@ PATH=/usr/local/bin:/usr/bin:/bin
 #   tools/deploy_tracker.sh deploy_crontab -- docker cp alone breaks ownership)
 #   the crontab and `crontab /etc/cron.d/...` for a live-only restore.
 # Incremental WP inference: process new games every 5 min (offset from corpus)
-*/5 * * * * root /app/wp_infer_new.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
+#COLLECTONLY# */5 * * * * root /app/wp_infer_new.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Incremental TCN embedding: embed new games every 6 hours
 #V10BUILD# 0 1,7,13,19 * * * root /app/embed_new.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Weekly: retrain TCN on full corpus (Sunday 4am UTC)
@@ -66,15 +91,15 @@ PATH=/usr/local/bin:/usr/bin:/bin
 # retrain deliberately (with a versioned full re-embed) or not at all.
 #TCNFREEZE# 0 4 * * 0 root /app/tcn_train.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Weekly: retrain activity model for corpus scheduling (Monday 6:30am UTC, after corpus_update)
-30 6 * * 1 root /app/train_activity.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
+#COLLECTONLY# 30 6 * * 1 root /app/train_activity.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Weekly: WP drift tripwire — evaluate production model on newest games (Tuesday 5am UTC).
 # A sustained accuracy drop = retrain early; flat = keep waiting for the corpus to double.
 #V10BUILD# 0 5 * * 2 root /app/wp_drift_check.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 
 # --- Discovery jobs ---
 # Hourly: add opponents I've lost to into the corpus
-0 * * * * root /app/corpus_nemeses.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
+#COLLECTONLY# 0 * * * * root /app/corpus_nemeses.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Daily: discover new players from opponent tags (3am UTC)
 0 3 * * * root /app/corpus_discover.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
 # Weekly: discover players from regional leaderboards (Monday 7am UTC)
-0 7 * * 1 root /app/corpus_locations.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
+#COLLECTONLY# 0 7 * * 1 root /app/corpus_locations.sh >> /proc/1/fd/1 2>> /proc/1/fd/2
