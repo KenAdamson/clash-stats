@@ -512,11 +512,19 @@ def collate_fn(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Pad sequences to max length in batch.
 
+    Returns SIX tensors, not four — deck_ids/deck_vars were added for the WP
+    deck prior (8ec28b98) and every consumer must unpack them even if, like the
+    ADR-003 TCN, it ignores them. The TCN loop was not updated at the time and
+    silently stayed broken for twelve days, because its cron is frozen; the
+    failure only surfaced after a 2h11m dataset load.
+
     Returns:
         card_ids: (batch, max_len) int64
-        features: (batch, max_len, 17) float32
+        features: (batch, max_len, feat_dim) float32
         lengths: (batch,) int64 — original sequence lengths
         labels: (batch,) float32
+        deck_ids: (batch, 2, 8) int64
+        deck_vars: (batch, 2, 8) int64
     """
     card_ids_list, features_list, labels, deck_ids_list, deck_var_list = zip(*batch)
     lengths = torch.tensor([len(c) for c in card_ids_list], dtype=torch.int64)

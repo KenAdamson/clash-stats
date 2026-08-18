@@ -183,7 +183,7 @@ class TCNTrainer:
             train_correct = 0
             train_total = 0
 
-            for card_ids, features, lengths, labels in self.train_loader:
+            for card_ids, features, lengths, labels, _deck_ids, _deck_vars in self.train_loader:
                 card_ids = card_ids.to(self.device)
                 features = features.to(self.device)
                 lengths = lengths.to(self.device)
@@ -247,7 +247,7 @@ class TCNTrainer:
         total = 0
 
         with torch.no_grad():
-            for card_ids, features, lengths, labels in loader:
+            for card_ids, features, lengths, labels, _deck_ids, _deck_vars in loader:
                 card_ids = card_ids.to(self.device)
                 features = features.to(self.device)
                 lengths = lengths.to(self.device)
@@ -275,7 +275,7 @@ class TCNTrainer:
         self.model.eval()
         all_embeddings = []
 
-        for card_ids, features, lengths, labels in self.full_loader:
+        for card_ids, features, lengths, labels, _deck_ids, _deck_vars in self.full_loader:
             card_ids = card_ids.to(self.device)
             features = features.to(self.device)
             lengths = lengths.to(self.device)
@@ -556,7 +556,7 @@ def embed_new(session: Session, model_dir: Optional[Path] = None) -> int:
 
     all_embeddings = []
     with torch.no_grad():
-        for card_ids, features, lengths, labels in new_loader:
+        for card_ids, features, lengths, labels, _deck_ids, _deck_vars in new_loader:
             card_ids = card_ids.to(device)
             features = features.to(device)
             lengths = lengths.to(device)
