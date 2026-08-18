@@ -26,7 +26,15 @@ from tracker.ml.storage import GameEmbedding, to_blob
 
 logger = logging.getLogger(__name__)
 
-TCN_MODEL_VERSION = "tcn-v1"
+# Bumped for the arena-orientation correction (2026-08-18). tcn-v1 embeddings
+# were produced by an encoder trained on the ~50% of replays RoyaleAPI stores
+# 180-degrees rotated, and -- worse -- after the extraction fix landed on
+# 2026-08-12 that same encoder was being fed corrected geometry it had never
+# seen, so even the tcn-v1 rows are not internally consistent with each other.
+# A distinct label is what makes the two populations separable at all; leaving
+# it hardcoded would repeat the WP "wp-v1" mistake, where every model's output
+# shared one name and no query could tell them apart afterwards.
+TCN_MODEL_VERSION = os.environ.get("TCN_MODEL_VERSION", "tcn-v2")
 
 # Training hyperparameters
 BATCH_SIZE = 64
@@ -157,7 +165,11 @@ class TCNTrainer:
             Path to saved best model checkpoint.
         """
         self.model_dir.mkdir(parents=True, exist_ok=True)
-        best_path = self.model_dir / "tcn_v1.pt"
+        # Named after the model version rather than a fixed "tcn_v1.pt", so a
+        # retrain cannot overwrite the very checkpoint it would need to roll
+        # back to. The WP side learned this the hard way: a fixed output path
+        # silently destroyed a finished run's weights.
+        best_path = self.model_dir / ("%s.pt" % TCN_MODEL_VERSION.replace("-", "_"))
 
         best_val_loss = float("inf")
         patience_counter = 0
@@ -393,7 +405,8 @@ def embed_new(session: Session, model_dir: Optional[Path] = None) -> int:
 
     Args:
         session: Database session.
-        model_dir: Directory containing tcn_v1.pt and umap_3d_standalone.pkl.
+        model_dir: Directory containing the TCN checkpoint for the current
+            TCN_MODEL_VERSION and umap_3d_standalone.pkl.
 
     Returns:
         Number of newly embedded games.
@@ -405,7 +418,17 @@ def embed_new(session: Session, model_dir: Optional[Path] = None) -> int:
     if model_dir is None:
         model_dir = Path("data/ml_models")
 
-    tcn_path = model_dir / "tcn_v1.pt"
+    # Must track TCN_MODEL_VERSION, or a retrain writes tcn_v2.pt while every
+    # inference run quietly keeps scoring with the superseded tcn_v1.pt.
+    tcn_path = model_dir / ("%s.pt" % TCN_MODEL_VERSION.replace("-", "_"))
+    if not tcn_path.exists():
+        legacy = model_dir / "tcn_v1.pt"
+        if legacy.exists():
+            logger.warning("No %s — falling back to legacy %s. Embeddings will be "
+                           "stamped %s but produced by the OLD encoder; retrain "
+                           "before trusting them.",
+                           tcn_path.name, legacy.name, TCN_MODEL_VERSION)
+            tcn_path = legacy
     umap_path = model_dir / "umap_3d_standalone.pkl"
 
     if not tcn_path.exists():
