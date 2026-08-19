@@ -6,6 +6,7 @@ storage of 128-dim TCN embeddings.
 """
 
 import logging
+import math
 import os
 import time
 from pathlib import Path
@@ -42,6 +43,16 @@ LEARNING_RATE = 1e-3
 WEIGHT_DECAY = 1e-4
 EPOCHS = 50
 EARLY_STOPPING_PATIENCE = 10
+# Ported from the WP trainer after the TCN NaN'd at epoch 9 on the 1.89M-game
+# corpus. Adam's default eps of 1e-8 lets a near-zero second-moment estimate
+# blow an update up by lr*m/(sqrt(v)+eps); 1e-6 puts a floor under the
+# denominator. Cheap, and it costs nothing when training is well behaved.
+ADAM_EPS = 1e-6
+GRAD_CLIP_NORM = 1.0
+# Resume from an existing checkpoint (weights only -- the optimizer state is
+# deliberately NOT restored, since the corrupted Adam moments are part of what
+# has to be escaped).
+TCN_RESUME = os.environ.get("TCN_RESUME", "")
 DROPOUT = 0.2
 EMBEDDING_DIM = 128
 VAL_FRACTION = 0.2
@@ -147,9 +158,38 @@ class TCNTrainer:
             dataset, shuffle=False, **loader_kwargs,
         )
 
+        # Warm start. Weights only, on purpose: the Adam moment estimates from
+        # the run that diverged are part of what has to be escaped, so they are
+        # left to re-accumulate from scratch. The LR is scaled down for the same
+        # reason -- resuming at the full rate would put the restored weights
+        # straight back into the region that blew them up.
+        if TCN_RESUME:
+            resume_path = Path(TCN_RESUME)
+            if not resume_path.exists():
+                raise FileNotFoundError("TCN_RESUME=%s does not exist" % TCN_RESUME)
+            ck = torch.load(resume_path, map_location=device, weights_only=True)
+            sd = ck["model_state_dict"]
+            bad = [k for k, v in sd.items() if torch.is_tensor(v)
+                   and v.dtype.is_floating_point and not torch.isfinite(v).all()]
+            if bad:
+                raise RuntimeError(
+                    "Refusing to resume from a checkpoint with non-finite weights "
+                    "in %d tensors (first: %s)" % (len(bad), bad[:3]))
+            self.model.load_state_dict(sd)
+            self._resumed_val_loss = ck.get("val_loss", float("inf"))
+            logger.info(
+                "Resumed from %s (epoch %s, val_loss=%.4f, val_acc=%.4f) — "
+                "weights only, optimizer state intentionally discarded",
+                resume_path.name, ck.get("epoch"), ck.get("val_loss", float("nan")),
+                ck.get("val_acc", float("nan")))
+
         self.criterion = nn.BCEWithLogitsLoss()
+        lr = LEARNING_RATE * float(os.environ.get("TCN_LR_SCALE", "0.5" if TCN_RESUME else "1.0"))
+        if TCN_RESUME:
+            logger.info("Resume LR: %.2e (scaled from %.2e)", lr, LEARNING_RATE)
         self.optimizer = AdamW(
-            model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY,
+            model.parameters(), lr=lr, weight_decay=WEIGHT_DECAY,
+            eps=ADAM_EPS,
         )
         self.scheduler = CosineAnnealingLR(self.optimizer, T_max=EPOCHS)
 
@@ -171,7 +211,14 @@ class TCNTrainer:
         # silently destroyed a finished run's weights.
         best_path = self.model_dir / ("%s.pt" % TCN_MODEL_VERSION.replace("-", "_"))
 
-        best_val_loss = float("inf")
+        # Seeded from the resumed checkpoint, not infinity. Otherwise the first
+        # epoch after a resume "improves" on inf and overwrites the very
+        # checkpoint being resumed from -- even when it is worse, which is
+        # likely, since restarting Adam and the LR schedule perturbs the weights
+        # before it settles.
+        best_val_loss = getattr(self, "_resumed_val_loss", float("inf"))
+        if best_val_loss < float("inf"):
+            logger.info("Best val_loss to beat (from resume): %.4f", best_val_loss)
         patience_counter = 0
 
         for epoch in range(1, EPOCHS + 1):
@@ -193,7 +240,33 @@ class TCNTrainer:
                 _, logits = self.model(card_ids, features, lengths)
                 logits = logits.squeeze(1)
                 loss = self.criterion(logits, labels)
+
+                # Checked BEFORE backward, so the weights are still clean: skip
+                # the offending batch instead of letting it poison them. A rare
+                # extreme batch is survivable; a systematic problem is not, hence
+                # the run-wide cap.
+                if not torch.isfinite(loss):
+                    self._nan_skips = getattr(self, "_nan_skips", 0) + 1
+                    if self._nan_skips <= 5 or self._nan_skips % 50 == 0:
+                        logger.warning("Non-finite loss at epoch %d — skipping batch "
+                                       "(run skips: %d)", epoch, self._nan_skips)
+                    if self._nan_skips > 2000:
+                        raise RuntimeError(
+                            "Too many non-finite batches (%d) — not converging."
+                            % self._nan_skips)
+                    continue
+
                 loss.backward()
+                # Bound the update. An unclipped runaway step is what turned the
+                # weights to NaN at epoch 9 of the first 1.89M-game run. If the
+                # pre-clip norm is itself non-finite, clip_coef becomes NaN and
+                # clipping would spread the poison, so skip the step entirely.
+                total_norm = torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(), max_norm=GRAD_CLIP_NORM)
+                if not torch.isfinite(total_norm):
+                    self._nan_skips = getattr(self, "_nan_skips", 0) + 1
+                    self.optimizer.zero_grad()
+                    continue
                 self.optimizer.step()
 
                 train_loss += loss.item() * labels.size(0)
@@ -215,12 +288,57 @@ class TCNTrainer:
                 epoch, EPOCHS, elapsed, train_loss, train_acc, val_loss, val_acc,
             )
 
+            # Self-healing. Once the weights go non-finite every later epoch is
+            # NaN, so without this the run burns its whole patience budget
+            # producing nothing -- exactly what happened at epochs 9-10 of the
+            # first 1.89M-game attempt, and to wp_v4 before it. Roll back to the
+            # last clean checkpoint, drop the corrupted Adam moments (they carry
+            # the instability forward even after the weights are restored), and
+            # permanently halve the LR to escape the region.
+            weights_finite = all(
+                torch.isfinite(v).all() for v in self.model.state_dict().values()
+                if torch.is_tensor(v) and v.dtype.is_floating_point
+            )
+            if not math.isfinite(val_loss) or not weights_finite:
+                self._recoveries = getattr(self, "_recoveries", 0) + 1
+                if best_path.exists() and self._recoveries <= 3:
+                    logger.warning(
+                        "Epoch %d non-finite (val_loss=%s, weights_finite=%s) — "
+                        "rollback to best + halve LR (recovery %d/3)",
+                        epoch, val_loss, weights_finite, self._recoveries,
+                    )
+                    ckpt = torch.load(best_path, map_location=self.device,
+                                      weights_only=True)
+                    self.model.load_state_dict(ckpt["model_state_dict"])
+                    self.optimizer.state.clear()
+                    for sub in getattr(self.scheduler, "_schedulers", [self.scheduler]):
+                        sub.base_lrs = [b * 0.5 for b in sub.base_lrs]
+                    patience_counter += 1
+                    if patience_counter >= EARLY_STOPPING_PATIENCE:
+                        logger.info("Early stopping at epoch %d (post-recovery)", epoch)
+                        break
+                    continue
+                raise RuntimeError(
+                    "Non-finite training state at epoch %d (recoveries=%d, "
+                    "best exists=%s)" % (epoch, self._recoveries, best_path.exists()))
+
             # Early stopping
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 patience_counter = 0
+                state_dict = self.model.state_dict()
+                # A NaN val_loss can never satisfy the comparison above, so this
+                # is belt-and-braces -- but it is the braces that matter: a saved
+                # corrupt checkpoint destroys the only rollback target there is.
+                bad = [k for k, v in state_dict.items()
+                       if torch.is_tensor(v) and v.dtype.is_floating_point
+                       and not torch.isfinite(v).all()]
+                if bad:
+                    raise RuntimeError(
+                        "Refusing to save checkpoint with non-finite weights in "
+                        "%d tensors (first: %s)" % (len(bad), bad[:3]))
                 torch.save({
-                    "model_state_dict": self.model.state_dict(),
+                    "model_state_dict": state_dict,
                     "vocab_size": self.model.card_embedding.num_embeddings,
                     "epoch": epoch,
                     "val_loss": val_loss,
