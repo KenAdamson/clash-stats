@@ -37,6 +37,9 @@ CVAE_MODEL_VERSION = "cvae-v1"
 # Training hyperparameters
 BATCH_SIZE = 256
 LEARNING_RATE = 3e-4
+# Shared with the WP and TCN trainers; see the guard block in train().
+ADAM_EPS = 1e-6
+GRAD_CLIP_NORM = 1.0
 WEIGHT_DECAY = 1e-4
 EPOCHS = 150
 EARLY_STOPPING_PATIENCE = 15
@@ -139,7 +142,8 @@ class CVAETrainer:
 
         # Optimizer: all trainable params
         trainable = [p for p in model.parameters() if p.requires_grad]
-        self.optimizer = AdamW(trainable, lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+        self.optimizer = AdamW(trainable, lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY,
+                              eps=ADAM_EPS)
         self.scheduler = CosineAnnealingLR(self.optimizer, T_max=EPOCHS)
 
         n_trainable = sum(p.numel() for p in trainable)
@@ -259,7 +263,7 @@ class CVAETrainer:
                     self.optimizer = AdamW([
                         {"params": encoder_params, "lr": LEARNING_RATE * 0.01},
                         {"params": other_params, "lr": LEARNING_RATE},
-                    ], weight_decay=WEIGHT_DECAY)
+                    ], weight_decay=WEIGHT_DECAY, eps=ADAM_EPS)
                     self.scheduler = CosineAnnealingLR(
                         self.optimizer, T_max=EPOCHS - epoch,
                     )
@@ -281,8 +285,40 @@ class CVAETrainer:
                     loss, loss_dict = self._compute_loss(
                         outputs, card_ids, features, mask, beta,
                     )
+                # Guards ported from the WP and TCN trainers, which both learned
+                # this the expensive way (wp_v4 epoch 11, tcn_v2 epoch 9): once
+                # the weights go non-finite every later epoch is NaN and the run
+                # burns its whole patience budget producing nothing.
+                #
+                # A VAE is a worse case than either, not a better one: the KL
+                # term is unbounded as the posterior sharpens, and this loop runs
+                # under autocast, so an overflow that fp32 would absorb becomes a
+                # non-finite loss here. Checked BEFORE backward, while the
+                # weights are still clean.
+                if not torch.isfinite(loss):
+                    self._nan_skips = getattr(self, "_nan_skips", 0) + 1
+                    if self._nan_skips <= 5 or self._nan_skips % 50 == 0:
+                        logger.warning("Non-finite loss at epoch %d — skipping batch "
+                                       "(run skips: %d)", epoch, self._nan_skips)
+                    if self._nan_skips > 2000:
+                        raise RuntimeError(
+                            "Too many non-finite batches (%d) — not converging."
+                            % self._nan_skips)
+                    self.optimizer.zero_grad()
+                    continue
+
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                # The return value is the pre-clip total norm and it MUST be
+                # inspected: if it is non-finite, clip_coef becomes NaN and
+                # clipping propagates the corruption into every parameter rather
+                # than bounding it. Discarding it, as this line used to, turns
+                # the guard into its opposite.
+                total_norm = torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(), GRAD_CLIP_NORM)
+                if not torch.isfinite(total_norm):
+                    self._nan_skips = getattr(self, "_nan_skips", 0) + 1
+                    self.optimizer.zero_grad()
+                    continue
                 self.optimizer.step()
 
                 for k, v in loss_dict.items():
