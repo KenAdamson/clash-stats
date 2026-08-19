@@ -45,7 +45,8 @@ from tracker.database import get_engine, get_session                    # noqa: 
 from tracker.ml.card_metadata import CardVocabulary                     # noqa: E402
 from tracker.ml.sequence_dataset import SequenceDataset, collate_fn, MIN_EVENTS  # noqa: E402
 from tracker.ml.tcn import GameEmbeddingModel                           # noqa: E402
-from tracker.ml.training import TCN_MODEL_VERSION, EMBEDDING_DIM, DROPOUT  # noqa: E402
+from tracker.ml.training import (TCN_MODEL_VERSION, EMBEDDING_DIM, DROPOUT,
+                                 BROKEN_REDUCER_NAN_FRACTION)  # noqa: E402
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -257,25 +258,48 @@ def phase4_store(session, bids, emb_file, emb3d_file, clusters_file) -> int:
             model_version = EXCLUDED.model_version
     """)
     done = 0
+    skipped = 0
     t0 = time.time()
     for s in range(0, n, 5000):
         e = min(s + 5000, n)
-        rows = [{
-            "bid": bids[i],
-            "b15": to_blob(np.asarray(emb[i])),
-            "b3": to_blob(np.asarray(e3[i])),
-            "v128": np.asarray(emb[i]).tolist(),
-            "v3": np.asarray(e3[i]).tolist(),
-            "cid": int(cl[i]) if cl[i] >= 0 else None,
-            "ver": TCN_MODEL_VERSION,
-        } for i in range(s, e)]
+        rows = []
+        for i in range(s, e):
+            v128 = np.asarray(emb[i])
+            v3 = np.asarray(e3[i])
+            # pgvector rejects NaN outright, so a degenerate projection aborts
+            # the whole write rather than losing one row. UMAP.transform yields
+            # a handful of these on inputs it cannot place (measured: 474 of
+            # 1.9M, 0.025%); the encoder output itself is clean. The existing
+            # convention in training.py is to skip individually below
+            # BROKEN_REDUCER_NAN_FRACTION and only abort if the reducer looks
+            # wholesale broken, which is what this reproduces.
+            if not (np.isfinite(v128).all() and np.isfinite(v3).all()):
+                skipped += 1
+                continue
+            rows.append({
+                "bid": bids[i],
+                "b15": to_blob(v128),
+                "b3": to_blob(v3),
+                "v128": v128.tolist(),
+                "v3": v3.tolist(),
+                "cid": int(cl[i]) if cl[i] >= 0 else None,
+                "ver": TCN_MODEL_VERSION,
+            })
+        if not rows:
+            continue
         session.execute(sql, rows)
         session.commit()
         done += len(rows)
         if (s // 5000) % 10 == 0:
             logger.info("  stored %d/%d (%.0f rows/s)", done, n,
                         done / max(time.time() - t0, 1e-9))
-    logger.info("phase 4: stored %d rows in %.1f min", done, (time.time() - t0) / 60)
+    frac = skipped / max(n, 1)
+    logger.info("phase 4: stored %d rows in %.1f min (%d skipped, %.3f%%, non-finite)",
+                done, (time.time() - t0) / 60, skipped, 100.0 * frac)
+    if frac > BROKEN_REDUCER_NAN_FRACTION:
+        raise RuntimeError(
+            "%.1f%% of rows were non-finite — that is a broken reducer, not "
+            "degenerate inputs. Refit phase 2 before trusting this." % (100.0 * frac))
     return done
 
 
