@@ -49,7 +49,18 @@ logger = logging.getLogger("tcn_cluster3d")
 
 WORK = Path(os.environ.get("TCN_EMBED_WORK", "/app/data/tcn_embed_work"))
 SWEEP_SAMPLE = int(os.environ.get("CLUSTER_SWEEP_SAMPLE", "400000"))
+# min_samples controls how conservative the density estimate is, and it matters
+# more here than min_cluster_size does. An earlier version derived it as
+# min_cluster_size//10, which at mcs=5000 meant 500: smooth enough to erase every
+# density gap, collapsing 1.9M games into 2 clusters. The same mcs with
+# min_samples=5 yields 39 balanced clusters. Keep it small and explicit.
+DEFAULT_MIN_SAMPLES = int(os.environ.get("CLUSTER_MIN_SAMPLES", "5"))
+MIN_SAMPLES = DEFAULT_MIN_SAMPLES
 SPACE_FILE = None   # set by --cluster-dims to a purpose-built clustering space
+# Second-pass cluster ids are offset so the two levels stay distinguishable in a
+# single column: 0..N are primary clusters, >=NOISE_OFFSET came from re-clustering
+# the primary pass's leftovers at a finer density.
+NOISE_OFFSET = 1000
 
 
 def _load_3d() -> np.ndarray:
@@ -122,7 +133,7 @@ def sweep(sizes: list[int]) -> None:
     for mcs in sizes:
         t0 = time.time()
         cl = hdbscan.HDBSCAN(min_cluster_size=mcs,
-                             min_samples=max(5, mcs // 10),
+                             min_samples=MIN_SAMPLES,
                              cluster_selection_method="eom",
                              core_dist_n_jobs=4)
         labels = cl.fit_predict(sample)
@@ -135,7 +146,45 @@ def sweep(sizes: list[int]) -> None:
     print("\nPick for LOW noise with clusters that are not one giant blob.")
 
 
-def apply(min_cluster_size: int, dry: bool) -> None:
+def recurse_noise(emb, labels: np.ndarray, min_cluster_size: int) -> np.ndarray:
+    """Re-cluster the primary pass's noise at a finer density scale.
+
+    HDBSCAN's notion of noise is relative to the density it settled on for the
+    whole corpus: a group can be perfectly coherent among itself and still fall
+    below the global threshold. Pulling those points out and clustering them
+    alone lets a finer scale apply where it is appropriate, without loosening the
+    threshold everywhere and fragmenting the main structure.
+
+    Labels come back offset by NOISE_OFFSET so a reader can always tell which
+    pass produced a given id. Points that are still noise at the finer scale stay
+    at -1 -- some genuinely are outliers, and inventing a cluster for them would
+    be worse than admitting it.
+    """
+    import hdbscan
+    noise_idx = np.flatnonzero(labels < 0)
+    if len(noise_idx) < min_cluster_size * 2:
+        logger.info("second pass: only %d noise points — skipping", len(noise_idx))
+        return labels
+    logger.info("second pass: re-clustering %d noise points (%.1f%%) at "
+                "min_cluster_size=%d", len(noise_idx),
+                100.0 * len(noise_idx) / len(labels), min_cluster_size)
+    t0 = time.time()
+    sub = hdbscan.HDBSCAN(
+        min_cluster_size=min_cluster_size,
+        min_samples=MIN_SAMPLES,
+        cluster_selection_method="eom", core_dist_n_jobs=4,
+    ).fit_predict(np.asarray(emb[noise_idx], dtype=np.float64))
+    n_sub = len(set(sub.tolist())) - (1 if -1 in sub else 0)
+    rescued = int((sub >= 0).sum())
+    labels = labels.copy()
+    labels[noise_idx[sub >= 0]] = sub[sub >= 0] + NOISE_OFFSET
+    logger.info("second pass: %d sub-clusters, rescued %d of %d (%.1f%%) in "
+                "%.1f min", n_sub, rescued, len(noise_idx),
+                100.0 * rescued / len(noise_idx), (time.time() - t0) / 60)
+    return labels
+
+
+def apply(min_cluster_size: int, dry: bool, noise_mcs: int | None = None) -> None:
     """Cluster every point in 3D, then update cluster_id in place."""
     import hdbscan
     emb = np.load(SPACE_FILE, mmap_mode="r") if SPACE_FILE else _load_3d()
@@ -147,7 +196,7 @@ def apply(min_cluster_size: int, dry: bool) -> None:
     # from the same fit, which is the entire reason for moving to 3D.
     labels = hdbscan.HDBSCAN(
         min_cluster_size=min_cluster_size,
-        min_samples=max(5, min_cluster_size // 10),
+        min_samples=MIN_SAMPLES,
         cluster_selection_method="eom",
         core_dist_n_jobs=4,
     ).fit_predict(np.asarray(emb, dtype=np.float64))
@@ -155,6 +204,11 @@ def apply(min_cluster_size: int, dry: bool) -> None:
     noise = 100.0 * (labels == -1).sum() / n
     logger.info("done in %.1f min: %d clusters, %.1f%% noise",
                 (time.time() - t0) / 60, n_cl, noise)
+
+    if noise_mcs:
+        labels = recurse_noise(emb, labels, noise_mcs)
+        final_noise = 100.0 * (labels == -1).sum() / n
+        logger.info("after second pass: %.1f%% noise remains", final_noise)
 
     np.save(WORK / "cluster_ids_3d.npy", labels.astype(np.int32))
     if dry:
@@ -190,9 +244,13 @@ def main() -> None:
     ap.add_argument("--cluster-dims", type=int, default=None,
                     help="build/use a min_dist=0 UMAP space of N dims for clustering")
     ap.add_argument("--fit-sample", type=int, default=300000)
+    ap.add_argument("--min-samples", type=int, default=DEFAULT_MIN_SAMPLES)
+    ap.add_argument("--noise-min-cluster-size", type=int, default=None,
+                    help="re-cluster the first pass's noise at this finer scale")
     args = ap.parse_args()
 
-    global SPACE_FILE
+    global SPACE_FILE, MIN_SAMPLES
+    MIN_SAMPLES = args.min_samples
     if args.cluster_dims:
         SPACE_FILE = build_cluster_space(args.cluster_dims, args.fit_sample)
 
@@ -202,7 +260,8 @@ def main() -> None:
     if args.apply or args.dry:
         if args.min_cluster_size is None:
             raise SystemExit("--min-cluster-size is required; run --sweep first")
-        apply(args.min_cluster_size, dry=args.dry and not args.apply)
+        apply(args.min_cluster_size, dry=args.dry and not args.apply,
+              noise_mcs=args.noise_min_cluster_size)
         return
     raise SystemExit("choose --sweep or --apply")
 
