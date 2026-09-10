@@ -267,6 +267,22 @@ def _log_polling_batch(scored: list[str], floor: list[str]) -> None:
         pass
 
 
+# Fraction of each scrape batch reserved for oldest-FIFO exploration rather than
+# the activity model's picks. The rest goes to the highest P(has new battles).
+#
+# Lowered 0.2 -> 0.1 on 2026-09-10. With ~259k active players against ~25k polls
+# a day, the FIFO slice was spending ~5k polls/day dragging a tail the model had
+# already judged inactive. At 0.1 that is ~2.5k, and the freed budget goes to
+# players predicted to be playing now -- measured hit rate 72% (36 zero-yield of
+# 128) even while the CR API was throwing 500s.
+#
+# It is a FLOOR, not a nicety: it is the only thing guaranteeing every player is
+# eventually visited, so a bad or stale model can slow the queue but never starve
+# it. Do not set it to 0 -- that turns a model regression into permanent
+# blindness for anyone the model scores low, including returning players.
+CORPUS_EXPLORE_FRACTION = float(os.environ.get("CORPUS_EXPLORE_FRACTION", "0.1"))
+
+
 def get_corpus_players(
     session: Session,
     active_only: bool = True,
@@ -284,7 +300,8 @@ def get_corpus_players(
         limit: Maximum players to return.
         prioritize_active: If True and an activity model exists, select by
             P(has_new_battles): score the FULL candidate pool, then take the
-            batch as ~80% top-scored + ~20% oldest-FIFO (exploration floor).
+            batch as top-scored plus a CORPUS_EXPLORE_FRACTION oldest-FIFO
+            floor (default 10%).
             Scoring must happen BEFORE the limit — the original post-limit
             reorder shuffled a batch whose membership FIFO had already fixed,
             so the model influenced nothing (root of the polling-efficiency
@@ -330,7 +347,7 @@ def get_corpus_players(
                 )
 
                 if limit and len(players) > limit:
-                    n_explore = max(1, int(limit * 0.2))
+                    n_explore = max(1, int(limit * CORPUS_EXPLORE_FRACTION))
                     n_scored = max(0, limit - len(priority) - n_explore)
                     batch = list(priority) + by_score[:n_scored]
                     chosen = {p.player_tag for p in batch}
@@ -481,7 +498,7 @@ def discover_from_opponents(
 def corpus_hygiene(
     session: Session,
     api: ClashRoyaleAPI,
-    dormant_days: int = 14,
+    dormant_days: int = 30,
     min_trophy: int = RELEVANT_TROPHY_FLOOR,
     bot_eff_max: float = 0.3,
     bot_min_battles: int = 10000,
@@ -617,6 +634,18 @@ def corpus_hygiene(
         session.commit()
 
     # 3. dormant prune (latest captured game older than the cutoff)
+    #
+    # NOTE the cutoff tests the latest CAPTURED game, which is bounded by when
+    # we last POLLED the player -- not by when they actually played. That makes
+    # this a feedback loop whenever the scrape cycle is long: falling behind
+    # makes the corpus look deader than it is, and deactivating those players
+    # frees budget that lets us fall further behind on the rest.
+    #
+    # Raised 14 -> 30 days on 2026-09-10 for that reason. At the time the cycle
+    # was ~10 days with the oldest unpolled player at 18 days, so a 14-day test
+    # was close enough to the polling gap to start deactivating genuinely active
+    # players. Keep this comfortably ABOVE the observed worst-case poll gap:
+    #   SELECT max(now() - last_scraped) FROM player_corpus WHERE active = 1;
     cutoff = datetime.now(timezone.utc) - timedelta(days=dormant_days)
     dormant = [r[0] for r in session.execute(text("""
         SELECT pc.player_tag

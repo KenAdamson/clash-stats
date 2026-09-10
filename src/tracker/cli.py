@@ -169,7 +169,7 @@ Environment variables:
                         help="With --reseed-top-of-band: deactivate non-seed active players (one-time reset; omit for periodic rising-star add)")
     parser.add_argument("--prune-corpus", action="store_true",
                         help="Corpus hygiene: enrich + deactivate bots and dormant accounts (weekly)")
-    parser.add_argument("--dormant-days", type=int, default=14,
+    parser.add_argument("--dormant-days", type=int, default=30,
                         help="Days since last captured game before an account is pruned as dormant")
     parser.add_argument("--min-trophy", type=int, default=12000,
                         help="Prune corpus players below this Trophy-Road floor (sub-competitive tier)")
