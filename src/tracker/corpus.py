@@ -268,18 +268,30 @@ def _log_polling_batch(scored: list[str], floor: list[str]) -> None:
 
 
 # Fraction of each scrape batch reserved for oldest-FIFO exploration rather than
-# the activity model's picks. The rest goes to the highest P(has new battles).
+# the activity model's picks, for the prioritize_active path.
 #
-# Lowered 0.2 -> 0.1 on 2026-09-10. With ~259k active players against ~25k polls
-# a day, the FIFO slice was spending ~5k polls/day dragging a tail the model had
-# already judged inactive. At 0.1 that is ~2.5k, and the freed budget goes to
-# players predicted to be playing now -- measured hit rate 72% (36 zero-yield of
-# 128) even while the CR API was throwing 500s.
+# ⚠ INERT IN PRODUCTION as of 2026-09-10: every live caller of
+# get_corpus_players uses the default prioritize_active=False, so the corpus
+# scrape is pure FIFO and this constant is only exercised by tests. It is kept
+# tunable for whenever that path is revived.
+#
+# The path is off deliberately, and measurement backs the decision. Over 3 hours
+# and 2,182 polls, FIFO returned a MEAN OF 18.5 battles per poll (median 20),
+# because sweeping in last-scraped order harvests each player's whole
+# accumulated window. Activity-prioritised polling re-visits players who have
+# banked only a handful since the last visit; 13.2% of polls already return <=4.
 #
 # It is a FLOOR, not a nicety: it is the only thing guaranteeing every player is
 # eventually visited, so a bad or stale model can slow the queue but never starve
-# it. Do not set it to 0 -- that turns a model regression into permanent
-# blindness for anyone the model scores low, including returning players.
+# it. Do not set it to 0.
+#
+# ⭐ The real loss is neither knob. 25.4% of polls come back at the ~30-battle
+# window CAP, meaning those players outplayed the window before we arrived and
+# the overflow is gone for good. Fixing that needs per-player CADENCE (poll fast
+# players before they overflow, slow ones rarely), which in turn needs a model
+# predicting EXPECTED BATTLES SINCE LAST POLL, not the current binary
+# P(has_new_battles) -- after a ~10-day cycle almost everyone has some, so the
+# current label cannot discriminate in this regime at all.
 CORPUS_EXPLORE_FRACTION = float(os.environ.get("CORPUS_EXPLORE_FRACTION", "0.1"))
 
 
