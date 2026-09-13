@@ -200,6 +200,14 @@ class PlayerCorpus(Base):
     replays_scraped: Mapped[int] = mapped_column(default=0)
     last_scraped: Mapped[Optional[datetime]]
     active: Mapped[int] = mapped_column(default=1)
+    # Capacity-sized scheduling (migration 014). play_rate is games/day measured
+    # from the SPAN of recent captured battles, which stays exact even when the
+    # poll truncated at the window cap. poll_cadence_days is window_cap /
+    # play_rate. All nullable: a player with too few battles to measure has no
+    # rate and the scheduler falls back to FIFO rather than inventing one.
+    play_rate: Mapped[Optional[float]]
+    poll_cadence_days: Mapped[Optional[float]]
+    rate_measured_at: Mapped[Optional[datetime]]
 
 
 class CorpusHourlyStat(Base):
