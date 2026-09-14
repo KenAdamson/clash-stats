@@ -295,6 +295,107 @@ def _log_polling_batch(scored: list[str], floor: list[str]) -> None:
 CORPUS_EXPLORE_FRACTION = float(os.environ.get("CORPUS_EXPLORE_FRACTION", "0.1"))
 
 
+# --- Cadence-aware scheduling (stage 2) -------------------------------------
+#
+# Replaces the pure last-scraped sweep for the corpus battle scrape. FIFO gives
+# every player the SAME effective cadence, which is near-optimal for the median
+# player (2.71 games/day, fills the ~30-battle window in ~11 days) and badly
+# wrong for the tail: 25.4% of polls came back AT the cap, meaning those players
+# outplayed the window before we arrived and the overflow is unrecoverable.
+#
+# A poll returns at most a full window, so timing is the whole game: poll when
+# the window has just filled and you get ~30; earlier wastes the slot on a
+# partial window, later loses games permanently.
+#
+# ORDERING IS BY OVERDUE RATIO, NOT BY RATE. Ranking due players by play rate
+# would maximise battles recovered per poll, but we are 2.3x oversubscribed
+# (58,004 polls/day required against ~25,482 capacity), so a rate ordering would
+# let the fast head consume the entire budget and starve everyone else
+# permanently. elapsed/cadence is scale-free: a slow player three cadences
+# overdue outranks a fast player one-and-a-bit overdue, so service degrades
+# proportionally across the corpus instead of collapsing onto a subset. That
+# matters until stage 3 sizes the active set to capacity; after that the two
+# orderings converge, because nobody should be far overdue.
+#
+# Set CORPUS_CADENCE_SCHEDULING=0 to fall straight back to the FIFO sweep.
+CORPUS_CADENCE_SCHEDULING = os.environ.get("CORPUS_CADENCE_SCHEDULING", "1") == "1"
+
+# Cadence for players we cannot measure yet (12.6% of active: too few captured
+# battles). Deliberately near the corpus median rather than aggressive -- an
+# unmeasured player is usually a quiet one, and treating unknown as urgent would
+# hand the newest, least-proven players priority over known-active ones.
+DEFAULT_CADENCE_DAYS = float(os.environ.get("CORPUS_DEFAULT_CADENCE_DAYS", "11"))
+
+_DUE_SQL = """
+    SELECT player_tag FROM player_corpus
+    WHERE active = 1
+      AND (:source IS NULL OR source = :source)
+      AND (
+            last_scraped IS NULL
+         OR now() - last_scraped
+            >= (COALESCE(poll_cadence_days, :default_cadence) || ' days')::interval
+      )
+    ORDER BY
+      (source = 'priority') DESC,
+      last_scraped IS NULL DESC,
+      -- how many cadences past due, so the ordering is comparable across
+      -- players whose cadences differ by 40x
+      EXTRACT(epoch FROM now() - last_scraped)
+        / (COALESCE(poll_cadence_days, :default_cadence) * 86400.0) DESC
+    LIMIT :limit
+"""
+
+# Players are only revisited when due, so an unmeasured player whose default
+# cadence is too long could sit unseen indefinitely and never earn a real rate.
+# This slice is the escape hatch: plain oldest-first, ignoring cadence.
+_EXPLORE_SQL = """
+    SELECT player_tag FROM player_corpus
+    WHERE active = 1
+      AND (:source IS NULL OR source = :source)
+      AND player_tag <> ALL(:exclude)
+    ORDER BY last_scraped IS NULL DESC, last_scraped ASC
+    LIMIT :limit
+"""
+
+
+def select_due_players(
+    session: Session,
+    limit: int,
+    source: Optional[str] = None,
+) -> list[PlayerCorpus]:
+    """Players whose battle window is due to fill, most overdue first.
+
+    Selection happens in SQL rather than by loading the corpus and sorting in
+    Python -- at ~296k active players the latter is what made the original
+    activity-model path expensive enough to leave switched off.
+    """
+    n_explore = max(1, int(limit * CORPUS_EXPLORE_FRACTION))
+    n_due = max(0, limit - n_explore)
+
+    tags: list[str] = []
+    if n_due:
+        tags = [r[0] for r in session.execute(
+            text(_DUE_SQL),
+            {"limit": n_due, "source": source,
+             "default_cadence": DEFAULT_CADENCE_DAYS})]
+
+    if len(tags) < limit:
+        explore = [r[0] for r in session.execute(
+            text(_EXPLORE_SQL),
+            {"limit": limit - len(tags), "source": source,
+             "exclude": tags or [""]})]
+        tags.extend(explore)
+
+    if not tags:
+        return []
+    rows = {p.player_tag: p for p in session.scalars(
+        select(PlayerCorpus).where(PlayerCorpus.player_tag.in_(tags)))}
+    ordered = [rows[t] for t in tags if t in rows]
+    logger.info("Cadence scheduling: %d players (%d due + %d explore floor)",
+                len(ordered), min(len(tags), n_due), max(0, len(tags) - n_due))
+    return ordered
+
+
 def get_corpus_players(
     session: Session,
     active_only: bool = True,

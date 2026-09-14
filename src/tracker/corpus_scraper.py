@@ -21,7 +21,8 @@ from tracker.api import (
     RateLimitError,
     ServerError,
 )
-from tracker.corpus import get_corpus_players, mark_player_scraped
+from tracker.corpus import (CORPUS_CADENCE_SCHEDULING, get_corpus_players,
+                            mark_player_scraped, select_due_players)
 from tracker.metrics import (
     CORPUS_ACTIVITY_SCORE_P50,
     CORPUS_ACTIVITY_SCORE_P90,
@@ -232,7 +233,23 @@ def scrape_corpus_battles(
     # rotted population (25% deactivated, 31% dead 7d+) with a recency-free
     # label, so it prioritizes churned/bot patterns. Re-enable prioritize_
     # active only after the corpus re-seed + model retrain on a clean set.
-    players = get_corpus_players(session, active_only=True, limit=limit)
+    # Cadence-aware when enabled (stage 2, 2026-09-14): poll each player when
+    # THEIR window is due to fill rather than sweeping everyone at one rate.
+    # The FIFO sweep it replaces is not a bad default -- it returns a mean 18.5
+    # battles/poll because it harvests whole accumulated windows -- but it
+    # cannot help the 25.4% of polls that arrive after the window already
+    # overflowed, and those losses are permanent.
+    if CORPUS_CADENCE_SCHEDULING:
+        players = select_due_players(session, limit=limit)
+        if not players:
+            # Nobody due is a legitimate state once the corpus is sized to
+            # capacity, but right now it would mean the cadence data is missing
+            # or wrong -- so fall back rather than silently scraping nothing.
+            logger.warning("Cadence scheduling returned no players — "
+                           "falling back to FIFO sweep")
+            players = get_corpus_players(session, active_only=True, limit=limit)
+    else:
+        players = get_corpus_players(session, active_only=True, limit=limit)
     logger.info("Scraping battles for %d corpus players.", len(players))
 
     stats = {
@@ -590,7 +607,19 @@ async def scrape_corpus_combined(
     # ladder games roll out of the CR-API 25-window before we poll them, but
     # RoyaleAPI kept the replays). Each visit refreshes battles + grabs the
     # player's fresh RoyaleAPI replays; mark_player_scraped rotates them back.
-    players = get_corpus_players(session, active_only=True, limit=limit)
+    # Cadence-aware when enabled (stage 2). This is the path the every-minute
+    # cron actually takes, and it is the one the note above is about: sweeping
+    # at a single rate means a player's games roll out of the CR-API window
+    # before we reach them. Cadence scheduling is precisely the fix for that --
+    # poll each player when THEIR window is due to fill.
+    if CORPUS_CADENCE_SCHEDULING:
+        players = select_due_players(session, limit=limit)
+        if not players:
+            logger.warning("Cadence scheduling returned no players — "
+                           "falling back to FIFO sweep")
+            players = get_corpus_players(session, active_only=True, limit=limit)
+    else:
+        players = get_corpus_players(session, active_only=True, limit=limit)
     if not players:
         logger.info("No active corpus players.")
         return {
